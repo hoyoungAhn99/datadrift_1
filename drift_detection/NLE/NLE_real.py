@@ -7,6 +7,7 @@ import numpy as np
 from NLE import noise_lev_est
 
 #IMG_DIR = Path("D:/Datasets/tid2008/noisy/bmp")
+#IMG_DIR = Path("D:/Datasets/tid2008/noisy/jpg")
 IMG_DIR = Path("D:/Datasets/temp/1-xtumfdrpkgoqykstesco")
 PATCH_M1 = 7
 DELTA = 0.8
