@@ -8,12 +8,13 @@ from scipy.io import loadmat
 import math
 import os
 import glob
+import pandas as pd
 import h5py
 
-GAUS_DATA_PATH = Path("drift_detection/gaus_data.mat")
-IMG_DIR = Path("D:/Datasets/tid2008/reference_images")
+GAUS_DATA_PATH = Path("gaus_data.mat")
+IMG_DIR = Path("D:/Datasets/tid2013/reference_images")
 NUM_IMAGES = 25
-ADD_NOISE_SIGMA = 30.0
+ADD_NOISE_SIGMA = [5.0, 10.0, 15.0, 20.0, 25.0, 30.0]
 PATCH_M1 = 8
 DELTA = 0.8
 MAX_ITERS = 3
@@ -67,7 +68,6 @@ def gaus_from_table(m: float, path: str = GAUS_DATA_PATH) -> float:
     close = np.where(diff < 0.01)[0]
     if close.size > 0:
         idx = int(close[0])
-    # x = -10 + 0.001 * idx
     return -10.0 + 0.001 * idx
 
 def add_gaussian_noise_float(img_u8, sigma):
@@ -255,24 +255,32 @@ def main():
     if len(paths) < NUM_IMAGES:
         raise RuntimeError(f"Found {len(paths)} images, need {NUM_IMAGES}")
 
-    est_sigmas = []
+    image_names = [os.path.basename(p) for p in paths]
+    results_df = pd.DataFrame(index=ADD_NOISE_SIGMA, columns=image_names, dtype=np.float64)
     biases = []
-    for p in paths:
-        # true_sigma = np.random.uniform(0.0, ADD_NOISE_SIGMA)
-        true_sigma = ADD_NOISE_SIGMA
-        clean = np.array(Image.open(p).convert("RGB"), dtype=np.uint8)
-        noisy = add_gaussian_noise_float(clean, true_sigma)
-        noisy_img = noisy.clip(0, 255).astype(np.uint8)
-        noisy_img = Image.fromarray(noisy_img.astype(np.uint8))
-        noisy_img.save(f"{p}_{ADD_NOISE_SIGMA}_noisy.bmp")
-        nlevel, th, num = noise_lev_est(noisy, show=False, w=PATCH_M1, delta=DELTA, decim=DECIM, conf=1 - 1e-6, itr=MAX_ITERS)
-        est_sigma = nlevel.mean()
-        est_sigmas.append(est_sigma)
-        biases.append(np.abs(est_sigma - true_sigma))
-        print(f"{os.path.basename(p):20s}  σ={true_sigma:6.3f}  (σ̂={est_sigma:6.3f}; bias={np.abs(est_sigma - true_sigma):6.3f})")
-    est_sigmas = np.array(est_sigmas, dtype=np.float64)
+    for true_sigma in ADD_NOISE_SIGMA:
+        est_sigmas = []
+        for p in paths:
+            clean = np.array(Image.open(p).convert("RGB"), dtype=np.uint8)
+            noisy = add_gaussian_noise_float(clean, true_sigma)
+            noisy_img = noisy.clip(0, 255).astype(np.uint8)
+            noisy_img = Image.fromarray(noisy_img.astype(np.uint8))
+            nlevel, th, num = noise_lev_est(noisy, show=False, w=PATCH_M1, delta=DELTA, decim=DECIM, conf=1 - 1e-6, itr=MAX_ITERS)
+            est_sigma = nlevel.mean()
+            
+            image_name = os.path.basename(p)
+            results_df.loc[true_sigma, image_name] = est_sigma
+            est_sigmas.append(est_sigma)
+            print(f"{image_name:20s}  σ={true_sigma:6.3f}  (σ̂={est_sigma:6.3f})")
+        est_sigmas_mean = np.array(est_sigmas, dtype=np.float64).mean()
+        bias = np.abs(true_sigma - est_sigmas_mean)
+        biases.append(bias)
+        print(f"\n noise sigma={true_sigma:.4f} \n bias={bias:.4f}")
     biases = np.array(biases, dtype=np.float64)
-    print(f"\nbias={biases.mean():.4f}")
+    print(f"\n Average bias={biases.mean():.4f}")
+    results_df.index.name = "Added_Noise_Level"
+    results_df.to_csv("noise_estimation_results.csv")
+    print("\nResults saved to noise_estimation_results.csv")
 
 if __name__ == "__main__":
     main()
