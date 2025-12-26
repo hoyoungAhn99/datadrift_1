@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-def MS_loss_corrected(features, hi_labels, alpha=2.0, beta=50.0, lam=0.5):
+def MS_loss(features, hi_labels, alpha=2.0, beta=50.0, lam=0.5):
     batch_size = features.size(0)
     
     sim_mat = torch.matmul(features, features.t())
