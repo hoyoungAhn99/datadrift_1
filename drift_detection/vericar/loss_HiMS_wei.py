@@ -3,7 +3,6 @@ import torch.nn.functional as F
 
 
 def get_slice_distance_weights(slice_labels, scale=2.0, dist_pow=1.0):
-
     B, current_depth = slice_labels.size()
 
     matches = (slice_labels.unsqueeze(1) == slice_labels.unsqueeze(0)).float()
@@ -19,27 +18,45 @@ def get_slice_distance_weights(slice_labels, scale=2.0, dist_pow=1.0):
     return weights
 
 
-def ms_loss_level(sim_mat, labels, neg_weights, alpha=2.0, beta=50.0, lam=0.5):
-
+def ms_loss_level(sim_mat, labels, neg_weights, alpha=2.0, beta=50.0, lam=0.5, mining_margin=0.1):
     device = sim_mat.device
     batch_size = sim_mat.size(0)
     labels = labels.view(-1)
 
     loss_list = []
+    set_size_list = []
 
     for i in range(batch_size):
         label_i = labels[i]
 
-        # 현재 슬라이스 기준 Positive / Negative
         mask_pos = labels == label_i
         mask_neg = labels != label_i
 
-        mask_pos[i] = False  # 자기 자신 제외
+        mask_pos[i] = False
 
         pos_sim = sim_mat[i][mask_pos]
         neg_sim = sim_mat[i][mask_neg]
-
         current_neg_w = neg_weights[i][mask_neg]
+
+        if len(pos_sim) == 0 or len(neg_sim) == 0:
+            loss_list.append(torch.tensor(0.0, device=device))
+            set_size_list.append(torch.tensor(1.0, device=device))
+            continue
+
+        hardest_pos_sim = torch.min(pos_sim)
+        hardest_neg_sim = torch.max(neg_sim)
+
+        mining_idx_neg = (neg_sim + mining_margin) > hardest_pos_sim
+        neg_sim = neg_sim[mining_idx_neg]
+        current_neg_w = current_neg_w[mining_idx_neg]
+
+        mining_idx_pos = (pos_sim - mining_margin) < hardest_neg_sim
+        pos_sim = pos_sim[mining_idx_pos]
+
+        if len(pos_sim) == 0 and len(neg_sim) == 0:
+            loss_list.append(torch.tensor(0.0, device=device))
+            set_size_list.append(torch.tensor(1.0, device=device))
+            continue
 
         if len(pos_sim) > 0:
             pos_term = (
@@ -57,8 +74,10 @@ def ms_loss_level(sim_mat, labels, neg_weights, alpha=2.0, beta=50.0, lam=0.5):
             neg_term = torch.tensor(0.0, device=device)
 
         loss_list.append(pos_term + neg_term)
+        set_size = torch.tensor(len(pos_sim) + len(neg_sim), dtype=pos_sim.dtype, device=device)
+        set_size_list.append(set_size)
 
-    return torch.stack(loss_list)  # [B]
+    return torch.stack(loss_list), torch.stack(set_size_list)
 
 
 def HiMS_min_wei_loss(
@@ -71,14 +90,17 @@ def HiMS_min_wei_loss(
     lam=0.5,
     dist_scale=2.0,
     dist_pow=1.0,
+    mining_margin=0.1,
 ):
     sim_mat = torch.matmul(features, features.t())  # [B, B]
+    sim_mat = torch.clamp(sim_mat, min=-1.0 + 1e-6, max=1.0 - 1e-6)
 
     B = batch_size
     L = num_hi
     device = features.device
 
     level_losses = []
+    level_set_sizes = []
 
     for level in range(L):
         current_hierarchy_path = hi_labels[:, 0 : level + 1]
@@ -91,15 +113,17 @@ def HiMS_min_wei_loss(
             current_hierarchy_path, scale=dist_scale, dist_pow=dist_pow
         )
 
-        loss_l = ms_loss_level(
+        loss_l, set_size_l = ms_loss_level(
             sim_mat,
             labels_level,
             current_weights,
             alpha=alpha,
             beta=beta,
             lam=lam,
+            mining_margin=mining_margin,
         )
         level_losses.append(loss_l)
+        level_set_sizes.append(set_size_l)
 
     total_loss = 0.0
     L_float = float(L)
@@ -108,15 +132,17 @@ def HiMS_min_wei_loss(
     for rev_level in range(L - 1, -1, -1):
         l = rev_level
         base_loss_l = level_losses[l]
+        set_size_base_l = level_set_sizes[l]
 
         if cur_min is None:
             cur_loss = base_loss_l
         else:
             cur_loss = torch.min(base_loss_l, cur_min)
 
-        cur_min = cur_loss
-
+        cur_min = torch.min(cur_loss)
+        
         k_l = torch.exp(torch.tensor(1.0 / (l + 1.0), device=device))
-        total_loss = total_loss + (k_l * cur_loss.mean()) / L_float
+        level_loss = cur_loss / set_size_base_l
+        total_loss = total_loss + (k_l * level_loss.sum()) / L_float
 
     return total_loss

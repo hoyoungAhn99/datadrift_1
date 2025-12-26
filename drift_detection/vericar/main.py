@@ -7,6 +7,7 @@ from pathlib import Path
 from train import train_config
 from test import test_config
 from step1_cos import ood_detection_main
+from step1_mahalanobis import ood_detection_mahalanobis_main
 
 
 def train_test_ood(config):
@@ -39,7 +40,8 @@ def train_test_ood(config):
     fieldnames = [
         "ckpt_type", "ckpt_path", 
         "test_map", "test_prec1", 
-        "ood_auroc", "ood_fpr95", 
+        "ood_auroc_cos", "ood_fpr95_cos", 
+        "ood_auroc_mah", "ood_fpr95_mah",
         "combined_map", "combined_prec1", 
         "seen_map", "seen_prec1", 
         "unseen_map", "unseen_prec1"
@@ -56,13 +58,17 @@ def train_test_ood(config):
             
             ood_res = ood_detection_main(config, ckpt_path=ckpt_path)
             
+            mah_res = ood_detection_mahalanobis_main(config, ckpt_path=ckpt_path)
+            
             row = {
                 "ckpt_type": ckpt_type,
                 "ckpt_path": ckpt_path,
                 "test_map": test_res["map_r"],
                 "test_prec1": test_res["prec1"],
-                "ood_auroc": ood_res["auroc"],
-                "ood_fpr95": ood_res["fpr95"],
+                "ood_auroc_cos": ood_res["auroc"],
+                "ood_fpr95_cos": ood_res["fpr95"],
+                "ood_auroc_mah": mah_res["auroc"],
+                "ood_fpr95_mah": mah_res["fpr95"],
                 "combined_map": ood_res["combined_map"],
                 "combined_prec1": ood_res["combined_prec1"],
                 "seen_map": ood_res["seen_map"],
