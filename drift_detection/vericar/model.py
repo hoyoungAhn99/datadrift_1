@@ -281,3 +281,13 @@ class VehiInfoRet(pl.LightningModule):
             optimizer, T_max=self.trainer.max_epochs
         )
         return [optimizer], [scheduler]
+
+    def on_save_checkpoint(self, checkpoint):
+        if self.exemplar_features is not None:
+            checkpoint["exemplar_features"] = self.exemplar_features
+            checkpoint["exemplar_labels"] = self.exemplar_labels
+
+    def on_load_checkpoint(self, checkpoint):
+        if "exemplar_features" in checkpoint:
+            self.exemplar_features = checkpoint["exemplar_features"]
+            self.exemplar_labels = checkpoint["exemplar_labels"]

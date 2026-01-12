@@ -5,9 +5,11 @@ import glob
 import csv
 from pathlib import Path
 from train import train_config
-from test import test_config
+from test import test_config, build_exemplar_set
 from step1_cos import ood_detection_main
 from step1_mahalanobis import ood_detection_mahalanobis_main
+from dataloader2 import VehicleDataModule
+from model import VehiInfoRet
 
 
 def train_test_ood(config):
@@ -54,6 +56,35 @@ def train_test_ood(config):
         for ckpt_type, ckpt_path in target_ckpts.items():
             print(f"\nProcessing {ckpt_type}: {ckpt_path}")
             
+            # --- Exemplar Injection Logic ---
+            try:
+                ckpt_data = torch.load(ckpt_path, map_location="cpu")
+                if "exemplar_features" not in ckpt_data:
+                    print(f"Exemplars not found in {ckpt_path}. Extracting and injecting...")
+                    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                    
+                    model = VehiInfoRet.load_from_checkpoint(ckpt_path)
+                    model.to(device)
+                    
+                    dm = VehicleDataModule(
+                        data_root=config['data']['data_root'],
+                        batch_size=config['training']['batch_size'],
+                        num_workers=config['data']['num_workers'],
+                        flip_p=0.0,
+                    )
+                    dm.setup(stage='fit')
+                    
+                    build_exemplar_set(model, dm, device)
+                    
+                    ckpt_data["exemplar_features"] = model.exemplar_features.cpu()
+                    ckpt_data["exemplar_labels"] = model.exemplar_labels.cpu()
+                    
+                    torch.save(ckpt_data, ckpt_path)
+                    print(f"Exemplars injected into {ckpt_path}")
+            except Exception as e:
+                print(f"Warning: Failed to inject exemplars into {ckpt_path}. Error: {e}")
+            # --------------------------------
+
             test_res = test_config(config, ckpt_path=ckpt_path)
             
             ood_res = ood_detection_main(config, ckpt_path=ckpt_path)
