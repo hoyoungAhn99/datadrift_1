@@ -10,9 +10,6 @@ def get_tree_distance_matrix(hi_labels, num_hi):
     return tree_dist
 
 def weighted_ms_loss_mined(sim_mat, tree_dist, alpha=2.0, beta=50.0, lam=0.5, dist_scale=1.5, mining_margin=0.1):
-    """
-    Hard Mining이 추가된 Weighted Multi-Similarity Loss
-    """
     device = sim_mat.device
     batch_size = sim_mat.size(0)
     loss_list = []

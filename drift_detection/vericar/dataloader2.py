@@ -14,6 +14,7 @@ class VehicleDataset(Dataset):
         self,
         metadata,
         data_root,
+        view_to_idx,
         type_to_idx,
         make_to_idx,
         model_to_idx,
@@ -24,6 +25,7 @@ class VehicleDataset(Dataset):
         self.metadata = metadata
         self.data_root = Path(data_root)
 
+        self.view_to_idx = view_to_idx
         self.type_to_idx = type_to_idx
         self.make_to_idx = make_to_idx
         self.model_to_idx = model_to_idx
@@ -42,12 +44,14 @@ class VehicleDataset(Dataset):
         image = torch.load(pt_path)
         flipped_img = self.flipper(image)
         
+        view_str = item["view"]
         type_str = item["type"]
         make_str = item["make"]
         model_str = item["model"]
         year_str = item["year"]
         all_str = item["all_labels"]
 
+        view_label = self.view_to_idx[view_str]
         type_label = self.type_to_idx[type_str]
         make_label = self.make_to_idx[make_str]
         model_label = self.model_to_idx[model_str]
@@ -55,7 +59,7 @@ class VehicleDataset(Dataset):
         all_label = self.all_labels_to_idx[all_str]
 
         hi_labels = torch.tensor(
-            [type_label, make_label, model_label, year_label], dtype=torch.long
+            [view_label, type_label, make_label, model_label, year_label], dtype=torch.long
         )
 
         return flipped_img, all_label, hi_labels
@@ -82,6 +86,7 @@ class VehicleDataModule(pl.LightningDataModule):
             self.val_meta = cache_data["val_meta"]
             self.test_meta = cache_data["test_meta"]
             
+            self.view_to_idx = cache_data["view_to_idx"]
             self.type_to_idx = cache_data["type_to_idx"]
             self.make_to_idx = cache_data["make_to_idx"]
             self.model_to_idx = cache_data["model_to_idx"]
@@ -94,6 +99,7 @@ class VehicleDataModule(pl.LightningDataModule):
             self.val_meta = []
             self.test_meta = []
             
+            view_labels = set()
             type_labels = set()
             make_labels = set()
             model_labels = set()
@@ -115,16 +121,18 @@ class VehicleDataModule(pl.LightningDataModule):
                             data = json.load(f)
 
                         attrs = data["car"]["attributes"]
+                        car_view = attrs["view"]
                         car_type = attrs["type"]
                         make = attrs["brand"]
                         model = attrs["model"]
                         year = attrs["year"]
 
+                        view_labels.add(car_view)
                         type_labels.add(car_type)
                         make_labels.add(make)
                         model_labels.add(model)
                         year_labels.add(year)
-                        all_labels.add(f"{car_type}-{make}-{model}-{year}")
+                        all_labels.add(f"{car_view}-{car_type}-{make}-{model}-{year}")
 
                         rel_path = Path(json_path).relative_to(split_label_dir)
                         image_rel_path = Path(split) / "images" / rel_path.with_suffix(".pt")
@@ -132,7 +140,8 @@ class VehicleDataModule(pl.LightningDataModule):
                         meta_dict[split].append(
                             {
                                 "image_path": str(image_rel_path),
-                                "all_labels": f"{car_type}-{make}-{model}-{year}",
+                                "all_labels": f"{car_view}-{car_type}-{make}-{model}-{year}",
+                                "view": car_view,
                                 "type": car_type,
                                 "make": make,
                                 "model": model,
@@ -142,6 +151,7 @@ class VehicleDataModule(pl.LightningDataModule):
                     except (KeyError, json.JSONDecodeError) as e:
                         print(f"Warning: Skipping file {json_path} due to error: {e}")
 
+            self.view_to_idx = {l: i for i, l in enumerate(sorted(view_labels))}
             self.type_to_idx = {l: i for i, l in enumerate(sorted(type_labels))}
             self.make_to_idx = {l: i for i, l in enumerate(sorted(make_labels))}
             self.model_to_idx = {l: i for i, l in enumerate(sorted(model_labels))}
@@ -154,6 +164,7 @@ class VehicleDataModule(pl.LightningDataModule):
                     "train_meta": self.train_meta,
                     "val_meta": self.val_meta,
                     "test_meta": self.test_meta,
+                    "view_to_idx": self.view_to_idx,
                     "type_to_idx": self.type_to_idx,
                     "make_to_idx": self.make_to_idx,
                     "model_to_idx": self.model_to_idx,
@@ -163,17 +174,17 @@ class VehicleDataModule(pl.LightningDataModule):
 
         if stage == "fit" or stage is None:
             self.train_dataset = VehicleDataset(
-                self.train_meta, self.data_root, self.type_to_idx, self.make_to_idx,
+                self.train_meta, self.data_root, self.view_to_idx, self.type_to_idx, self.make_to_idx,
                 self.model_to_idx, self.year_to_idx, self.all_labels_to_idx, flip_p=self.flip_p
             )
             self.val_dataset = VehicleDataset(
-                self.val_meta, self.data_root, self.type_to_idx, self.make_to_idx,
+                self.val_meta, self.data_root, self.view_to_idx, self.type_to_idx, self.make_to_idx,
                 self.model_to_idx, self.year_to_idx, self.all_labels_to_idx, flip_p=0.0
             )
 
         if stage == "test" or stage is None:
             self.test_dataset = VehicleDataset(
-                self.test_meta, self.data_root, self.type_to_idx, self.make_to_idx,
+                self.test_meta, self.data_root, self.view_to_idx, self.type_to_idx, self.make_to_idx,
                 self.model_to_idx, self.year_to_idx, self.all_labels_to_idx, flip_p=0.0
             )
 
