@@ -135,10 +135,10 @@ class ViewpointClassifier(LightningModule):
 
 
 if __name__ == "__main__":
-    data_root = r"F:\view"
+    data_root = r"E:\viewpoint"
     
-    dm = ViewpointDataModule(data_root=data_root, batch_size=32, num_workers=4)
-    model = ViewpointClassifier(lr=1e-4)
+    dm = ViewpointDataModule(data_root=data_root, batch_size=64, num_workers=4)
+    model = ViewpointClassifier(lr=1e-5)
 
     trainer = pl.Trainer(
         max_epochs=10,

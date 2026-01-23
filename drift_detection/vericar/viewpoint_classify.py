@@ -37,7 +37,7 @@ class InferenceDataset(Dataset):
 
 
 def main():
-    source_dir = Path(r"D:\Datasets\Vehicle\자동차 차종-연식-번호판 인식용 영상\Train\images")
+    source_dir = Path(r"E:\viewpoint\used")
     dest_root = Path(r"E:\viewpoint")
     ckpt_dir = Path(r"lightning_logs\version_0\checkpoints")
 
