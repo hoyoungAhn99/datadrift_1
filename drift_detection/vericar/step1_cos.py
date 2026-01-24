@@ -97,7 +97,7 @@ def sample_exemplars(features, labels, exemplar_k):
         class_mean = class_features.mean(dim=0, keepdim=True)
         class_mean = F.normalize(class_mean, p=2, dim=1)
         
-        sims = torch.matmul(class_features, class_mean.t()).squeeze()
+        sims = torch.matmul(class_features, class_mean.t()).squeeze(1)
         
         k = min(len(indices), exemplar_k)
         _, topk_indices = torch.topk(sims, k=k, largest=True)
