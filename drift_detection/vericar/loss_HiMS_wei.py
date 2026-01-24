@@ -143,6 +143,6 @@ def HiMS_min_wei_loss(
         
         k_l = torch.exp(torch.tensor(1.0 / (l + 1.0), device=device))
         level_loss = cur_loss # / set_size_base_l
-        total_loss = total_loss + (k_l * level_loss.sum()) / L_float
+        total_loss = total_loss + (k_l * level_loss.mean()) / L_float
 
     return total_loss
