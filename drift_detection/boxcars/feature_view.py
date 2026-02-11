@@ -47,7 +47,8 @@ def _parse_label_file(path: Path) -> str:
 def _build_label_index(labels_dir: Path) -> tuple[dict, dict]:
     index: dict = {}
     preview_index: dict = {}
-    for label_path in labels_dir.rglob("*"):
+    label_paths = [p for p in labels_dir.rglob("*")]
+    for label_path in tqdm(label_paths, desc="Indexing labels"):
         if label_path.suffix.lower() not in {".json", ".txt"}:
             continue
         label = _parse_label_file(label_path)
@@ -237,7 +238,9 @@ def _tsne_3d(features: np.ndarray, seed: int = 123) -> np.ndarray:
         init="pca",
         random_state=seed,
         learning_rate="auto",
+        early_exaggeration=50.0,
     )
+    print("Running t-SNE (this can take a while)...")
     return tsne.fit_transform(features)
 
 
@@ -409,7 +412,8 @@ def _find_preview_path(preview_dir: Path, stem: str) -> str:
 
 def _build_image_index(images_root: Path) -> dict:
     index: dict = {}
-    for path in images_root.rglob("*"):
+    image_paths = [p for p in images_root.rglob("*")]
+    for path in tqdm(image_paths, desc="Indexing images"):
         if path.suffix.lower() not in IMAGE_EXTS:
             continue
         index.setdefault(path.stem, str(path))
@@ -426,7 +430,7 @@ def main():
     parser.add_argument(
         "--data_path",
         type=Path,
-        default=Path(r"F:\IPIU2026\dataset_final\step0\test"),
+        default=Path(r"F:\IPIU2026\dataset_final\step0\train"),
     )
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--max_samples", type=int, default=0)
@@ -547,7 +551,7 @@ def main():
         preview_paths = []
         if args.preview_images_dir is not None:
             image_index = _build_image_index(args.preview_images_dir)
-            for path, _ in items:
+            for path, _ in tqdm(items, desc="Matching previews"):
                 preview = image_index.get(path.stem, "")
                 if not preview and preview_index:
                     rel = preview_index.get(path.stem, "")
@@ -556,7 +560,7 @@ def main():
                 preview_paths.append(preview)
         elif preview_index:
             base_dir = args.preview_base_dir or args.data_path
-            for path, _ in items:
+            for path, _ in tqdm(items, desc="Matching previews"):
                 rel = preview_index.get(path.stem, "")
                 if rel:
                     candidate = (base_dir / rel).resolve()
