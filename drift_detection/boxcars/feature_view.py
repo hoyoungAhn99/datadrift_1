@@ -245,6 +245,7 @@ def _write_html(
     coords: np.ndarray,
     labels: List[str],
     img_paths: List[str],
+    img_names: List[str],
     output_html: Path,
     use_thumbnails: bool,
 ):
@@ -345,6 +346,7 @@ def _write_html(
       const y = {json.dumps(y)};
       const z = {json.dumps(z)};
       const labels = {json.dumps(labels)};
+      const imgNames = {json.dumps(img_names)};
       const colors = {json.dumps(colors)};
       const imgSources = {json.dumps(img_sources)};
 
@@ -358,8 +360,9 @@ def _write_html(
           opacity: 0.85
         }},
         text: labels,
+        hovertext: imgNames,
         customdata: imgSources,
-        hovertemplate: "%{{text}}<extra></extra>"
+        hovertemplate: "Class: %{{text}}<br>Image: %{{hovertext}}<extra></extra>"
       }};
 
       const layout = {{
@@ -418,7 +421,7 @@ def main():
     parser.add_argument(
         "--ckpt_path",
         type=Path,
-        default=Path(r"F:\IPIU2026\logs\mining\vericar_experiment_seed1234\version_0-MS\checkpoints\best-loss-epoch=62-val_loss=1.6127.ckpt"),
+        default=Path(r"F:\IPIU2026\logs\mining\vericar_experiment_seed1234\version_1-HiMSwei\checkpoints\best-loss-epoch=53-val_loss=0.6140.ckpt"),
     )
     parser.add_argument(
         "--data_path",
@@ -430,6 +433,12 @@ def main():
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument(
         "--output_html", type=Path, default=Path("tsne_feature_view.html")
+    )
+    parser.add_argument(
+        "--features_cache",
+        type=Path,
+        default=Path("cached_features.pt"),
+        help="Path to cached features (.pt). If exists, skip extraction.",
     )
     parser.add_argument(
         "--preview_images_dir",
@@ -496,15 +505,31 @@ def main():
         items = items[: args.max_samples]
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    features, labels, img_paths = _extract_features(
-        model,
-        items,
-        args.batch_size,
-        device,
-        preview_from_tensor=args.preview_from_tensor,
-        preview_mean=args.preview_mean,
-        preview_std=args.preview_std,
-    )
+    if args.features_cache.exists():
+        cached = torch.load(args.features_cache, map_location="cpu")
+        features = cached["features"]
+        if isinstance(features, torch.Tensor):
+            features = features.numpy()
+        labels = cached.get("labels", [])
+        cached_stems = cached.get("stems", [])
+        if cached_stems:
+            items = [(Path(stem), "unknown") for stem in cached_stems]
+        img_paths = cached.get("img_paths", [])
+    else:
+        features, labels, img_paths = _extract_features(
+            model,
+            items,
+            args.batch_size,
+            device,
+            preview_from_tensor=args.preview_from_tensor,
+            preview_mean=args.preview_mean,
+            preview_std=args.preview_std,
+        )
+        stems = [p.stem for p, _ in items]
+        torch.save(
+            {"features": torch.from_numpy(features), "labels": labels, "stems": stems},
+            args.features_cache,
+        )
     coords = _tsne_3d(features, seed=args.seed)
 
     preview_from_tensor = args.preview_from_tensor
@@ -544,7 +569,15 @@ def main():
         else:
             preview_paths = [""] * len(items)
 
-    _write_html(coords, labels, preview_paths, args.output_html, args.use_thumbnails)
+    img_names = [Path(p).name for p, _ in items]
+    _write_html(
+        coords,
+        labels,
+        preview_paths,
+        img_names,
+        args.output_html,
+        args.use_thumbnails,
+    )
     print(f"Wrote: {args.output_html}")
 
 
