@@ -78,8 +78,8 @@ def test_ood(config, log_dir):
 
 if __name__ == '__main__':
 
-    log_dir = "./lightning_logs/vericar_experiment_seed2025"
-    config_path = "./configs/config_HiMS.yaml"
+    log_dir = r"F:\IPIU2026\logs\mining\vericar_experiment_seed1234\version_1-HiMSwei\checkpoints"
+    config_path = r"./configs/config_HiMSwei.yaml"
     with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 

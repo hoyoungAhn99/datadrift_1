@@ -112,13 +112,13 @@ def sample_exemplars(features, labels, exemplar_k):
 def ood_detection_main(config, ckpt_path=None):
     pl.seed_everything(config.get('seed', 42), workers=True)
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     
     if ckpt_path is None:
         ckpt_path = config['step1']['ckpt_path']
         
-    print(f"Loading checkpoint from: {ckpt_path}")
-    model = VehiInfoRet.load_from_checkpoint(ckpt_path)
+    print(f"Loading checkpoint from: {ckpt_path} (map_location={device})")
+    model = VehiInfoRet.load_from_checkpoint(ckpt_path, map_location=device)
     model.to(device)
     model.eval()
 

@@ -66,14 +66,14 @@ def test_config(config, ckpt_path=None):
     if ckpt_path is None:
         ckpt_path = config['test']['ckpt_path']
         
-    print(f"Loading model from checkpoint: {ckpt_path}")
-    model = VehiInfoRet.load_from_checkpoint(ckpt_path)
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    print(f"Loading model from checkpoint: {ckpt_path} (map_location={device})")
+    model = VehiInfoRet.load_from_checkpoint(ckpt_path, map_location=device)
 
     new_exemplar_k = config['training'].get('exemplar_k', 15)
     print(f"Overwriting exemplar_k: from {model.exemplar_k} (in ckpt) to {new_exemplar_k} (in config.yaml)")
     model.exemplar_k = new_exemplar_k
     
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     model.eval()
 

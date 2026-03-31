@@ -1,7 +1,7 @@
-seed: 42
+seed: 1234
 
 data:
-  data_root: "C:/vehicle/step0"
+  data_root: "F:/IPIU2026/dataset_final/step0"
   num_workers: 4
   flip_p: 0.5
 
@@ -21,8 +21,8 @@ training:
 
 logging:
   log_dir: "./lightning_logs"
-  exp_name: "vericar_experiment_seed42"
+  exp_name: "vericar_experiment_seed1234"
 
 test:
-  data_root: "C:/vehicle/step1"
+  data_root: "F:/IPIU2026/dataset_final/step1"
   ood_k: 1

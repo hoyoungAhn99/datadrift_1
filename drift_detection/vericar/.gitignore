@@ -5,3 +5,4 @@
 *.pt
 /checkpoints_step1
 /__pycache__
+\.vscode
