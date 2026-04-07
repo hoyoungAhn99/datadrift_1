@@ -15,6 +15,7 @@ from lib.utils.hierarchy_utils import get_multidepth_classes, get_multidepth_tar
 import torchvision.models as models
 from torchvision.models import ResNet50_Weights
 
+# Device
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 parser = argparse.ArgumentParser()
