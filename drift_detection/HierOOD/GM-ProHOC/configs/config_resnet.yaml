@@ -1,0 +1,15 @@
+feat:
+  dim: 256
+  normalize: True
+  model: "resnet50"
+  freeze_backbone: False
+  resnet:
+    weights: "imagenet"
+  CLIP:
+    model_name: "openai/clip-vit-base-patch32"
+
+train:
+  epoch: 90
+  batch_size: 32
+  num_workers: 4
+  lr: 0.0001
