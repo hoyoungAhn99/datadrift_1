@@ -31,6 +31,15 @@ parser.add_argument("--include_train", type=bool, default=False)
 parser.add_argument("--extraood", type=str, default=None)
 parser.add_argument("--id_split", type=str, required=True)
 
+
+class TargetTransform:
+    def __init__(self, target_transform):
+        self.target_transform = target_transform
+
+    def __call__(self, target):
+        return self.target_transform[target]
+
+
 def main(args):
 
     batch_size = args.batch_size
@@ -62,9 +71,9 @@ def main(args):
     target_transform = get_multidepth_target_transform(train_ds.classes, multi_classes, height, hierarchy)
     
     num_id_classes = len(multi_classes[-(height + 1)])
-
-    train_ds.target_transform = lambda x: target_transform[x]
-    val_ds.target_transform = lambda x: target_transform[x]    
+    target_transform_fn = TargetTransform(target_transform)
+    train_ds.target_transform = target_transform_fn
+    val_ds.target_transform = target_transform_fn    
 
     trainloader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=False, num_workers=16)
