@@ -87,7 +87,7 @@ density:
   save_debug_statistics: false          # choices: true, false
 
 inference:
-  score_type: mahalanobis               # choices: gaussian_loglik, raw_gaussian, mahalanobis
+  score_type: gaussian_loglik               # choices: gaussian_loglik, raw_gaussian, mahalanobis
   temperature: 1.0                      # choices: any positive float
   alpha: 1.0                            # choices: any float
   beta: 1.0                             # choices: any float
