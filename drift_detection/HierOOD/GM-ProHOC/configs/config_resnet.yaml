@@ -1,15 +1,15 @@
 feat:
-  dim: 256
-  normalize: True
-  model: "resnet50"
-  freeze_backbone: False
+  dim: 256                              # choices: any positive int
+  normalize: True                       # choices: True, False
+  model: "resnet50"                     # choices: resnet50, clip
+  freeze_backbone: False                # choices: True, False
   resnet:
-    weights: "imagenet"
+    weights: "imagenet"                 # choices: imagenet, null
   CLIP:
-    model_name: "openai/clip-vit-base-patch32"
+    model_name: "openai/clip-vit-base-patch32"  # choices: any CLIP vision model name
 
 train:
-  epoch: 90
-  batch_size: 32
-  num_workers: 4
-  lr: 0.0001
+  epoch: 90                             # choices: any positive int
+  batch_size: 32                        # choices: any positive int
+  num_workers: 4                        # choices: any nonnegative int
+  lr: 0.0001                            # choices: any positive float

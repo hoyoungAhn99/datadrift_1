@@ -1,3 +1,5 @@
 /mds
 /ref_papers
 /__pycache__
+/ckpts
+/outputs
