@@ -12,7 +12,7 @@ runtime:
 
 dataset:
   name: fgvc-aircraft                   # choices: any dataset alias string
-  datadir: ./dataset/fgvc-aircraft      # choices: dataset root path
+  datadir: D:/HY_Data/HierOOD/fgvc-aircraft      # choices: dataset root path
   hierarchy: ./hierarchies/fgvc-aircraft.json  # choices: hierarchy json path
   id_split: ./data/fgvc-aircraft-id-labels.csv # choices: id split csv path
   extraood: null                        # choices: null or custom split name/path
