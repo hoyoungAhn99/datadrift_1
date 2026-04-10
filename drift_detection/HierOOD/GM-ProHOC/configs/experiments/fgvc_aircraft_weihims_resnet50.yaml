@@ -25,7 +25,7 @@ hierarchy:
 dataloader:
   batch_size: 128                       # choices: any positive int
   eval_batch_size: 64                   # choices: any positive int
-  num_workers: 4                        # choices: any nonnegative int
+  num_workers: 8                        # choices: any nonnegative int
   shuffle_train: true                   # choices: true, false
   pin_memory: false                     # choices: true, false
   drop_last: false                      # choices: true, false
@@ -87,7 +87,7 @@ density:
   save_debug_statistics: false          # choices: true, false
 
 inference:
-  score_type: gaussian_loglik               # choices: gaussian_loglik, raw_gaussian, mahalanobis
+  score_type: mahalanobis               # choices: gaussian_loglik, raw_gaussian, mahalanobis
   temperature: 1.0                      # choices: any positive float
   alpha: 1.0                            # choices: any float
   beta: 1.0                             # choices: any float
