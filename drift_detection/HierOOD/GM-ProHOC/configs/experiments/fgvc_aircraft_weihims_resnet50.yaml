@@ -23,7 +23,7 @@ hierarchy:
   save_path_metadata: true              # choices: true, false
 
 dataloader:
-  batch_size: 512                       # choices: any positive int
+  batch_size: 128                       # choices: any positive int
   eval_batch_size: 64                   # choices: any positive int
   num_workers: 4                        # choices: any nonnegative int
   shuffle_train: true                   # choices: true, false
