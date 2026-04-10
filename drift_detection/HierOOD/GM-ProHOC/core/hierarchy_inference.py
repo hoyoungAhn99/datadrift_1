@@ -27,7 +27,6 @@ def compute_depth_probs(node_scores: torch.Tensor, nodes_by_depth: dict[int, lis
 def _local_probabilities_for_node(
     parent_name: str,
     hierarchy,
-    node_scores: torch.Tensor,
     depth_probs: dict[int, torch.Tensor],
     nodes_by_depth: dict[int, list[int]],
     alpha: float,
@@ -38,7 +37,6 @@ def _local_probabilities_for_node(
         return None
 
     child_indices = [hierarchy.id_node_list.index(child) for child in children]
-    child_scores = node_scores[:, child_indices]
     child_depth = len(hierarchy.node_ancestors[children[0]])
     depth_indices = nodes_by_depth[child_depth]
     depth_index_map = {node_idx: pos for pos, node_idx in enumerate(depth_indices)}
@@ -50,14 +48,20 @@ def _local_probabilities_for_node(
     p_comp = torch.clamp(p_comp, min=0.0)
     eps = 1e-12
     entropy = -torch.sum(child_depth_probs * torch.log(child_depth_probs + eps), dim=1)
-    ood_score = alpha * p_comp + beta * entropy
-    logits = torch.cat([child_scores, ood_score.unsqueeze(1)], dim=1)
-    local_probs = torch.softmax(logits, dim=1)
+    ood_mass = alpha * p_comp + beta * entropy
+    ood_mass = torch.clamp(ood_mass, min=0.0)
+
+    # Stay in probability space: use depth-wise child probabilities and
+    # the derived OOD mass, then renormalize locally within siblings.
+    local_mass = torch.cat([child_depth_probs, ood_mass.unsqueeze(1)], dim=1)
+    local_normalizer = local_mass.sum(dim=1, keepdim=True).clamp_min(eps)
+    local_probs = local_mass / local_normalizer
     return {
         "child_indices": child_indices,
+        "child_depth_probs": child_depth_probs,
         "child_probs": local_probs[:, :-1],
         "ood_prob": local_probs[:, -1],
-        "ood_score": ood_score,
+        "ood_score": ood_mass,
         "p_comp": p_comp,
         "entropy": entropy,
     }
@@ -91,7 +95,6 @@ def hierarchical_node_probabilities(
         local = _local_probabilities_for_node(
             parent,
             hierarchy,
-            node_scores,
             depth_probs,
             nodes_by_depth,
             alpha,
@@ -122,6 +125,9 @@ def hierarchical_node_probabilities(
         "local_info": {
             name: {
                 "child_indices": payload["child_indices"],
+                "child_depth_probs": payload["child_depth_probs"].cpu(),
+                "child_probs": payload["child_probs"].cpu(),
+                "ood_prob": payload["ood_prob"].cpu(),
                 "ood_score": payload["ood_score"].cpu(),
                 "p_comp": payload["p_comp"].cpu(),
                 "entropy": payload["entropy"].cpu(),
