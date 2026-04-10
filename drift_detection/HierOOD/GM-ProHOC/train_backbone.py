@@ -62,12 +62,12 @@ def build_scheduler(optimizer, config):
     raise ValueError(f"Unsupported scheduler: {sched_cfg.get('name')}")
 
 
-def evaluate_loss(model, loader, loss_fn, leaf_path_matrix, device):
+def evaluate_loss(model, loader, loss_fn, leaf_path_matrix, device, desc="Val loss"):
     model.eval()
     total_loss = 0.0
     steps = 0
     with torch.no_grad():
-        for inputs, targets in loader:
+        for inputs, targets in tqdm(loader, desc=desc):
             inputs = inputs.to(device)
             targets = targets.to(device)
             features = model(inputs)
@@ -78,12 +78,12 @@ def evaluate_loss(model, loader, loss_fn, leaf_path_matrix, device):
     return total_loss / max(steps, 1)
 
 
-def collect_features_and_targets(model, loader, device):
+def collect_features_and_targets(model, loader, device, desc):
     model.eval()
     features = []
     targets = []
     with torch.no_grad():
-        for inputs, batch_targets in loader:
+        for inputs, batch_targets in tqdm(loader, desc=desc):
             inputs = inputs.to(device)
             feats = model(inputs)
             features.append(feats.detach().cpu())
@@ -103,8 +103,12 @@ def compute_depthwise_accuracy(
     temperature,
     device,
 ):
-    train_features, train_targets = collect_features_and_targets(model, train_loader, device)
-    val_features, val_targets = collect_features_and_targets(model, val_loader, device)
+    train_features, train_targets = collect_features_and_targets(
+        model, train_loader, device, desc="Depth eval train features"
+    )
+    val_features, val_targets = collect_features_and_targets(
+        model, val_loader, device, desc="Depth eval val features"
+    )
 
     density = fit_diagonal_gaussians(
         train_features.float(),
@@ -269,7 +273,14 @@ def main():
             steps += 1
 
         train_loss = running_loss / max(steps, 1)
-        val_loss = evaluate_loss(model, val_loader, loss_fn, leaf_path_matrix, device)
+        val_loss = evaluate_loss(
+            model,
+            val_loader,
+            loss_fn,
+            leaf_path_matrix,
+            device,
+            desc=f"Val loss {epoch+1}/{epochs}",
+        )
         history["train_loss"].append(train_loss)
         history["val_loss"].append(val_loss)
 
