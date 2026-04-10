@@ -1,5 +1,5 @@
 experiment:
-  name: fgvc-aircraft-weihims-resnet50  # choices: any experiment tag string
+  name: fgvc-aircraft-weihims-clip      # choices: any experiment tag string
   seed: 42                              # choices: any int
   device: cuda                          # choices: cuda, cpu
   output_root: ./outputs                # choices: any writable directory
@@ -31,7 +31,7 @@ dataloader:
   drop_last: false                      # choices: true, false
 
 backbone:
-  type: resnet50                        # choices: resnet50, clip
+  type: clip                            # choices: resnet50, clip
   feat_dim: 256                         # choices: any positive int
   normalize: true                       # choices: true, false
   freeze_backbone: false                # choices: true, false
