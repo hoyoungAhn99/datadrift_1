@@ -1,0 +1,93 @@
+experiment:
+  name: fgvc-aircraft-weihims-resnet50
+  seed: 123456
+  device: cpu
+  output_root: ./outputs
+  save_every: 1
+  log_every: 50
+
+dataset:
+  name: fgvc-aircraft
+  datadir: ./dataset/fgvc-aircraft
+  hierarchy: ./hierarchies/fgvc-aircraft.json
+  id_split: ./data/fgvc-aircraft-id-labels.csv
+  extraood: null
+  farood_sets: []
+
+hierarchy:
+  use_pruned_for_loss_labels: true
+  save_path_metadata: true
+
+dataloader:
+  batch_size: 32
+  eval_batch_size: 64
+  num_workers: 4
+  shuffle_train: true
+  pin_memory: false
+  drop_last: false
+
+backbone:
+  type: resnet50
+  feat_dim: 256
+  normalize: true
+  freeze_backbone: false
+  weights: IMAGENET1K_V1
+
+optimizer:
+  name: adamw
+  lr: 0.0001
+  weight_decay: 0.0001
+  momentum: 0.9
+  nesterov: false
+
+scheduler:
+  name: cosine
+  epochs: 90
+  warmup_epochs: 0
+  eta_min: 0.0
+
+loss:
+  name: weihims
+  alpha: 2.0
+  beta: 50.0
+  lam: 0.5
+  mining_margin: 0.1
+  dist_scale: 2.0
+  dist_pow: 1.0
+
+training:
+  epochs: 90
+  grad_clip_norm: null
+  amp: false
+  checkpoint_metric: val_loss
+  checkpoint_mode: min
+  resume_from: null
+
+feature_extraction:
+  include_train: true
+  save_train: true
+  save_val: true
+  save_ood: true
+  save_farood: true
+  save_leaf_path_matrix: true
+  save_index_mappings: true
+
+density:
+  covariance_type: diag
+  eps: 1.0e-6
+  min_count_warning: 1
+  save_debug_statistics: false
+
+inference:
+  score_type: gaussian_loglik
+  temperature: 1.0
+  alpha: 1.0
+  beta: 1.0
+  prediction_mode: argmax
+  collapse_ood_to_parent: true
+
+logging:
+  use_tensorboard: false
+  save_train_metrics: true
+  save_val_metrics: true
+  save_config_copy: true

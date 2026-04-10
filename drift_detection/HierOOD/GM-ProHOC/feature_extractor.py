@@ -1,10 +1,18 @@
 from typing import Optional, Union
 
 import torch
-import pytorch_lightning as pl
 import torch.nn as nn
 import torchvision.models as models
-from transformers import CLIPVisionModelWithProjection
+
+try:
+    import pytorch_lightning as pl
+except ImportError:  # pragma: no cover - optional dependency
+    pl = None
+
+try:
+    from transformers import CLIPVisionModelWithProjection
+except ImportError:  # pragma: no cover - optional dependency
+    CLIPVisionModelWithProjection = None
 
 
 class ResNet50(nn.Module):
@@ -50,6 +58,11 @@ class CLIPImageEncoder(nn.Module):
     ):
         super().__init__()
 
+        if CLIPVisionModelWithProjection is None:
+            raise ImportError(
+                "transformers is required for CLIPImageEncoder but is not installed."
+            )
+
         self.backbone = CLIPVisionModelWithProjection.from_pretrained(model_name)
         in_features = self.backbone.visual_projection.out_features
 
@@ -68,29 +81,29 @@ class CLIPImageEncoder(nn.Module):
         return features
 
 
-class FeatExtractor(pl.LightningModule):
-    def __init__(
-        self,
-        backbone: nn.Module,
-        lr: float = 1e-4,
-        weight_decay: float = 1e-4,
-    ):
-        super().__init__()
-        self.backbone = backbone
-        self.lr = lr
-        self.weight_decay = weight_decay
+if pl is not None:
+    class FeatExtractor(pl.LightningModule):
+        def __init__(
+            self,
+            backbone: nn.Module,
+            lr: float = 1e-4,
+            weight_decay: float = 1e-4,
+        ):
+            super().__init__()
+            self.backbone = backbone
+            self.lr = lr
+            self.weight_decay = weight_decay
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.backbone(x)
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.backbone(x)
 
-    def training_step(self, batch, batch_idx):
-        x, y = batch
-        features = self(x)
-        # Loss implementation would go here depending on the training objective
-        return features
+        def training_step(self, batch, batch_idx):
+            x, y = batch
+            features = self(x)
+            return features
 
-    def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(
-            self.parameters(), lr=self.lr, weight_decay=self.weight_decay
-        )
-        return optimizer
+        def configure_optimizers(self):
+            optimizer = torch.optim.AdamW(
+                self.parameters(), lr=self.lr, weight_decay=self.weight_decay
+            )
+            return optimizer

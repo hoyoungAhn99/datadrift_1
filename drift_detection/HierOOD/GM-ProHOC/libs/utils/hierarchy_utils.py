@@ -1,6 +1,6 @@
 import torch
 import itertools
-from lib.hierarchy_metrics import calc_hdists
+from libs.hierarchy_metrics import calc_hdists
 from collections import defaultdict
 import json
 

@@ -60,21 +60,21 @@ def ms_loss_level(sim_mat, labels, alpha=2.0, beta=50.0, lam=0.5, mining_margin=
 
 
 def HiMS_min_loss(
-    features, hi_labels, batch_size, num_hi, alpha=2.0, beta=50.0, lam=0.5, mining_margin=0.1
+    features, path_labels, alpha=2.0, beta=50.0, lam=0.5, mining_margin=0.1
 ):
     sim_mat = torch.matmul(features, features.t())
     
     sim_mat = torch.clamp(sim_mat, min=-1.0 + 1e-6, max=1.0 - 1e-6)
 
-    B = batch_size
-    L = num_hi
+    B = path_labels.size(0)
+    L = path_labels.size(1)
     device = features.device
 
     level_losses = []
     level_set_sizes = []
 
     for level in range(L):
-        current_hierarchy_path = hi_labels[:, 0 : level + 1]
+        current_hierarchy_path = path_labels[:, 0 : level + 1]
 
         _, labels_level = torch.unique(
             current_hierarchy_path, dim=0, return_inverse=True
@@ -92,7 +92,6 @@ def HiMS_min_loss(
     for rev_level in range(L - 1, -1, -1):
         l = rev_level
         base_loss_l = level_losses[l]
-        set_size_base_l = level_set_sizes[l]
 
         if cur_min is None:
             cur_loss = base_loss_l
