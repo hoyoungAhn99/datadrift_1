@@ -13,3 +13,7 @@ train:
   batch_size: 32                        # choices: any positive int
   num_workers: 4                        # choices: any nonnegative int
   lr: 0.0001                            # choices: any positive float
+
+runtime:
+  multi_gpu: False                      # choices: True, False
+  device_ids: null                      # choices: null or list[int]

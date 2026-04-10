@@ -10,7 +10,12 @@ from tqdm import tqdm
 from core.config import load_config, save_config
 from core.feature_io import save_artifact
 from core.hierarchy_labels import build_leaf_path_matrix
-from core.model_factory import backbone_summary, build_backbone
+from core.model_factory import (
+    backbone_summary,
+    build_backbone,
+    load_backbone_checkpoint,
+    maybe_wrap_dataparallel,
+)
 from libs.hierarchy import Hierarchy
 from libs.utils.dataset_util import gen_custom_dataset, gen_datasets, get_id_classes
 
@@ -57,7 +62,8 @@ def main():
     train_ds, val_ds, ood_ds = gen_datasets(dataset_cfg["datadir"], id_classes, hierarchy.ood_train_classes)
 
     model = build_backbone(config).to(device)
-    model.load_state_dict(torch.load(experiment_dir / "checkpoint_backbone.pt", map_location=device))
+    load_backbone_checkpoint(model, experiment_dir / "checkpoint_backbone.pt", map_location=device)
+    model = maybe_wrap_dataparallel(model, config)
     model.eval()
 
     batch_size = config["dataloader"].get("eval_batch_size", config["dataloader"]["batch_size"])

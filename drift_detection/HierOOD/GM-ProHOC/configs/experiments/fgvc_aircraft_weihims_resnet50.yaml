@@ -6,6 +6,10 @@ experiment:
   save_every: 1                         # choices: any positive int
   log_every: 50                         # choices: any positive int
 
+runtime:
+  multi_gpu: ture                       # choices: true, false
+  device_ids: [0, 1]                    # choices: null or list[int], e.g. [0,1,2,3]
+
 dataset:
   name: fgvc-aircraft                   # choices: any dataset alias string
   datadir: ./dataset/fgvc-aircraft      # choices: dataset root path

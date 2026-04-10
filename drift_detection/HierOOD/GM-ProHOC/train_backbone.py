@@ -14,7 +14,7 @@ from core.config import load_config, save_config
 from core.feature_io import save_artifact
 from core.hierarchy_labels import build_leaf_path_matrix, targets_to_path_labels
 from core.metric_losses import build_metric_loss
-from core.model_factory import backbone_summary, build_backbone
+from core.model_factory import backbone_summary, build_backbone, maybe_wrap_dataparallel, unwrap_model
 from libs.hierarchy import Hierarchy
 from libs.utils.dataset_util import gen_datasets, get_id_classes
 
@@ -119,6 +119,7 @@ def main():
     )
 
     model = build_backbone(config).to(device)
+    model = maybe_wrap_dataparallel(model, config)
     loss_cfg = dict(config["loss"])
     loss_name = loss_cfg.pop("name")
     loss_fn = build_metric_loss(loss_name, **loss_cfg)
@@ -157,7 +158,7 @@ def main():
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(model.state_dict(), experiment_dir / "checkpoint_backbone.pt")
+            torch.save(unwrap_model(model).state_dict(), experiment_dir / "checkpoint_backbone.pt")
 
     save_artifact(
         {
@@ -165,6 +166,7 @@ def main():
             "best_val_loss": best_val_loss,
             "path_metadata": path_meta,
             "backbone": backbone_summary(config),
+            "runtime": config.get("runtime", {}),
         },
         experiment_dir / "train_metrics.pt",
     )
