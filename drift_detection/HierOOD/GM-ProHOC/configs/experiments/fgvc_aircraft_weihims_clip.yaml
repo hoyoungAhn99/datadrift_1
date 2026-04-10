@@ -35,7 +35,7 @@ backbone:
   feat_dim: 256                         # choices: any positive int
   normalize: true                       # choices: true, false
   freeze_backbone: false                # choices: true, false
-  weights: IMAGENET1K_V1                # choices: null, IMAGENET1K_V1
+  model_name: openai/clip-vit-base-patch32  # choices: any CLIP vision model name
 
 optimizer:
   name: adamw                           # choices: adamw, sgd
