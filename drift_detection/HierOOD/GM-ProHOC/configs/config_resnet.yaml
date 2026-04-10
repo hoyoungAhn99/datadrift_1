@@ -14,6 +14,10 @@ train:
   num_workers: 4                        # choices: any nonnegative int
   lr: 0.0001                            # choices: any positive float
 
+validation:
+  enable_depth_eval: True               # choices: True, False
+  depth_eval_every: 1                   # choices: any positive int
+
 runtime:
   multi_gpu: False                      # choices: True, False
   device_ids: null                      # choices: null or list[int]

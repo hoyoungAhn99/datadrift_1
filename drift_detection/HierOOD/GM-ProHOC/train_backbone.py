@@ -12,10 +12,12 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from core.config import load_config, save_config
+from core.density import fit_diagonal_gaussians, score_nodes
 from core.feature_io import save_artifact
 from core.hierarchy_labels import build_leaf_path_matrix, targets_to_path_labels
 from core.metric_losses import build_metric_loss
 from core.model_factory import backbone_summary, build_backbone, maybe_wrap_dataparallel, unwrap_model
+from core.hierarchy_inference import build_depth_maps
 from libs.hierarchy import Hierarchy
 from libs.utils.dataset_util import gen_datasets, get_id_classes
 
@@ -76,6 +78,88 @@ def evaluate_loss(model, loader, loss_fn, leaf_path_matrix, device):
     return total_loss / max(steps, 1)
 
 
+def collect_features_and_targets(model, loader, device):
+    model.eval()
+    features = []
+    targets = []
+    with torch.no_grad():
+        for inputs, batch_targets in loader:
+            inputs = inputs.to(device)
+            feats = model(inputs)
+            features.append(feats.detach().cpu())
+            targets.append(batch_targets.long().cpu())
+    return torch.cat(features, dim=0), torch.cat(targets, dim=0)
+
+
+def compute_depthwise_accuracy(
+    model,
+    train_loader,
+    val_loader,
+    hierarchy,
+    train_classes,
+    leaf_path_matrix,
+    density_eps,
+    score_type,
+    temperature,
+    device,
+):
+    train_features, train_targets = collect_features_and_targets(model, train_loader, device)
+    val_features, val_targets = collect_features_and_targets(model, val_loader, device)
+
+    density = fit_diagonal_gaussians(
+        train_features.float(),
+        train_targets.long(),
+        hierarchy,
+        train_classes,
+        eps=density_eps,
+    )
+    node_scores = score_nodes(
+        val_features.float(),
+        density["means"].float(),
+        density["variances"].float(),
+        score_type=score_type,
+        temperature=temperature,
+    )
+    nodes_by_depth = build_depth_maps(hierarchy)
+    true_paths = leaf_path_matrix[val_targets.long()]
+
+    depth_metrics = {}
+    top1_values = []
+    top5_values = []
+
+    for depth in sorted(nodes_by_depth.keys()):
+        if depth == 0:
+            continue
+        depth_indices = nodes_by_depth[depth]
+        logits = node_scores[:, depth_indices]
+        true_node_ids = true_paths[:, depth - 1]
+        depth_index_map = {node_idx: pos for pos, node_idx in enumerate(depth_indices)}
+        true_local = torch.tensor(
+            [depth_index_map[int(node_id)] for node_id in true_node_ids],
+            dtype=torch.long,
+        )
+        top1 = logits.argmax(dim=1)
+        top1_acc = (top1.cpu() == true_local).float().mean().item()
+        k = min(5, logits.shape[1])
+        topk = torch.topk(logits, k=k, dim=1).indices.cpu()
+        top5_acc = (topk == true_local.unsqueeze(1)).any(dim=1).float().mean().item()
+
+        depth_metrics[depth] = {
+            "acc_top1": top1_acc,
+            "acc_top5": top5_acc,
+            "num_classes": len(depth_indices),
+        }
+        top1_values.append(top1_acc)
+        top5_values.append(top5_acc)
+
+    summary = {
+        "depth_metrics": depth_metrics,
+        "acc_top1_mean": sum(top1_values) / max(len(top1_values), 1),
+        "acc_top5_mean": sum(top5_values) / max(len(top5_values), 1),
+    }
+    return summary
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
@@ -113,6 +197,14 @@ def main():
         pin_memory=config["dataloader"].get("pin_memory", False),
         drop_last=False,
     )
+    eval_train_loader = DataLoader(
+        train_ds,
+        batch_size=config["dataloader"].get("eval_batch_size", config["dataloader"]["batch_size"]),
+        shuffle=False,
+        num_workers=config["dataloader"]["num_workers"],
+        pin_memory=config["dataloader"].get("pin_memory", False),
+        drop_last=False,
+    )
 
     use_pruned = config.get("hierarchy", {}).get("use_pruned_for_loss_labels", True)
     leaf_path_matrix, path_meta = build_leaf_path_matrix(
@@ -133,6 +225,9 @@ def main():
     epochs = config["training"]["epochs"]
     best_val_loss = float("inf")
     history = {"train_loss": [], "val_loss": []}
+    validation_cfg = config.get("validation", {})
+    enable_depth_eval = validation_cfg.get("enable_depth_eval", False)
+    depth_eval_every = max(int(validation_cfg.get("depth_eval_every", 1)), 1)
 
     for epoch in range(epochs):
         model.train()
@@ -157,6 +252,22 @@ def main():
         history["train_loss"].append(train_loss)
         history["val_loss"].append(val_loss)
 
+        depth_eval_summary = None
+        if enable_depth_eval and ((epoch + 1) % depth_eval_every == 0):
+            depth_eval_summary = compute_depthwise_accuracy(
+                model,
+                eval_train_loader,
+                val_loader,
+                hierarchy,
+                train_ds.classes,
+                leaf_path_matrix,
+                config["density"]["eps"],
+                config["inference"].get("score_type", "gaussian_loglik"),
+                config["inference"].get("temperature", 1.0),
+                device,
+            )
+            history.setdefault("depth_eval", []).append({"epoch": epoch, **depth_eval_summary})
+
         if scheduler is not None:
             scheduler.step()
 
@@ -169,7 +280,14 @@ def main():
         if writer is not None:
             writer.add_scalar("train/loss", train_loss, epoch)
             writer.add_scalar("val/loss", val_loss, epoch)
+            writer.add_scalar("test/loss", val_loss, epoch)
             writer.add_scalar("train/lr", current_lr, epoch)
+            if depth_eval_summary is not None:
+                writer.add_scalar("test/acc_top1_mean", depth_eval_summary["acc_top1_mean"], epoch)
+                writer.add_scalar("test/acc_top5_mean", depth_eval_summary["acc_top5_mean"], epoch)
+                for depth, metrics in depth_eval_summary["depth_metrics"].items():
+                    writer.add_scalar(f"test/acc_top1_depth_{depth}", metrics["acc_top1"], epoch)
+                    writer.add_scalar(f"test/acc_top5_depth_{depth}", metrics["acc_top5"], epoch)
             writer.flush()
 
         if val_loss < best_val_loss:

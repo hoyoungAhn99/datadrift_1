@@ -67,6 +67,10 @@ training:
   checkpoint_mode: min                  # choices: min
   resume_from: null                     # choices: null or checkpoint path
 
+validation:
+  enable_depth_eval: true               # choices: true, false
+  depth_eval_every: 1                   # choices: any positive int, larger is faster
+
 feature_extraction:
   include_train: true                   # choices: true, false
   save_train: true                      # choices: true, false
