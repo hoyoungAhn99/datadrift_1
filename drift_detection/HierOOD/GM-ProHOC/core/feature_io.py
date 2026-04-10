@@ -13,4 +13,4 @@ def save_artifact(payload: dict[str, Any], path: str | Path) -> None:
 
 
 def load_artifact(path: str | Path) -> dict[str, Any]:
-    return torch.load(path, map_location="cpu")
+    return torch.load(path, map_location="cpu", weights_only=False)

@@ -86,7 +86,7 @@ def _normalize_prohoc_result(result_path: Path, payload: dict[str, Any]) -> list
 def load_result_rows(result_paths: list[Path], source_hint: str | None = None) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for result_path in result_paths:
-        payload = torch.load(result_path, map_location="cpu")
+        payload = torch.load(result_path, map_location="cpu", weights_only=False)
         if source_hint == "gm" or (isinstance(payload, dict) and "results" in payload and "artifacts" in payload):
             rows.extend(_normalize_gm_result(result_path, payload))
         else:
