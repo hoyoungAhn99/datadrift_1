@@ -2,6 +2,7 @@ import os
 
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
+from torchvision.transforms import InterpolationMode
 
 class SubsetImageFolder(datasets.ImageFolder):
 
@@ -38,22 +39,29 @@ class SubsetImageFolder(datasets.ImageFolder):
 def gen_datasets(datadir,
                  id_subset,
                  ood_subset,
-                 mean=[0.485, 0.456, 0.406],
-                 std=[0.229, 0.224, 0.225],
-                 resize=256,
-                 cropsize=224,
+                 mean=None,
+                 std=None,
+                 resize=None,
+                 cropsize=None,
+                 preset="imagenet",
                  ):
-
+    mean, std, resize, cropsize, interpolation = _resolve_preprocessing(
+        preset,
+        mean=mean,
+        std=std,
+        resize=resize,
+        cropsize=cropsize,
+    )
     normalize = transforms.Normalize(mean=mean, std=std)
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(cropsize),
+        transforms.RandomResizedCrop(cropsize, interpolation=interpolation),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         normalize,
     ])
 
     eval_transform = transforms.Compose([
-        transforms.Resize(resize),
+        transforms.Resize(resize, interpolation=interpolation),
         transforms.CenterCrop(cropsize),
         transforms.ToTensor(),
         normalize,
@@ -76,25 +84,25 @@ def gen_datasets(datadir,
               
     return train_dataset, val_dataset, ood_dataset
 
-
-def gen_custom_dataset(datadir, name, subset, evaluate=True):
-
-    # Imagenet stats
-    cropsize = 224
-    resize = 256
-    mean = [0.485, 0.456, 0.406]
-    std = [0.229, 0.224, 0.225]
+def gen_custom_dataset(datadir, name, subset, evaluate=True, mean=None, std=None, resize=None, cropsize=None, preset="imagenet"):
+    mean, std, resize, cropsize, interpolation = _resolve_preprocessing(
+        preset,
+        mean=mean,
+        std=std,
+        resize=resize,
+        cropsize=cropsize,
+    )
 
     normalize = transforms.Normalize(mean=mean, std=std)
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(cropsize),
+        transforms.RandomResizedCrop(cropsize, interpolation=interpolation),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         normalize,
     ])
 
     eval_transform = transforms.Compose([
-        transforms.Resize(resize),
+        transforms.Resize(resize, interpolation=interpolation),
         transforms.CenterCrop(cropsize),
         transforms.ToTensor(),
         normalize,
@@ -117,3 +125,26 @@ def get_id_classes(id_classes_fn):
         lines = [line.strip() for line in f]
 
     return sorted(lines)
+
+
+def _resolve_preprocessing(preset, mean=None, std=None, resize=None, cropsize=None):
+    if preset == "clip":
+        default_mean = [0.48145466, 0.4578275, 0.40821073]
+        default_std = [0.26862954, 0.26130258, 0.27577711]
+        default_resize = 224
+        default_cropsize = 224
+        interpolation = InterpolationMode.BICUBIC
+    else:
+        default_mean = [0.485, 0.456, 0.406]
+        default_std = [0.229, 0.224, 0.225]
+        default_resize = 256
+        default_cropsize = 224
+        interpolation = InterpolationMode.BILINEAR
+
+    return (
+        mean if mean is not None else default_mean,
+        std if std is not None else default_std,
+        resize if resize is not None else default_resize,
+        cropsize if cropsize is not None else default_cropsize,
+        interpolation,
+    )

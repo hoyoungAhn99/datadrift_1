@@ -15,6 +15,11 @@ dataset:
   datadir: D:/HY_Data/HierOOD/fgvc-aircraft      # choices: dataset root path
   hierarchy: ./hierarchies/fgvc-aircraft.json  # choices: hierarchy json path
   id_split: ./data/fgvc-aircraft-id-labels.csv # choices: id split csv path
+  transform_preset: clip                # choices: imagenet, clip, null(auto by backbone)
+  mean: null                            # choices: null or list[float x3]
+  std: null                             # choices: null or list[float x3]
+  resize: null                          # choices: null or positive int
+  cropsize: null                        # choices: null or positive int
   extraood: null                        # choices: null or custom split name/path
   farood_sets: []                       # choices: [] or list[str]
 
@@ -39,7 +44,7 @@ backbone:
 
 optimizer:
   name: adamw                           # choices: adamw, sgd
-  lr: 0.001                            # choices: any positive float
+  lr: 1.0e-5                            # choices: any positive float
   weight_decay: 0.0001                  # choices: any nonnegative float
   momentum: 0.9                         # choices: any float, used by sgd
   nesterov: false                       # choices: true, false, used by sgd

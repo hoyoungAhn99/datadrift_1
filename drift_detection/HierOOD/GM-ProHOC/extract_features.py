@@ -20,6 +20,21 @@ from libs.hierarchy import Hierarchy
 from libs.utils.dataset_util import gen_custom_dataset, gen_datasets, get_id_classes
 
 
+def dataset_transform_kwargs(config):
+    dataset_cfg = config["dataset"]
+    backbone_type = config["backbone"]["type"].lower()
+    preset = dataset_cfg.get("transform_preset")
+    if preset is None:
+        preset = "clip" if backbone_type == "clip" else "imagenet"
+    return {
+        "preset": preset,
+        "mean": dataset_cfg.get("mean"),
+        "std": dataset_cfg.get("std"),
+        "resize": dataset_cfg.get("resize"),
+        "cropsize": dataset_cfg.get("cropsize"),
+    }
+
+
 def collect_features(model, loader, device):
     feats = []
     targets = []
@@ -59,7 +74,13 @@ def main():
     dataset_cfg = config["dataset"]
     id_classes = get_id_classes(dataset_cfg["id_split"])
     hierarchy = Hierarchy(id_classes, dataset_cfg["hierarchy"])
-    train_ds, val_ds, ood_ds = gen_datasets(dataset_cfg["datadir"], id_classes, hierarchy.ood_train_classes)
+    transform_kwargs = dataset_transform_kwargs(config)
+    train_ds, val_ds, ood_ds = gen_datasets(
+        dataset_cfg["datadir"],
+        id_classes,
+        hierarchy.ood_train_classes,
+        **transform_kwargs,
+    )
 
     model = build_backbone(config).to(device)
     load_backbone_checkpoint(model, experiment_dir / "checkpoint_backbone.pt", map_location=device)
@@ -138,7 +159,12 @@ def main():
     for farood_name in dataset_cfg.get("farood_sets", []) or []:
         if not feature_cfg.get("save_farood", True):
             break
-        farood_ds = gen_custom_dataset(dataset_cfg["datadir"], farood_name, hierarchy.ood_train_classes)
+        farood_ds = gen_custom_dataset(
+            dataset_cfg["datadir"],
+            farood_name,
+            hierarchy.ood_train_classes,
+            **transform_kwargs,
+        )
         farood_loader = DataLoader(farood_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
         farood_features, farood_targets = collect_features(model, farood_loader, device)
         root_idx = hierarchy.id_node_list.index("root")
