@@ -7,6 +7,7 @@ from pathlib import Path
 
 import torch
 from torch import optim
+from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -87,6 +88,9 @@ def main():
     experiment_dir = Path(config["experiment"]["output_root"]) / config["experiment"]["name"]
     experiment_dir.mkdir(parents=True, exist_ok=True)
     save_config(config, experiment_dir / "resolved_config.yaml")
+    tensorboard_dir = experiment_dir / "tensorboard"
+    use_tensorboard = config.get("logging", {}).get("use_tensorboard", False)
+    writer = SummaryWriter(log_dir=str(tensorboard_dir)) if use_tensorboard else None
 
     dataset_cfg = config["dataset"]
     id_classes = get_id_classes(dataset_cfg["id_split"])
@@ -156,6 +160,18 @@ def main():
         if scheduler is not None:
             scheduler.step()
 
+        current_lr = optimizer.param_groups[0]["lr"]
+        print(
+            f"Epoch {epoch + 1}/{epochs} | "
+            f"train_loss={train_loss:.6f} | val_loss={val_loss:.6f} | lr={current_lr:.6g}"
+        )
+
+        if writer is not None:
+            writer.add_scalar("train/loss", train_loss, epoch)
+            writer.add_scalar("val/loss", val_loss, epoch)
+            writer.add_scalar("train/lr", current_lr, epoch)
+            writer.flush()
+
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save(unwrap_model(model).state_dict(), experiment_dir / "checkpoint_backbone.pt")
@@ -167,6 +183,7 @@ def main():
             "path_metadata": path_meta,
             "backbone": backbone_summary(config),
             "runtime": config.get("runtime", {}),
+            "tensorboard_dir": str(tensorboard_dir) if use_tensorboard else None,
         },
         experiment_dir / "train_metrics.pt",
     )
@@ -178,6 +195,9 @@ def main():
         },
         experiment_dir / "train_config.pt",
     )
+    if writer is not None:
+        writer.close()
+        print(f"TensorBoard logs saved to: {tensorboard_dir}")
 
 
 if __name__ == "__main__":

@@ -91,7 +91,7 @@ inference:
   collapse_ood_to_parent: true          # choices: true, false
 
 logging:
-  use_tensorboard: false                # choices: true, false
+  use_tensorboard: true                 # choices: true, false
   save_train_metrics: true              # choices: true, false
   save_val_metrics: true                # choices: true, false
   save_config_copy: true                # choices: true, false
