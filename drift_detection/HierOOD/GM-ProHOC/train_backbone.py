@@ -121,7 +121,7 @@ def compute_depthwise_accuracy(
         temperature=temperature,
     )
     nodes_by_depth = build_depth_maps(hierarchy)
-    true_paths = leaf_path_matrix[val_targets.long()]
+    val_class_names = [train_classes[int(idx)] for idx in val_targets.long().tolist()]
 
     depth_metrics = {}
     top1_values = []
@@ -132,22 +132,43 @@ def compute_depthwise_accuracy(
             continue
         depth_indices = nodes_by_depth[depth]
         logits = node_scores[:, depth_indices]
-        true_node_ids = true_paths[:, depth - 1]
         depth_index_map = {node_idx: pos for pos, node_idx in enumerate(depth_indices)}
-        true_local = torch.tensor(
-            [depth_index_map[int(node_id)] for node_id in true_node_ids],
-            dtype=torch.long,
-        )
-        top1 = logits.argmax(dim=1)
+        valid_rows = []
+        true_local_list = []
+
+        for row_idx, class_name in enumerate(val_class_names):
+            ancestors = hierarchy.node_ancestors[class_name].copy()
+            actual_depth = len(ancestors)
+            if actual_depth < depth:
+                continue
+
+            if depth == actual_depth:
+                node_idx = hierarchy.id_node_list.index(class_name)
+            else:
+                node_idx = ancestors[depth]
+
+            if node_idx not in depth_index_map:
+                continue
+
+            valid_rows.append(row_idx)
+            true_local_list.append(depth_index_map[node_idx])
+
+        if not valid_rows:
+            continue
+
+        valid_logits = logits[valid_rows]
+        true_local = torch.tensor(true_local_list, dtype=torch.long)
+        top1 = valid_logits.argmax(dim=1)
         top1_acc = (top1.cpu() == true_local).float().mean().item()
-        k = min(5, logits.shape[1])
-        topk = torch.topk(logits, k=k, dim=1).indices.cpu()
+        k = min(5, valid_logits.shape[1])
+        topk = torch.topk(valid_logits, k=k, dim=1).indices.cpu()
         top5_acc = (topk == true_local.unsqueeze(1)).any(dim=1).float().mean().item()
 
         depth_metrics[depth] = {
             "acc_top1": top1_acc,
             "acc_top5": top5_acc,
             "num_classes": len(depth_indices),
+            "num_samples": len(valid_rows),
         }
         top1_values.append(top1_acc)
         top5_values.append(top5_acc)
