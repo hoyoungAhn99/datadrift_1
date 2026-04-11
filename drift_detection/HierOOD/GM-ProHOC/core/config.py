@@ -25,6 +25,25 @@ def load_config(config_path: str | Path) -> dict[str, Any]:
     return cfg
 
 
+def load_merged_config(
+    config_path: str | Path,
+    feature_gen_config_path: str | Path | None = None,
+) -> dict[str, Any]:
+    config = load_config(config_path)
+    if feature_gen_config_path is None:
+        config["_meta"]["feature_gen_config_path"] = None
+        return config
+
+    feature_gen_config_path = Path(feature_gen_config_path)
+    with feature_gen_config_path.open("r", encoding="utf-8") as handle:
+        fg_cfg = yaml.safe_load(handle) or {}
+    merged = apply_overrides(config, fg_cfg)
+    merged.setdefault("_meta", {})
+    merged["_meta"]["config_path"] = str(Path(config_path).resolve())
+    merged["_meta"]["feature_gen_config_path"] = str(feature_gen_config_path.resolve())
+    return merged
+
+
 def apply_overrides(config: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
     clean = {k: v for k, v in overrides.items() if v is not None}
     result = deepcopy(config)
