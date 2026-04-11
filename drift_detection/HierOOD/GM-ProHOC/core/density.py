@@ -28,6 +28,7 @@ def fit_diagonal_gaussians(
     n_nodes = mask.shape[1]
     feat_dim = features.shape[1]
     means = torch.zeros((n_nodes, feat_dim), dtype=features.dtype)
+    mean_directions = torch.zeros((n_nodes, feat_dim), dtype=features.dtype)
     variances = torch.zeros((n_nodes, feat_dim), dtype=features.dtype)
     counts = torch.zeros((n_nodes,), dtype=torch.long)
 
@@ -41,6 +42,11 @@ def fit_diagonal_gaussians(
             variances[node_idx] = torch.full((feat_dim,), eps, dtype=features.dtype)
             continue
         means[node_idx] = node_features.mean(dim=0)
+        mean_directions[node_idx] = torch.nn.functional.normalize(
+            means[node_idx].unsqueeze(0),
+            dim=-1,
+            eps=eps,
+        ).squeeze(0)
         if node_features.shape[0] == 1:
             variances[node_idx] = torch.full((feat_dim,), eps, dtype=features.dtype)
         else:
@@ -51,6 +57,7 @@ def fit_diagonal_gaussians(
         "node_to_index": {name: idx for idx, name in enumerate(hierarchy.id_node_list)},
         "feature_dim": feat_dim,
         "means": means,
+        "mean_directions": mean_directions,
         "variances": variances,
         "counts": counts,
         "leaf_to_ancestor_mask": mask,
@@ -61,8 +68,10 @@ def score_nodes(
     features: torch.Tensor,
     means: torch.Tensor,
     variances: torch.Tensor,
+    mean_directions: torch.Tensor | None = None,
     score_type: str = "gaussian_loglik",
     temperature: float = 1.0,
+    kappa: float = 20.0,
 ) -> torch.Tensor:
     score_type = score_type.lower()
     diff = features[:, None, :] - means[None, :, :]
@@ -78,6 +87,12 @@ def score_nodes(
         scores = torch.exp(-0.5 * (maha + log_det[None, :] + const))
     elif score_type == "mahalanobis":
         scores = -1.0 * (diff.pow(2) / variances[None, :, :]).sum(dim=-1)
+    elif score_type == "vmf":
+        if mean_directions is None:
+            mean_directions = torch.nn.functional.normalize(means, dim=-1, eps=1e-12)
+        normalized_features = torch.nn.functional.normalize(features, dim=-1, eps=1e-12)
+        normalized_means = torch.nn.functional.normalize(mean_directions, dim=-1, eps=1e-12)
+        scores = float(kappa) * torch.matmul(normalized_features, normalized_means.transpose(0, 1))
     else:
         raise ValueError(f"Unsupported score_type: {score_type}")
 

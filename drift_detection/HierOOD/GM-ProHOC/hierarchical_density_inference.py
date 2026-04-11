@@ -21,6 +21,7 @@ def evaluate_split(split_artifact, features, hierarchy, density_payload, inferen
         density_payload,
         score_type=inference_cfg.get("score_type", "gaussian_loglik"),
         temperature=inference_cfg.get("temperature", 1.0),
+        kappa=inference_cfg.get("kappa", 20.0),
         alpha=inference_cfg.get("alpha", 1.0),
         beta=inference_cfg.get("beta", 1.0),
     )
@@ -32,6 +33,7 @@ def evaluate_split(split_artifact, features, hierarchy, density_payload, inferen
             "prediction_mode": inference_cfg.get("prediction_mode", "argmax"),
             "score_type": inference_cfg.get("score_type", "gaussian_loglik"),
             "temperature": inference_cfg.get("temperature", 1.0),
+            "kappa": inference_cfg.get("kappa", 20.0),
             "alpha": inference_cfg.get("alpha", 1.0),
             "beta": inference_cfg.get("beta", 1.0),
             "collapsed_ood": inference_cfg.get("collapse_ood_to_parent", True),

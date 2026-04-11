@@ -116,6 +116,7 @@ def compute_depthwise_accuracy(
     density_eps,
     score_type,
     temperature,
+    kappa,
     device,
 ):
     train_features, train_targets = collect_features_and_targets(
@@ -136,8 +137,10 @@ def compute_depthwise_accuracy(
         val_features.float(),
         density["means"].float(),
         density["variances"].float(),
+        mean_directions=density.get("mean_directions", None).float() if density.get("mean_directions", None) is not None else None,
         score_type=score_type,
         temperature=temperature,
+        kappa=kappa,
     )
     nodes_by_depth = build_depth_maps(hierarchy)
     val_class_names = [train_classes[int(idx)] for idx in val_targets.long().tolist()]
@@ -316,6 +319,7 @@ def main():
                 config["density"]["eps"],
                 config["inference"].get("score_type", "gaussian_loglik"),
                 config["inference"].get("temperature", 1.0),
+                config["inference"].get("kappa", 20.0),
                 device,
             )
             history.setdefault("depth_eval", []).append({"epoch": epoch, **depth_eval_summary})

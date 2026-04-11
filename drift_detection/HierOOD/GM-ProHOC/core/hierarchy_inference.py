@@ -73,6 +73,7 @@ def hierarchical_node_probabilities(
     density_payload: dict[str, Any],
     score_type: str = "gaussian_loglik",
     temperature: float = 1.0,
+    kappa: float = 20.0,
     alpha: float = 1.0,
     beta: float = 1.0,
 ):
@@ -80,8 +81,10 @@ def hierarchical_node_probabilities(
         features,
         density_payload["means"],
         density_payload["variances"],
+        mean_directions=density_payload.get("mean_directions"),
         score_type=score_type,
         temperature=temperature,
+        kappa=kappa,
     )
     nodes_by_depth = build_depth_maps(hierarchy)
     depth_probs = compute_depth_probs(node_scores, nodes_by_depth)
