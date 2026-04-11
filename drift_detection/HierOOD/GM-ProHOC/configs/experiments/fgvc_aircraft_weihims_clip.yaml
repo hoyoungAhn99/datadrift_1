@@ -92,7 +92,7 @@ density:
   save_debug_statistics: false          # choices: true, false
 
 inference:
-  score_type: vmf                       # choices: gaussian_loglik, raw_gaussian, mahalanobis, vmf
+  score_type: gaussian_loglik           # choices: gaussian_loglik, raw_gaussian, mahalanobis, vmf
   temperature: 1.0                      # choices: any positive float
   kappa: 20.0                           # choices: any positive float, used by vmf
   alpha: 1.0                            # choices: any float
