@@ -44,7 +44,7 @@ backbone:
 
 optimizer:
   name: adamw                           # choices: adamw, sgd
-  lr: 1.0e-5                            # choices: any positive float
+  lr: 5.0e-4                            # choices: any positive float
   weight_decay: 0.0001                  # choices: any nonnegative float
   momentum: 0.9                         # choices: any float, used by sgd
   nesterov: false                       # choices: true, false, used by sgd
