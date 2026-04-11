@@ -44,14 +44,14 @@ backbone:
 
 optimizer:
   name: adamw                           # choices: adamw, sgd
-  lr: 5.0e-4                            # choices: any positive float
+  lr: 1.0e-5                            # choices: any positive float
   weight_decay: 0.0001                  # choices: any nonnegative float
   momentum: 0.9                         # choices: any float, used by sgd
   nesterov: false                       # choices: true, false, used by sgd
 
 scheduler:
   name: cosine                          # choices: cosine, none
-  epochs: 90                            # choices: any positive int
+  epochs: 200                           # choices: any positive int
   warmup_epochs: 0                      # choices: any nonnegative int
   eta_min: 0.0                          # choices: any nonnegative float
 
@@ -65,7 +65,7 @@ loss:
   dist_pow: 1.0                         # choices: any positive float, weihims only
 
 training:
-  epochs: 90                            # choices: any positive int
+  epochs: 200                           # choices: any positive int
   grad_clip_norm: null                  # choices: null or positive float
   amp: false                            # choices: true, false
   checkpoint_metric: val_loss           # choices: val_loss
