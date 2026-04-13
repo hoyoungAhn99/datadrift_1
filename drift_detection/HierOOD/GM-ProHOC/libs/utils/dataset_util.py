@@ -4,6 +4,11 @@ import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 from torchvision.transforms import InterpolationMode
 
+try:
+    from transformers import CLIPImageProcessor
+except ImportError:  # pragma: no cover - optional dependency
+    CLIPImageProcessor = None
+
 class SubsetImageFolder(datasets.ImageFolder):
 
     def __init__(self,
@@ -36,6 +41,28 @@ class SubsetImageFolder(datasets.ImageFolder):
         return classes, class_to_idx 
 
 
+class CLIPProcessorTransform:
+    def __init__(self, processor, augment=None, use_processor_defaults=True):
+        self.processor = processor
+        self.augment = augment
+        self.use_processor_defaults = use_processor_defaults
+
+    def __call__(self, image):
+        if self.augment is not None:
+            image = self.augment(image)
+
+        if self.use_processor_defaults:
+            pixel_values = self.processor(images=image, return_tensors="pt")["pixel_values"]
+        else:
+            pixel_values = self.processor(
+                images=image,
+                return_tensors="pt",
+                do_resize=False,
+                do_center_crop=False,
+            )["pixel_values"]
+        return pixel_values.squeeze(0)
+
+
 def gen_datasets(datadir,
                  id_subset,
                  ood_subset,
@@ -44,28 +71,16 @@ def gen_datasets(datadir,
                  resize=None,
                  cropsize=None,
                  preset="imagenet",
+                 model_name=None,
                  ):
-    mean, std, resize, cropsize, interpolation = _resolve_preprocessing(
+    train_transform, eval_transform = _build_transforms(
         preset,
         mean=mean,
         std=std,
         resize=resize,
         cropsize=cropsize,
+        model_name=model_name,
     )
-    normalize = transforms.Normalize(mean=mean, std=std)
-    train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(cropsize, interpolation=interpolation),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        normalize,
-    ])
-
-    eval_transform = transforms.Compose([
-        transforms.Resize(resize, interpolation=interpolation),
-        transforms.CenterCrop(cropsize),
-        transforms.ToTensor(),
-        normalize,
-    ])
 
     train_dataset = SubsetImageFolder(os.path.join(datadir, "train"),
                                       id_subset,
@@ -84,29 +99,26 @@ def gen_datasets(datadir,
               
     return train_dataset, val_dataset, ood_dataset
 
-def gen_custom_dataset(datadir, name, subset, evaluate=True, mean=None, std=None, resize=None, cropsize=None, preset="imagenet"):
-    mean, std, resize, cropsize, interpolation = _resolve_preprocessing(
+def gen_custom_dataset(
+    datadir,
+    name,
+    subset,
+    evaluate=True,
+    mean=None,
+    std=None,
+    resize=None,
+    cropsize=None,
+    preset="imagenet",
+    model_name=None,
+):
+    train_transform, eval_transform = _build_transforms(
         preset,
         mean=mean,
         std=std,
         resize=resize,
         cropsize=cropsize,
+        model_name=model_name,
     )
-
-    normalize = transforms.Normalize(mean=mean, std=std)
-    train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(cropsize, interpolation=interpolation),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        normalize,
-    ])
-
-    eval_transform = transforms.Compose([
-        transforms.Resize(resize, interpolation=interpolation),
-        transforms.CenterCrop(cropsize),
-        transforms.ToTensor(),
-        normalize,
-    ])
 
     transform = eval_transform if evaluate else train_transform
 
@@ -148,3 +160,53 @@ def _resolve_preprocessing(preset, mean=None, std=None, resize=None, cropsize=No
         cropsize if cropsize is not None else default_cropsize,
         interpolation,
     )
+
+
+def _build_transforms(preset, mean=None, std=None, resize=None, cropsize=None, model_name=None):
+    mean, std, resize, cropsize, interpolation = _resolve_preprocessing(
+        preset,
+        mean=mean,
+        std=std,
+        resize=resize,
+        cropsize=cropsize,
+    )
+
+    if preset == "clip":
+        if CLIPImageProcessor is None:
+            raise ImportError(
+                "transformers is required for CLIP preprocessing but is not installed."
+            )
+        processor = CLIPImageProcessor.from_pretrained(
+            model_name or "openai/clip-vit-base-patch32"
+        )
+        train_augment = transforms.Compose([
+            transforms.RandomResizedCrop(cropsize, interpolation=interpolation),
+            transforms.RandomHorizontalFlip(),
+        ])
+        train_transform = CLIPProcessorTransform(
+            processor,
+            augment=train_augment,
+            use_processor_defaults=False,
+        )
+        eval_transform = CLIPProcessorTransform(
+            processor,
+            augment=None,
+            use_processor_defaults=True,
+        )
+        return train_transform, eval_transform
+
+    normalize = transforms.Normalize(mean=mean, std=std)
+    train_transform = transforms.Compose([
+        transforms.RandomResizedCrop(cropsize, interpolation=interpolation),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        normalize,
+    ])
+
+    eval_transform = transforms.Compose([
+        transforms.Resize(resize, interpolation=interpolation),
+        transforms.CenterCrop(cropsize),
+        transforms.ToTensor(),
+        normalize,
+    ])
+    return train_transform, eval_transform
