@@ -40,6 +40,7 @@ def dataset_transform_kwargs(config):
         "std": dataset_cfg.get("std"),
         "resize": dataset_cfg.get("resize"),
         "cropsize": dataset_cfg.get("cropsize"),
+        "model_name": config["backbone"].get("model_name"),
     }
 
 
