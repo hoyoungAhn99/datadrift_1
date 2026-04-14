@@ -44,10 +44,12 @@ def _local_probabilities_for_node(
         [depth_probs[child_depth][:, depth_index_map[idx]] for idx in child_indices],
         dim=1,
     )
-    p_comp = 1.0 - child_depth_probs.sum(dim=1)
+    child_group_sum = child_depth_probs.sum(dim=1, keepdim=True)
+    p_comp = 1.0 - child_group_sum.squeeze(1)
     p_comp = torch.clamp(p_comp, min=0.0)
     eps = 1e-12
-    entropy = -torch.sum(child_depth_probs * torch.log(child_depth_probs + eps), dim=1)
+    child_local_probs = child_depth_probs / child_group_sum.clamp_min(eps)
+    entropy = -torch.sum(child_local_probs * torch.log(child_local_probs + eps), dim=1)
     ood_mass = alpha * p_comp + beta * entropy
     ood_mass = torch.clamp(ood_mass, min=0.0)
 
@@ -59,6 +61,7 @@ def _local_probabilities_for_node(
     return {
         "child_indices": child_indices,
         "child_depth_probs": child_depth_probs,
+        "child_local_probs": child_local_probs,
         "child_probs": local_probs[:, :-1],
         "ood_prob": local_probs[:, -1],
         "ood_score": ood_mass,
@@ -132,6 +135,7 @@ def hierarchical_node_probabilities(
             name: {
                 "child_indices": payload["child_indices"],
                 "child_depth_probs": payload["child_depth_probs"].cpu(),
+                "child_local_probs": payload["child_local_probs"].cpu(),
                 "child_probs": payload["child_probs"].cpu(),
                 "ood_prob": payload["ood_prob"].cpu(),
                 "ood_score": payload["ood_score"].cpu(),
