@@ -117,7 +117,7 @@ def make_bar_plots(df: pd.DataFrame, output_dir: Path) -> list[Path]:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--prohoc", help="Path to a ProHOC .result file or directory", default=None)
+    parser.add_argument("--prohoc", help="Path to a ProHOC .result file or directory", default=r"C:\HOYOUNG\datadrift_1\drift_detection\HierOOD\GM-ProHOC\ckpts\fgvc-aircraft\hinference-fgvc-aircraft.result")
     parser.add_argument("--gm", help="Path to a GM-ProHOC .result file or directory", default=None)
     parser.add_argument("--output_dir", required=True)
     args = parser.parse_args()

@@ -9,5 +9,6 @@ foreach ($HEIGHT in $HEIGHTS) {
         --lr 0.05 `
         --batch_size 128 `
         --num_workers 8 `
-        --multi_gpu
+        --multi_gpu `
+        --seed 42
 }
