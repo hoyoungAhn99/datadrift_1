@@ -53,9 +53,13 @@ def metric_sort(metric: str):
     raise ValueError(f"Unsupported metric: {metric}")
 
 
-def build_inference_cfg(base_cfg: dict[str, Any], temperature: float, alpha: float, beta: float) -> dict[str, Any]:
+def format_temperature_vector(temperature_vector: list[float] | tuple[float, ...]) -> str:
+    return "[" + ",".join(f"{float(t):.6g}" for t in temperature_vector) + "]"
+
+
+def build_inference_cfg(base_cfg: dict[str, Any], temperature: list[float], alpha: float, beta: float) -> dict[str, Any]:
     inference_cfg = dict(base_cfg)
-    inference_cfg["temperature"] = float(temperature)
+    inference_cfg["temperature"] = [float(t) for t in temperature]
     inference_cfg["alpha"] = float(alpha)
     inference_cfg["beta"] = float(beta)
     return inference_cfg
@@ -89,6 +93,7 @@ def main():
     dataset_cfg = config["dataset"]
     id_classes = get_id_classes(dataset_cfg["id_split"])
     hierarchy = Hierarchy(id_classes, dataset_cfg["hierarchy"])
+    tuned_depths = list(range(1, hierarchy.max_depth + 1))
 
     density_payload = load_artifact(experiment_dir / "node_density.pt")
     val_artifact = load_artifact(experiment_dir / "features_val.pt")
@@ -98,16 +103,17 @@ def main():
 
     rows: list[dict[str, Any]] = []
 
-    combinations = list(itertools.product(taus, alphas, betas))
+    tau_vectors = list(itertools.product(taus, repeat=len(tuned_depths)))
+    combinations = list(itertools.product(tau_vectors, alphas, betas))
     progress = tqdm(combinations, desc="Hyperparameter tuning", total=len(combinations))
 
-    for temperature, alpha, beta in progress:
+    for temperature_vector, alpha, beta in progress:
         progress.set_postfix(
-            tau=f"{temperature:.4g}",
+            tau="[" + ",".join(f"{tau:.3g}" for tau in temperature_vector) + "]",
             alpha=f"{alpha:.4g}",
             beta=f"{beta:.4g}",
         )
-        inference_cfg = build_inference_cfg(config["inference"], temperature, alpha, beta)
+        inference_cfg = build_inference_cfg(config["inference"], list(temperature_vector), alpha, beta)
         val_metrics = evaluate_split(
             val_artifact,
             val_features,
@@ -132,11 +138,13 @@ def main():
                 "split": split_name,
                 "score_type": inference_cfg.get("score_type"),
                 "covariance_type": density_payload.get("covariance_type", density_payload.get("config", {}).get("covariance_type")),
-                "temperature": float(temperature),
+                "temperature_vector": format_temperature_vector(temperature_vector),
                 "alpha": float(alpha),
                 "beta": float(beta),
                 "kappa": float(inference_cfg.get("kappa", 20.0)),
             }
+            for depth, tau in zip(tuned_depths, temperature_vector):
+                row[f"tau_depth_{depth}"] = float(tau)
             for metric in SCALAR_METRICS:
                 value = metrics.get(metric)
                 if isinstance(value, torch.Tensor) and value.numel() == 1:
@@ -153,8 +161,8 @@ def main():
     for metric in SCALAR_METRICS:
         ascending = metric_sort(metric)
         ranked = split_df.sort_values(
-            by=[metric, "temperature", "alpha", "beta"],
-            ascending=[ascending, True, True, True],
+            by=[metric, "alpha", "beta"] + [f"tau_depth_{depth}" for depth in tuned_depths],
+            ascending=[ascending, True, True] + [True] * len(tuned_depths),
         ).head(args.topk).copy()
         ranked.insert(0, "rank_metric", metric)
         top_rows.append(ranked)
@@ -171,7 +179,7 @@ def main():
                 {
                     "metric": metric,
                     "split": args.target_split,
-                    "temperature": row["temperature"],
+                    "temperature_vector": row["temperature_vector"],
                     "alpha": row["alpha"],
                     "beta": row["beta"],
                     "score_type": row["score_type"],
@@ -179,6 +187,8 @@ def main():
                     metric: row[metric],
                 }
             )
+            for depth in tuned_depths:
+                summary_rows[-1][f"tau_depth_{depth}"] = row[f"tau_depth_{depth}"]
     summary_df = pd.DataFrame(summary_rows)
     summary_csv = output_dir / f"best_hparams_summary_{args.target_split}.csv"
     summary_df.to_csv(summary_csv, index=False)
@@ -194,7 +204,7 @@ def main():
                     "dataset": row["dataset"],
                     "method": (
                         f"{config['experiment']['name']}"
-                        f"_tau{row['temperature']:.6g}"
+                        f"_tau{row['temperature_vector']}"
                         f"_a{row['alpha']:.6g}"
                         f"_b{row['beta']:.6g}"
                     ),

@@ -107,7 +107,6 @@ def score_nodes(
     mean_directions: torch.Tensor | None = None,
     covariance_type: str = "diag",
     score_type: str = "gaussian_loglik",
-    temperature: float = 1.0,
     kappa: float = 20.0,
 ) -> torch.Tensor:
     covariance_type = covariance_type.lower()
@@ -139,7 +138,7 @@ def score_nodes(
         else:
             raise ValueError(f"Unsupported score_type: {score_type}")
 
-    return scores / max(temperature, 1e-8)
+    return scores
 
 
 def _fit_diag_variance(node_features: torch.Tensor, eps: float) -> torch.Tensor:

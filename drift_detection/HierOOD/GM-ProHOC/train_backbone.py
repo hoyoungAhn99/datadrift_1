@@ -145,7 +145,6 @@ def compute_depthwise_accuracy(
         mean_directions=density.get("mean_directions", None).float() if density.get("mean_directions", None) is not None else None,
         covariance_type=density.get("covariance_type", covariance_type),
         score_type=score_type,
-        temperature=temperature,
         kappa=kappa,
     )
     nodes_by_depth = build_depth_maps(hierarchy)

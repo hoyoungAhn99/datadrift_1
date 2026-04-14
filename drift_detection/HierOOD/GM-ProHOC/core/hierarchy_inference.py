@@ -17,10 +17,26 @@ def build_depth_maps(hierarchy):
     return {depth: sorted(indices) for depth, indices in nodes_by_depth.items()}
 
 
-def compute_depth_probs(node_scores: torch.Tensor, nodes_by_depth: dict[int, list[int]]):
+def _normalize_depthwise_temperature(temperature, depths: list[int]) -> dict[int, float]:
+    if isinstance(temperature, (list, tuple)):
+        if len(temperature) != len(depths):
+            raise ValueError(
+                f"temperature vector length {len(temperature)} does not match "
+                f"number of non-root depths {len(depths)}"
+            )
+        return {depth: max(float(temp), 1e-8) for depth, temp in zip(depths, temperature)}
+    return {depth: max(float(temperature), 1e-8) for depth in depths}
+
+
+def compute_depth_probs(node_scores: torch.Tensor, nodes_by_depth: dict[int, list[int]], temperature: float | list[float] = 1.0):
     depth_probs = {}
+    non_root_depths = sorted(depth for depth in nodes_by_depth.keys() if depth != 0)
+    temp_by_depth = _normalize_depthwise_temperature(temperature, non_root_depths)
     for depth, indices in nodes_by_depth.items():
-        depth_probs[depth] = torch.softmax(node_scores[:, indices], dim=-1)
+        scaled_scores = node_scores[:, indices]
+        if depth != 0:
+            scaled_scores = scaled_scores / temp_by_depth[depth]
+        depth_probs[depth] = torch.softmax(scaled_scores, dim=-1)
     return depth_probs
 
 
@@ -89,11 +105,10 @@ def hierarchical_node_probabilities(
         mean_directions=density_payload.get("mean_directions"),
         covariance_type=density_payload.get("covariance_type", density_payload.get("config", {}).get("covariance_type", "diag")),
         score_type=score_type,
-        temperature=temperature,
         kappa=kappa,
     )
     nodes_by_depth = build_depth_maps(hierarchy)
-    depth_probs = compute_depth_probs(node_scores, nodes_by_depth)
+    depth_probs = compute_depth_probs(node_scores, nodes_by_depth, temperature=temperature)
 
     n_samples = features.shape[0]
     n_nodes = len(hierarchy.id_node_list)
@@ -130,6 +145,7 @@ def hierarchical_node_probabilities(
 
     debug = {
         "node_scores": node_scores.cpu(),
+        "temperature": temperature,
         "depth_probs": {depth: probs.cpu() for depth, probs in depth_probs.items()},
         "local_info": {
             name: {
