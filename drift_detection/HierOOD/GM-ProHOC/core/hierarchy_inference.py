@@ -80,8 +80,11 @@ def hierarchical_node_probabilities(
     node_scores = score_nodes(
         features,
         density_payload["means"],
-        density_payload["variances"],
+        density_payload.get("variances"),
+        covariance_matrices=density_payload.get("covariance_matrices"),
+        shared_covariance=density_payload.get("shared_covariance"),
         mean_directions=density_payload.get("mean_directions"),
+        covariance_type=density_payload.get("covariance_type", density_payload.get("config", {}).get("covariance_type", "diag")),
         score_type=score_type,
         temperature=temperature,
         kappa=kappa,

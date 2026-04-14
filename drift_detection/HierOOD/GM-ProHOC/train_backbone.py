@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from core.config import load_config, save_config
-from core.density import fit_diagonal_gaussians, score_nodes
+from core.density import fit_node_distributions, score_nodes
 from core.feature_io import save_artifact
 from core.hierarchy_labels import build_leaf_path_matrix, targets_to_path_labels
 from core.metric_losses import build_metric_loss
@@ -114,6 +114,7 @@ def compute_depthwise_accuracy(
     hierarchy,
     train_classes,
     leaf_path_matrix,
+    covariance_type,
     density_eps,
     score_type,
     temperature,
@@ -127,18 +128,22 @@ def compute_depthwise_accuracy(
         model, val_loader, device, desc="Depth eval val features"
     )
 
-    density = fit_diagonal_gaussians(
+    density = fit_node_distributions(
         train_features.float(),
         train_targets.long(),
         hierarchy,
         train_classes,
+        covariance_type=covariance_type,
         eps=density_eps,
     )
     node_scores = score_nodes(
         val_features.float(),
         density["means"].float(),
-        density["variances"].float(),
+        density.get("variances").float() if density.get("variances") is not None else None,
+        covariance_matrices=density.get("covariance_matrices").float() if density.get("covariance_matrices") is not None else None,
+        shared_covariance=density.get("shared_covariance").float() if density.get("shared_covariance") is not None else None,
         mean_directions=density.get("mean_directions", None).float() if density.get("mean_directions", None) is not None else None,
+        covariance_type=density.get("covariance_type", covariance_type),
         score_type=score_type,
         temperature=temperature,
         kappa=kappa,
@@ -317,6 +322,7 @@ def main():
                 hierarchy,
                 train_ds.classes,
                 leaf_path_matrix,
+                config["density"].get("covariance_type", "diag"),
                 config["density"]["eps"],
                 config["inference"].get("score_type", "gaussian_loglik"),
                 config["inference"].get("temperature", 1.0),

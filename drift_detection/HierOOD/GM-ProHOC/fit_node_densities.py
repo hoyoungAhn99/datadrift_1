@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 from core.config import load_merged_config, save_config
-from core.density import fit_diagonal_gaussians
+from core.density import fit_node_distributions
 from core.feature_io import load_artifact, save_artifact
 from feature_generation.utils.io import resolve_feature_tensor
 from libs.hierarchy import Hierarchy
@@ -28,11 +28,12 @@ def main():
 
     density_cfg = config["density"]
     train_features, feature_meta = resolve_feature_tensor(config, experiment_dir, "train")
-    density = fit_diagonal_gaussians(
+    density = fit_node_distributions(
         train_features,
         train_artifact["targets"].long(),
         hierarchy,
         train_artifact["class_names"],
+        covariance_type=density_cfg.get("covariance_type", "diag"),
         eps=density_cfg["eps"],
     )
     density["config"] = density_cfg

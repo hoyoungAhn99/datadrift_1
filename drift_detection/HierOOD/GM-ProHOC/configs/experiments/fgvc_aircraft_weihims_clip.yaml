@@ -86,7 +86,7 @@ feature_extraction:
   save_index_mappings: true             # choices: true, false
 
 density:
-  covariance_type: diag                 # choices: diag
+  covariance_type: diag                 # choices: diag, full, shared_full
   eps: 1.0e-6                           # choices: any positive float
   min_count_warning: 1                  # choices: any nonnegative int
   save_debug_statistics: false          # choices: true, false
