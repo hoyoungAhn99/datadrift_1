@@ -65,6 +65,18 @@ def build_inference_cfg(base_cfg: dict[str, Any], temperature: list[float], alph
     return inference_cfg
 
 
+def metric_lookup(df: pd.DataFrame, split: str, temperature_vector: str, alpha: float, beta: float) -> pd.Series | None:
+    matched = df[
+        (df["split"] == split)
+        & (df["temperature_vector"] == temperature_vector)
+        & (df["alpha"] == alpha)
+        & (df["beta"] == beta)
+    ]
+    if matched.empty:
+        return None
+    return matched.iloc[0]
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
@@ -157,14 +169,32 @@ def main():
     tuning_df.to_csv(tuning_csv, index=False)
 
     top_rows: list[pd.DataFrame] = []
-    split_df = tuning_df[tuning_df["split"] == args.target_split].copy()
+    ranking_df = tuning_df[tuning_df["split"] == args.target_split].copy()
     for metric in SCALAR_METRICS:
         ascending = metric_sort(metric)
-        ranked = split_df.sort_values(
+        ranked = ranking_df.sort_values(
             by=[metric, "alpha", "beta"] + [f"tau_depth_{depth}" for depth in tuned_depths],
             ascending=[ascending, True, True] + [True] * len(tuned_depths),
         ).head(args.topk).copy()
         ranked.insert(0, "rank_metric", metric)
+        display_rows = []
+        for _, row in ranked.iterrows():
+            combined = row.to_dict()
+            for metric_name in SCALAR_METRICS:
+                combined[f"{args.target_split}_{metric_name}"] = combined.pop(metric_name)
+            paired_split = "val" if args.target_split == "ood" else "ood"
+            paired_row = metric_lookup(
+                tuning_df,
+                paired_split,
+                row["temperature_vector"],
+                float(row["alpha"]),
+                float(row["beta"]),
+            )
+            if paired_row is not None:
+                for metric_name in SCALAR_METRICS:
+                    combined[f"{paired_split}_{metric_name}"] = paired_row[metric_name]
+            display_rows.append(combined)
+        ranked = pd.DataFrame(display_rows)
         top_rows.append(ranked)
 
     top_df = pd.concat(top_rows, ignore_index=True) if top_rows else pd.DataFrame()
@@ -184,11 +214,16 @@ def main():
                     "beta": row["beta"],
                     "score_type": row["score_type"],
                     "covariance_type": row["covariance_type"],
-                    metric: row[metric],
+                    f"{args.target_split}_{metric}": row[f"{args.target_split}_{metric}"],
                 }
             )
             for depth in tuned_depths:
                 summary_rows[-1][f"tau_depth_{depth}"] = row[f"tau_depth_{depth}"]
+            paired_split = "val" if args.target_split == "ood" else "ood"
+            for metric_name in SCALAR_METRICS:
+                col = f"{paired_split}_{metric_name}"
+                if col in row:
+                    summary_rows[-1][col] = row[col]
     summary_df = pd.DataFrame(summary_rows)
     summary_csv = output_dir / f"best_hparams_summary_{args.target_split}.csv"
     summary_df.to_csv(summary_csv, index=False)
@@ -196,7 +231,7 @@ def main():
     if args.prohoc:
         prohoc_rows = load_result_rows([Path(p) for p in _discover_paths(args.prohoc)], source_hint="prohoc")
         gm_compare_rows = []
-        for _, row in split_df.iterrows():
+        for _, row in ranking_df.iterrows():
             gm_compare_rows.append(
                 {
                     "source": "gm_prohoc",
