@@ -28,6 +28,22 @@ def _normalize_depthwise_temperature(temperature, depths: list[int]) -> dict[int
     return {depth: max(float(temperature), 1e-8) for depth in depths}
 
 
+def _normalize_depthwise_param(param, depths: list[int], min_value: float | None = None) -> dict[int, float]:
+    if isinstance(param, (list, tuple)):
+        if len(param) != len(depths):
+            raise ValueError(
+                f"depth-wise parameter length {len(param)} does not match "
+                f"number of non-root depths {len(depths)}"
+            )
+        values = [float(x) for x in param]
+    else:
+        values = [float(param) for _ in depths]
+
+    if min_value is not None:
+        values = [max(v, min_value) for v in values]
+    return {depth: value for depth, value in zip(depths, values)}
+
+
 def compute_depth_probs(node_scores: torch.Tensor, nodes_by_depth: dict[int, list[int]], temperature: float | list[float] = 1.0):
     depth_probs = {}
     non_root_depths = sorted(depth for depth in nodes_by_depth.keys() if depth != 0)
@@ -45,8 +61,8 @@ def _local_probabilities_for_node(
     hierarchy,
     depth_probs: dict[int, torch.Tensor],
     nodes_by_depth: dict[int, list[int]],
-    alpha: float,
-    beta: float,
+    alpha_by_depth: dict[int, float],
+    beta_by_depth: dict[int, float],
 ):
     children = hierarchy.parent2children.get(parent_name, [])
     if not children:
@@ -66,6 +82,8 @@ def _local_probabilities_for_node(
     eps = 1e-12
     child_local_probs = child_depth_probs / child_group_sum.clamp_min(eps)
     entropy = -torch.sum(child_local_probs * torch.log(child_local_probs + eps), dim=1)
+    alpha = alpha_by_depth[child_depth]
+    beta = beta_by_depth[child_depth]
     ood_mass = alpha * p_comp + beta * entropy
     ood_mass = torch.clamp(ood_mass, min=0.0)
 
@@ -81,6 +99,8 @@ def _local_probabilities_for_node(
         "child_probs": local_probs[:, :-1],
         "ood_prob": local_probs[:, -1],
         "ood_score": ood_mass,
+        "alpha": alpha,
+        "beta": beta,
         "p_comp": p_comp,
         "entropy": entropy,
     }
@@ -108,7 +128,10 @@ def hierarchical_node_probabilities(
         kappa=kappa,
     )
     nodes_by_depth = build_depth_maps(hierarchy)
+    non_root_depths = sorted(depth for depth in nodes_by_depth.keys() if depth != 0)
     depth_probs = compute_depth_probs(node_scores, nodes_by_depth, temperature=temperature)
+    alpha_by_depth = _normalize_depthwise_param(alpha, non_root_depths)
+    beta_by_depth = _normalize_depthwise_param(beta, non_root_depths)
 
     n_samples = features.shape[0]
     n_nodes = len(hierarchy.id_node_list)
@@ -121,8 +144,8 @@ def hierarchical_node_probabilities(
             hierarchy,
             depth_probs,
             nodes_by_depth,
-            alpha,
-            beta,
+            alpha_by_depth,
+            beta_by_depth,
         )
         if local is not None:
             local_info[parent] = local
@@ -146,6 +169,8 @@ def hierarchical_node_probabilities(
     debug = {
         "node_scores": node_scores.cpu(),
         "temperature": temperature,
+        "alpha": alpha,
+        "beta": beta,
         "depth_probs": {depth: probs.cpu() for depth, probs in depth_probs.items()},
         "local_info": {
             name: {
@@ -155,6 +180,8 @@ def hierarchical_node_probabilities(
                 "child_probs": payload["child_probs"].cpu(),
                 "ood_prob": payload["ood_prob"].cpu(),
                 "ood_score": payload["ood_score"].cpu(),
+                "alpha": payload["alpha"],
+                "beta": payload["beta"],
                 "p_comp": payload["p_comp"].cpu(),
                 "entropy": payload["entropy"].cpu(),
             }

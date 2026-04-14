@@ -57,20 +57,35 @@ def format_temperature_vector(temperature_vector: list[float] | tuple[float, ...
     return "[" + ",".join(f"{float(t):.6g}" for t in temperature_vector) + "]"
 
 
-def build_inference_cfg(base_cfg: dict[str, Any], temperature: list[float], alpha: float, beta: float) -> dict[str, Any]:
+def format_depth_vector(values: list[float] | tuple[float, ...]) -> str:
+    return "[" + ",".join(f"{float(v):.6g}" for v in values) + "]"
+
+
+def build_inference_cfg(
+    base_cfg: dict[str, Any],
+    temperature: list[float],
+    alpha: list[float],
+    beta: list[float],
+) -> dict[str, Any]:
     inference_cfg = dict(base_cfg)
     inference_cfg["temperature"] = [float(t) for t in temperature]
-    inference_cfg["alpha"] = float(alpha)
-    inference_cfg["beta"] = float(beta)
+    inference_cfg["alpha"] = [float(a) for a in alpha]
+    inference_cfg["beta"] = [float(b) for b in beta]
     return inference_cfg
 
 
-def metric_lookup(df: pd.DataFrame, split: str, temperature_vector: str, alpha: float, beta: float) -> pd.Series | None:
+def metric_lookup(
+    df: pd.DataFrame,
+    split: str,
+    temperature_vector: str,
+    alpha_vector: str,
+    beta_vector: str,
+) -> pd.Series | None:
     matched = df[
         (df["split"] == split)
         & (df["temperature_vector"] == temperature_vector)
-        & (df["alpha"] == alpha)
-        & (df["beta"] == beta)
+        & (df["alpha_vector"] == alpha_vector)
+        & (df["beta_vector"] == beta_vector)
     ]
     if matched.empty:
         return None
@@ -116,16 +131,23 @@ def main():
     rows: list[dict[str, Any]] = []
 
     tau_vectors = list(itertools.product(taus, repeat=len(tuned_depths)))
-    combinations = list(itertools.product(tau_vectors, alphas, betas))
+    alpha_vectors = list(itertools.product(alphas, repeat=len(tuned_depths)))
+    beta_vectors = list(itertools.product(betas, repeat=len(tuned_depths)))
+    combinations = list(itertools.product(tau_vectors, alpha_vectors, beta_vectors))
     progress = tqdm(combinations, desc="Hyperparameter tuning", total=len(combinations))
 
-    for temperature_vector, alpha, beta in progress:
+    for temperature_vector, alpha_vector, beta_vector in progress:
         progress.set_postfix(
             tau="[" + ",".join(f"{tau:.3g}" for tau in temperature_vector) + "]",
-            alpha=f"{alpha:.4g}",
-            beta=f"{beta:.4g}",
+            alpha="[" + ",".join(f"{a:.2g}" for a in alpha_vector) + "]",
+            beta="[" + ",".join(f"{b:.2g}" for b in beta_vector) + "]",
         )
-        inference_cfg = build_inference_cfg(config["inference"], list(temperature_vector), alpha, beta)
+        inference_cfg = build_inference_cfg(
+            config["inference"],
+            list(temperature_vector),
+            list(alpha_vector),
+            list(beta_vector),
+        )
         val_metrics = evaluate_split(
             val_artifact,
             val_features,
@@ -151,12 +173,16 @@ def main():
                 "score_type": inference_cfg.get("score_type"),
                 "covariance_type": density_payload.get("covariance_type", density_payload.get("config", {}).get("covariance_type")),
                 "temperature_vector": format_temperature_vector(temperature_vector),
-                "alpha": float(alpha),
-                "beta": float(beta),
+                "alpha_vector": format_depth_vector(alpha_vector),
+                "beta_vector": format_depth_vector(beta_vector),
                 "kappa": float(inference_cfg.get("kappa", 20.0)),
             }
             for depth, tau in zip(tuned_depths, temperature_vector):
                 row[f"tau_depth_{depth}"] = float(tau)
+            for depth, alpha in zip(tuned_depths, alpha_vector):
+                row[f"alpha_depth_{depth}"] = float(alpha)
+            for depth, beta in zip(tuned_depths, beta_vector):
+                row[f"beta_depth_{depth}"] = float(beta)
             for metric in SCALAR_METRICS:
                 value = metrics.get(metric)
                 if isinstance(value, torch.Tensor) and value.numel() == 1:
@@ -173,8 +199,11 @@ def main():
     for metric in SCALAR_METRICS:
         ascending = metric_sort(metric)
         ranked = ranking_df.sort_values(
-            by=[metric, "alpha", "beta"] + [f"tau_depth_{depth}" for depth in tuned_depths],
-            ascending=[ascending, True, True] + [True] * len(tuned_depths),
+            by=[metric]
+            + [f"tau_depth_{depth}" for depth in tuned_depths]
+            + [f"alpha_depth_{depth}" for depth in tuned_depths]
+            + [f"beta_depth_{depth}" for depth in tuned_depths],
+            ascending=[ascending] + [True] * (len(tuned_depths) * 3),
         ).head(args.topk).copy()
         ranked.insert(0, "rank_metric", metric)
         display_rows = []
@@ -187,8 +216,8 @@ def main():
                 tuning_df,
                 paired_split,
                 row["temperature_vector"],
-                float(row["alpha"]),
-                float(row["beta"]),
+                row["alpha_vector"],
+                row["beta_vector"],
             )
             if paired_row is not None:
                 for metric_name in SCALAR_METRICS:
@@ -210,8 +239,8 @@ def main():
                     "metric": metric,
                     "split": args.target_split,
                     "temperature_vector": row["temperature_vector"],
-                    "alpha": row["alpha"],
-                    "beta": row["beta"],
+                    "alpha_vector": row["alpha_vector"],
+                    "beta_vector": row["beta_vector"],
                     "score_type": row["score_type"],
                     "covariance_type": row["covariance_type"],
                     f"{args.target_split}_{metric}": row[f"{args.target_split}_{metric}"],
@@ -219,6 +248,8 @@ def main():
             )
             for depth in tuned_depths:
                 summary_rows[-1][f"tau_depth_{depth}"] = row[f"tau_depth_{depth}"]
+                summary_rows[-1][f"alpha_depth_{depth}"] = row[f"alpha_depth_{depth}"]
+                summary_rows[-1][f"beta_depth_{depth}"] = row[f"beta_depth_{depth}"]
             paired_split = "val" if args.target_split == "ood" else "ood"
             for metric_name in SCALAR_METRICS:
                 col = f"{paired_split}_{metric_name}"
@@ -240,8 +271,8 @@ def main():
                     "method": (
                         f"{config['experiment']['name']}"
                         f"_tau{row['temperature_vector']}"
-                        f"_a{row['alpha']:.6g}"
-                        f"_b{row['beta']:.6g}"
+                        f"_a{row['alpha_vector']}"
+                        f"_b{row['beta_vector']}"
                     ),
                     "split": row["split"],
                     "acc": row["acc"],
