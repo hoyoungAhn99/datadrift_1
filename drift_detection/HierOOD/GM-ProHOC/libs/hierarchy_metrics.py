@@ -1,4 +1,5 @@
 import torch
+import warnings
 
 from sklearn.metrics import balanced_accuracy_score
 
@@ -92,8 +93,16 @@ class HierarchicalPredAccuracy:
         
 
     def result_balanced_accuracy(self,):
-        return balanced_accuracy_score(self._tp_gts.cpu().numpy(),
-                                       self._preds.cpu().numpy())
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="y_pred contains classes not in y_true",
+                category=UserWarning,
+            )
+            return balanced_accuracy_score(
+                self._tp_gts.cpu().numpy(),
+                self._preds.cpu().numpy(),
+            )
 
     def result_class_recalls(self,):
         return get_class_recalls(self._preds.cpu(), self._tp_gts.cpu(), self._hierarchy)

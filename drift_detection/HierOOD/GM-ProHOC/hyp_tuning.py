@@ -7,6 +7,7 @@ from typing import Any
 
 import pandas as pd
 import torch
+from tqdm import tqdm
 
 from compare_results import load_result_rows
 from core.config import load_config
@@ -97,7 +98,15 @@ def main():
 
     rows: list[dict[str, Any]] = []
 
-    for temperature, alpha, beta in itertools.product(taus, alphas, betas):
+    combinations = list(itertools.product(taus, alphas, betas))
+    progress = tqdm(combinations, desc="Hyperparameter tuning", total=len(combinations))
+
+    for temperature, alpha, beta in progress:
+        progress.set_postfix(
+            tau=f"{temperature:.4g}",
+            alpha=f"{alpha:.4g}",
+            beta=f"{beta:.4g}",
+        )
         inference_cfg = build_inference_cfg(config["inference"], temperature, alpha, beta)
         val_metrics = evaluate_split(
             val_artifact,
