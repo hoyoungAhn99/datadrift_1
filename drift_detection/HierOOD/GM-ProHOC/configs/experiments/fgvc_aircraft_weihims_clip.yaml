@@ -93,10 +93,10 @@ density:
 
 inference:
   score_type: gaussian_loglik           # choices: gaussian_loglik, raw_gaussian, mahalanobis, vmf
-  temperature: 1.0                      # choices: any positive float
+  temperature: [1.0, 1.0, 1.0]         # choices: positive float or list[float] with one entry per non-root depth
   kappa: 20.0                           # choices: any positive float, used by vmf
-  alpha: 1.0                            # choices: any float
-  beta: 1.0                             # choices: any float
+  alpha: [1.0, 1.0, 1.0]               # choices: float or list[float] with one entry per non-root depth
+  beta: [1.0, 1.0, 1.0]                # choices: float or list[float] with one entry per non-root depth
   prediction_mode: argmax               # choices: argmax, min_hdist
   collapse_ood_to_parent: true          # choices: true, false
 
