@@ -2,9 +2,11 @@ import argparse
 import csv
 import itertools
 import os
+import warnings
 from types import SimpleNamespace
 
 import torch
+from tqdm import tqdm
 
 from gather_hinference import HInferenceEvaluator
 from libs.utils import score_util
@@ -66,6 +68,13 @@ def main():
     parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
     args = parser.parse_args()
 
+    warnings.filterwarnings(
+        "ignore",
+        message="y_pred contains classes not in y_true",
+        category=UserWarning,
+        module=r"sklearn\.metrics\._classification",
+    )
+
     eval_args = SimpleNamespace(
         hierarchy=args.hierarchy,
         basedir=args.basedir,
@@ -91,14 +100,15 @@ def main():
 
     rows = []
     grid = list(itertools.product(args.grid_values, repeat=4))
-    total = len(grid)
+    progress = tqdm(grid, desc="Grid search", unit="combo")
 
-    for index, (a0, a1, b0, b1) in enumerate(grid, start=1):
+    for a0, a1, b0, b1 in progress:
         depth_alpha = (a0, a1)
         depth_beta = (b0, b1)
-
-        if index == 1 or index % 100 == 0 or index == total:
-            print(f"[{index}/{total}] alpha={depth_alpha} beta={depth_beta}")
+        progress.set_postfix({
+            "a": f"{a0:g},{a1:g}",
+            "b": f"{b0:g},{b1:g}",
+        })
 
         for method_name, method_fn in methods.items():
             for min_hdist in (False, True):
