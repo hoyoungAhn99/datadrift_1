@@ -103,3 +103,6 @@ $RECYCLE.BIN/
 *.pth
 
 /ckpts
+/mds
+/ref_papers
+/results

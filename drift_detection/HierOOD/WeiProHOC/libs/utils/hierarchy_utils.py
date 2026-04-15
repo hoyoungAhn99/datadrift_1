@@ -1,8 +1,10 @@
-import torch
 import itertools
-from lib.hierarchy_metrics import calc_hdists
-from collections import defaultdict
 import json
+from collections import defaultdict
+
+import torch
+
+from libs.hierarchy_metrics import calc_hdists
 
 def get_avg_hdist(hdist_mat):
     hdist_total = 0.
