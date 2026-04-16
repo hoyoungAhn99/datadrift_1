@@ -1,8 +1,9 @@
 import argparse
 import random
+import subprocess
+import sys
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 from torch import nn
 from torch import optim
 from torch.utils.data import DataLoader
@@ -21,9 +22,6 @@ from libs.utils.dataset_util import gen_datasets, get_id_classes
 from libs.utils.hierarchy_utils import get_multidepth_classes, get_multidepth_target_transform
 import torchvision.models as models
 from torchvision.models import ResNet50_Weights
-
-# Device
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--height", type=int, required=True)
@@ -76,7 +74,7 @@ def setup_distributed(args, local_rank=0, rank=0, world_size=None):
         )
         return distributed, rank, world_size, local_rank, device, backend
 
-    device = torch.device(DEVICE)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return False, 0, 1, 0, device, None
 
 
@@ -97,7 +95,7 @@ def main(args, local_rank=0, rank=0, world_size=None):
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
+        torch.cuda.manual_seed(args.seed)
 
     id_classes = get_id_classes(args.id_split)
 
@@ -219,15 +217,52 @@ def main(args, local_rank=0, rank=0, world_size=None):
         dist.destroy_process_group()
 
 
-def ddp_worker(local_rank, args, world_size):
-    main(args, local_rank=local_rank, rank=local_rank, world_size=world_size)
+def launch_ddp_subprocesses():
+    world_size = int(os.environ.get("NPROC_PER_NODE", "2"))
+    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible_devices:
+        device_ids = [device.strip() for device in visible_devices.split(",") if device.strip()]
+    else:
+        device_ids = [str(i) for i in range(world_size)]
+
+    if len(device_ids) < world_size:
+        raise RuntimeError(
+            f"NPROC_PER_NODE={world_size}, but CUDA_VISIBLE_DEVICES only exposes "
+            f"{len(device_ids)} device(s): {','.join(device_ids)}"
+        )
+
+    base_env = os.environ.copy()
+    base_env.setdefault("USE_LIBUV", "0")
+    base_env.setdefault("MASTER_ADDR", "127.0.0.1")
+    base_env.setdefault("MASTER_PORT", "29500")
+
+    processes = []
+    for rank in range(world_size):
+        env = base_env.copy()
+        env["CUDA_VISIBLE_DEVICES"] = device_ids[rank]
+        env["WORLD_SIZE"] = str(world_size)
+        env["RANK"] = str(rank)
+        env["LOCAL_RANK"] = "0"
+        cmd = [sys.executable] + sys.argv
+        processes.append(subprocess.Popen(cmd, env=env))
+
+    exit_codes = []
+    try:
+        for process in processes:
+            exit_codes.append(process.wait())
+    except KeyboardInterrupt:
+        for process in processes:
+            process.terminate()
+        raise
+
+    failed = [code for code in exit_codes if code != 0]
+    if failed:
+        raise SystemExit(f"DDP worker failed with exit codes: {exit_codes}")
 
 
 if __name__=="__main__":
     args = parser.parse_args()
-    if args.multi_gpu and int(os.environ.get("WORLD_SIZE", "1")) == 1 and torch.cuda.device_count() > 1:
-        requested_world_size = int(os.environ.get("NPROC_PER_NODE", torch.cuda.device_count()))
-        world_size = min(requested_world_size, torch.cuda.device_count())
-        mp.spawn(ddp_worker, args=(args, world_size), nprocs=world_size, join=True)
+    if args.multi_gpu and int(os.environ.get("WORLD_SIZE", "1")) == 1:
+        launch_ddp_subprocesses()
     else:
         main(args)

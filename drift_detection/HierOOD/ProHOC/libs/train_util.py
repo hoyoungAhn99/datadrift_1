@@ -6,8 +6,6 @@ import torch.distributed as dist
 import torch.optim as optim
 from torch.nn.parallel import DistributedDataParallel
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
 
 class AverageMetric:
 
@@ -29,11 +27,11 @@ class AverageMetric:
 
     def result(self, distributed=False, reduce_device=None):
         if distributed and dist.is_available() and dist.is_initialized():
-            scores = self._running_scores.to(reduce_device)
-            count = torch.tensor([self._count], dtype=scores.dtype, device=reduce_device)
+            scores = self._running_scores.clone()
+            count = torch.tensor([self._count], dtype=scores.dtype)
             dist.all_reduce(scores, op=dist.ReduceOp.SUM)
             dist.all_reduce(count, op=dist.ReduceOp.SUM)
-            return scores.to("cpu") / count.to("cpu")
+            return scores / count
 
         return self._running_scores/self._count
 
