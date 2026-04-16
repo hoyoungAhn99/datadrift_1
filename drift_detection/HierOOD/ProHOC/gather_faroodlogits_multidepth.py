@@ -8,9 +8,9 @@ import torch
 from torch import Tensor
 from torch.utils.data import DataLoader, Subset
 
-from lib.hierarchy import Hierarchy
-from lib.utils.hierarchy_utils import get_multidepth_classes
-from lib.utils.dataset_util import get_id_classes
+from libs.hierarchy import Hierarchy
+from libs.utils.hierarchy_utils import get_multidepth_classes
+from libs.utils.dataset_util import get_id_classes
 
 import torch.nn as nn
 import torchvision.models as models

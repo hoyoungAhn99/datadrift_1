@@ -5,17 +5,17 @@ import importlib
 
 import torch
 
-from lib.hierarchy import Hierarchy
-from lib import hierarchy_metrics as hm
+from libs.hierarchy import Hierarchy
+from libs import hierarchy_metrics as hm
 
-from lib.utils.hierarchy_utils import (get_avg_hdist,
-                                       get_path_indices,
-                                       get_hdist_matrix,
-                                       expected_hdist,
-                                       gen_flat2node_map,
-                                       get_children_and_group_maps,
-                                       get_multidepth_classes)
-from lib.utils.dataset_util import get_id_classes
+from libs.utils.hierarchy_utils import (get_avg_hdist,
+                                        get_path_indices,
+                                        get_hdist_matrix,
+                                        expected_hdist,
+                                        gen_flat2node_map,
+                                        get_children_and_group_maps,
+                                        get_multidepth_classes)
+from libs.utils.dataset_util import get_id_classes
 
 parser = argparse.ArgumentParser()
 
@@ -403,7 +403,7 @@ def main(args):
 
     betas = [float(x) for x in args.betas]
 
-    score_module = importlib.import_module("lib.utils.score_util")
+    score_module = importlib.import_module("libs.utils.score_util")
 
     for method in args.uncertainty_methods:
         print(f"Evaluating {method}")

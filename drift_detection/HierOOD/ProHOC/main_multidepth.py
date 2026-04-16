@@ -15,10 +15,10 @@ except ModuleNotFoundError:
 
 import os
 
-from lib import train_util
-from lib.hierarchy import Hierarchy
-from lib.utils.dataset_util import gen_datasets, get_id_classes
-from lib.utils.hierarchy_utils import get_multidepth_classes, get_multidepth_target_transform
+from libs import train_util
+from libs.hierarchy import Hierarchy
+from libs.utils.dataset_util import gen_datasets, get_id_classes
+from libs.utils.hierarchy_utils import get_multidepth_classes, get_multidepth_target_transform
 import torchvision.models as models
 from torchvision.models import ResNet50_Weights
 

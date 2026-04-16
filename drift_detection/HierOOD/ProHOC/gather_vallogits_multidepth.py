@@ -7,13 +7,13 @@ import torch
 from torch import Tensor
 from torch.utils.data import DataLoader
 
-from lib.hierarchy import Hierarchy
-from lib.utils.dataset_util import (gen_datasets,
-                                    gen_custom_dataset,
-                                    get_id_classes)
+from libs.hierarchy import Hierarchy
+from libs.utils.dataset_util import (gen_datasets,
+                                     gen_custom_dataset,
+                                     get_id_classes)
 
-from lib.utils.hierarchy_utils import (get_multidepth_classes,
-                                       get_multidepth_target_transform)
+from libs.utils.hierarchy_utils import (get_multidepth_classes,
+                                        get_multidepth_target_transform)
 
 import torch.nn as nn
 import torchvision.models as models
