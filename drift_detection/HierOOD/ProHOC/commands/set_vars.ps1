@@ -5,8 +5,8 @@ $DSET="inat19"
 $HEIGHTS = 0, 1, 2, 3, 4, 5
 
 
-$FGVCSOURCE="$PROHOCDATA\FullData\fgvc-aircraft-2013b"
-$IMAGENETSOURCE="$PROHOCDATA\FullData\imagenet-object-localization-challenge\ILSVRC\Data\CLS-LOC"
-$INATSOURCE="$PROHOCDATA\FullData\inaturalist-2019-fgvc6"
+$FGVCSOURCE="$PROHOCDATA\FullDataset\fgvc-aircraft-2013b"
+$IMAGENETSOURCE="$PROHOCDATA\FullDataset\imagenet-object-localization-challenge\ILSVRC\Data\CLS-LOC"
+$INATSOURCE="$PROHOCDATA\FullDataset\inaturalist-2019-fgvc6\train_val2019"
 $INATSPLITS="$PROHOC\data\splits_inat19"
 $IMAGENETVALLABELS="$PROHOCDATA\FullDataset\imagenet-object-localization-challenge\LOC_val_solution.csv"
