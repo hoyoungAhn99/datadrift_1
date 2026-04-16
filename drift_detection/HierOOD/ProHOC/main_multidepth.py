@@ -1,10 +1,17 @@
 import argparse
 import random
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 from torch import nn
 from torch import optim
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
+from torch.utils.data.distributed import DistributedSampler
+from torch.nn.parallel import DistributedDataParallel
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ModuleNotFoundError:
+    SummaryWriter = None
 
 import os
 
@@ -35,6 +42,42 @@ parser.add_argument("--loginterval", type=int, default=250)
 parser.add_argument("--id_split", type=str, required=True)
 parser.add_argument("--num_workers", type=int, default=16)
 parser.add_argument("--multi_gpu", action="store_true")
+parser.add_argument("--dist_backend", type=str, default=None)
+parser.add_argument("--dist_url", type=str, default="tcp://127.0.0.1:29500?use_libuv=0")
+
+
+def setup_distributed(args, local_rank=0, rank=0, world_size=None):
+    world_size = int(os.environ.get("WORLD_SIZE", world_size or "1"))
+    distributed = args.multi_gpu and world_size > 1
+
+    if args.multi_gpu and not distributed and torch.cuda.device_count() > 1:
+        raise RuntimeError(
+            "--multi_gpu now uses DistributedDataParallel. "
+            "Launch this script normally and let it spawn workers, e.g. "
+            "`python main_multidepth.py ... --multi_gpu`."
+        )
+
+    if distributed:
+        local_rank = int(os.environ.get("LOCAL_RANK", local_rank))
+        rank = int(os.environ.get("RANK", rank))
+        backend = args.dist_backend or ("gloo" if os.name == "nt" else "nccl")
+
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+            device = torch.device("cuda", local_rank)
+        else:
+            device = torch.device("cpu")
+
+        dist.init_process_group(
+            backend=backend,
+            init_method=args.dist_url,
+            rank=rank,
+            world_size=world_size,
+        )
+        return distributed, rank, world_size, local_rank, device, backend
+
+    device = torch.device(DEVICE)
+    return False, 0, 1, 0, device, None
 
 
 class TargetTransform:
@@ -45,10 +88,16 @@ class TargetTransform:
         return self.target_transform[target]
 
 
-def main(args):
+def main(args, local_rank=0, rank=0, world_size=None):
+
+    distributed, rank, world_size, local_rank, device, backend = setup_distributed(
+        args, local_rank=local_rank, rank=rank, world_size=world_size)
+    is_main_process = rank == 0
 
     random.seed(args.seed)
     torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
     id_classes = get_id_classes(args.id_split)
 
@@ -58,7 +107,8 @@ def main(args):
 
     ood_classes = hierarchy.ood_train_classes
 
-    print("==> Preparing data..")
+    if is_main_process:
+        print("==> Preparing data..")
     train_ds, val_ds, _ = gen_datasets(args.datadir,
                                        id_classes,
                                        ood_classes,
@@ -77,25 +127,45 @@ def main(args):
 
     num_id_classes = len(multi_classes[-(height + 1)])
 
-    print(f"Height: {height}")
-    print(f"Nr classes: {num_id_classes}")
+    if is_main_process:
+        print(f"Height: {height}")
+        print(f"Nr classes: {num_id_classes}")
     
     target_transform_fn = TargetTransform(target_transform)
     train_ds.target_transform = target_transform_fn
     val_ds.target_transform = target_transform_fn
     
+    train_sampler = DistributedSampler(
+        train_ds,
+        num_replicas=world_size,
+        rank=rank,
+        shuffle=True,
+        seed=args.seed,
+    ) if distributed else None
+    val_sampler = DistributedSampler(
+        val_ds,
+        num_replicas=world_size,
+        rank=rank,
+        shuffle=False,
+    ) if distributed else None
+
     trainloader = DataLoader(
         train_ds, batch_size=args.batch_size,
-        shuffle=True, num_workers=args.num_workers)
+        shuffle=(train_sampler is None), num_workers=args.num_workers,
+        sampler=train_sampler, pin_memory=torch.cuda.is_available())
     valloader = DataLoader(
         val_ds, batch_size=args.batch_size,
-        shuffle=False, num_workers=args.num_workers)
+        shuffle=False, num_workers=args.num_workers,
+        sampler=val_sampler, pin_memory=torch.cuda.is_available())
 
     checkpoint_fn = os.path.join(args.traindir, "checkpoint.pt")
-    print(f"checkpoint filename: {checkpoint_fn}")
+    if is_main_process:
+        print(f"checkpoint filename: {checkpoint_fn}")
 
     tensorboard_dir = os.path.join(args.traindir, "tensorboard")
-    summary_writer = SummaryWriter(tensorboard_dir)
+    summary_writer = SummaryWriter(tensorboard_dir) if is_main_process and SummaryWriter is not None else None
+    if is_main_process and SummaryWriter is None:
+        print("TensorBoard is not installed; continuing without TensorBoard logging.")
 
     weights = None if "imagenet" in args.datadir else ResNet50_Weights.IMAGENET1K_V1
 
@@ -104,12 +174,17 @@ def main(args):
     
     criterion = nn.CrossEntropyLoss()
 
-    print(f"Device: {DEVICE}")
-    print(f"Model: ResNet-50, output classes: {num_id_classes}, weights: {weights}")
-    if args.multi_gpu and torch.cuda.device_count() > 1:
-        print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
-        net = nn.DataParallel(net)
-    net = net.to(DEVICE)
+    if is_main_process:
+        print(f"Device: {device}")
+        print(f"Model: ResNet-50, output classes: {num_id_classes}, weights: {weights}")
+        if distributed:
+            print(f"Using {world_size} processes with DistributedDataParallel ({backend})")
+    net = net.to(device)
+    if distributed:
+        ddp_kwargs = {}
+        if device.type == "cuda":
+            ddp_kwargs = {"device_ids": [local_rank], "output_device": local_rank}
+        net = DistributedDataParallel(net, **ddp_kwargs)
 
     optimizer = optim.SGD(net.parameters(),
                           lr=args.lr,
@@ -129,12 +204,30 @@ def main(args):
         checkpoint=checkpoint_fn,
         log_every_n=args.loginterval,
         summary_writer=summary_writer,
+        device=device,
+        distributed=distributed,
+        rank=rank,
+        train_sampler=train_sampler,
+        is_main_process=is_main_process,
     )
 
-    print(f"Top 1 Accuracy: {top1_acc}")
-    print(f"Top 5 Accuracy: {top5_acc}")
+    if is_main_process:
+        print(f"Top 1 Accuracy: {top1_acc}")
+        print(f"Top 5 Accuracy: {top5_acc}")
+
+    if distributed:
+        dist.destroy_process_group()
+
+
+def ddp_worker(local_rank, args, world_size):
+    main(args, local_rank=local_rank, rank=local_rank, world_size=world_size)
 
 
 if __name__=="__main__":
     args = parser.parse_args()
-    main(args)
+    if args.multi_gpu and int(os.environ.get("WORLD_SIZE", "1")) == 1 and torch.cuda.device_count() > 1:
+        requested_world_size = int(os.environ.get("NPROC_PER_NODE", torch.cuda.device_count()))
+        world_size = min(requested_world_size, torch.cuda.device_count())
+        mp.spawn(ddp_worker, args=(args, world_size), nprocs=world_size, join=True)
+    else:
+        main(args)
