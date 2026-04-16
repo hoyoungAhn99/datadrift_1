@@ -34,6 +34,19 @@ parser.add_argument("--node_beta_json", type=str, default=None)
 parser.add_argument("--result_suffix", type=str, default="")
 parser.add_argument("--output_path", type=str, default=None)
 parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
+parser.add_argument("--beta_schedule",
+                    choices=["constant", "inverse_depth", "exp_decay", "linear_decay"],
+                    default="constant")
+parser.add_argument("--schedule_beta0", type=float, default=1.0)
+parser.add_argument("--beta_gamma", type=float, default=0.5)
+parser.add_argument("--beta_k", type=float, default=0.5)
+parser.add_argument("--beta_min", type=float, default=0.0)
+parser.add_argument("--temperature_schedule",
+                    choices=["constant", "linear_increase", "exp_increase"],
+                    default="constant")
+parser.add_argument("--temperature_t0", type=float, default=1.0)
+parser.add_argument("--temperature_k", type=float, default=0.5)
+parser.add_argument("--temperature_r", type=float, default=1.5)
 
 
 def get_id_classes(id_classes_fn):
@@ -85,6 +98,11 @@ def build_uncertainty_args(args, evaluator, method):
         "depth_alpha": depth_alpha,
         "depth_beta": depth_beta,
         "beta_rule": args.beta_rule,
+        "beta_schedule": args.beta_schedule,
+        "beta0": args.schedule_beta0,
+        "beta_gamma": args.beta_gamma,
+        "beta_k": args.beta_k,
+        "beta_min": args.beta_min,
     }
 
     if method == "node_weighted_norm":
@@ -99,6 +117,43 @@ def build_uncertainty_args(args, evaluator, method):
         )
 
     return u_args
+
+
+def resolve_temperature(depth,
+                        temperature_schedule="constant",
+                        temperature_t0=1.0,
+                        temperature_k=0.5,
+                        temperature_r=1.5):
+    d = depth + 1
+    if temperature_schedule == "constant":
+        return float(temperature_t0)
+    if temperature_schedule == "linear_increase":
+        return float(temperature_t0) + float(temperature_k) * (d - 1)
+    if temperature_schedule == "exp_increase":
+        return float(temperature_t0) * (float(temperature_r) ** (d - 1))
+    raise ValueError(f"Unknown temperature_schedule: {temperature_schedule}")
+
+
+def build_softmax_with_temperature(logits,
+                                   temperature_schedule="constant",
+                                   temperature_t0=1.0,
+                                   temperature_k=0.5,
+                                   temperature_r=1.5):
+    max_height = len(logits)
+    softmax = []
+    for height_index, logit in enumerate(logits):
+        # H0 participates in the deepest local score, H1 in the shallower one.
+        depth = max_height - height_index - 2
+        if depth >= 0:
+            temperature = resolve_temperature(depth,
+                                              temperature_schedule=temperature_schedule,
+                                              temperature_t0=temperature_t0,
+                                              temperature_k=temperature_k,
+                                              temperature_r=temperature_r)
+        else:
+            temperature = 1.0
+        softmax.append(torch.softmax(logit / temperature, dim=-1))
+    return softmax
 
 
 def fuse_predictions(softmax,
@@ -313,17 +368,23 @@ class HInferenceEvaluator:
 
     def multi_predict(self,
                       logits,
-                      softmax,
+                      softmax=None,
                       u_method=None,
                       u_args=None,
                       min_hdist=False,
-                      beta=1.0):
+                      beta=1.0,
+                      temperature_args=None):
 
         if u_args is None:
             u_args = {}
+        if temperature_args is None:
+            temperature_args = {}
 
         logits = [x.detach().clone() for x in logits]
-        softmax = [x.detach().clone() for x in softmax]
+        if temperature_args:
+            softmax = build_softmax_with_temperature(logits, **temperature_args)
+        else:
+            softmax = [x.detach().clone() for x in softmax]
 
         fused_p = fuse_predictions(softmax,
                                    self.hierarchy,
@@ -427,6 +488,15 @@ def build_run_metadata(args, evaluator):
         "node_alpha_json": args.node_alpha_json,
         "node_beta_json": args.node_beta_json,
         "device": args.device,
+        "beta_schedule": args.beta_schedule,
+        "schedule_beta0": args.schedule_beta0,
+        "beta_gamma": args.beta_gamma,
+        "beta_k": args.beta_k,
+        "beta_min": args.beta_min,
+        "temperature_schedule": args.temperature_schedule,
+        "temperature_t0": args.temperature_t0,
+        "temperature_k": args.temperature_k,
+        "temperature_r": args.temperature_r,
         "score_depths": evaluator.score_depths,
         "score_num_classes_by_depth": evaluator.score_num_classes_by_depth,
         "parent_names_by_depth": evaluator.parent_names_by_depth,
@@ -449,16 +519,24 @@ def main(args):
         print(f"Evaluating {method}")
         method_fun = getattr(score_module, method)
         method_args = build_uncertainty_args(args, hinf, method)
+        temperature_args = {
+            "temperature_schedule": args.temperature_schedule,
+            "temperature_t0": args.temperature_t0,
+            "temperature_k": args.temperature_k,
+            "temperature_r": args.temperature_r,
+        }
 
         for beta in betas:
             res = hinf.predict_and_eval(u_method=method_fun,
                                         u_args=method_args,
+                                        temperature_args=temperature_args,
                                         min_hdist=False,
                                         beta=beta)
             allres[f"{method}_beta{beta}"] = res
 
             res = hinf.predict_and_eval(u_method=method_fun,
                                         u_args=method_args,
+                                        temperature_args=temperature_args,
                                         min_hdist=True,
                                         beta=beta)
             allres[f"{method}_minhdist_beta{beta}"] = res

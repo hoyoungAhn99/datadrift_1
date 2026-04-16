@@ -116,6 +116,24 @@ def _get_fixed_beta(num_classes, beta_rule):
     raise ValueError(f"Unknown beta_rule: {beta_rule}")
 
 
+def _resolve_scheduled_beta(depth,
+                            beta_schedule="constant",
+                            beta0=1.0,
+                            beta_gamma=0.5,
+                            beta_k=0.5,
+                            beta_min=0.0):
+    d = depth + 1
+    if beta_schedule == "constant":
+        return float(beta0)
+    if beta_schedule == "inverse_depth":
+        return 1.0 / d
+    if beta_schedule == "exp_decay":
+        return float(beta0) * (float(beta_gamma) ** (d - 1))
+    if beta_schedule == "linear_decay":
+        return max(float(beta0) - float(beta_k) * (d - 1), float(beta_min))
+    raise ValueError(f"Unknown beta_schedule: {beta_schedule}")
+
+
 def _compute_score_terms(p,
                          children_map,
                          group_sizes,
@@ -333,6 +351,86 @@ def depth_weighted_norm(p,
     alpha = _resolve_depth_weight(depth_alpha, depth)
     beta = _resolve_depth_weight(depth_beta, depth)
     score = alpha * entropy_norm + beta * p_comp
+
+    return _finalize_score(p,
+                           children_map,
+                           group_sizes,
+                           n_samples,
+                           n_parents,
+                           score,
+                           device=device)
+
+
+def scheduled_raw(p,
+                  children_map,
+                  group_sizes,
+                  n_samples,
+                  n_parents,
+                  device="cpu",
+                  depth=None,
+                  beta_schedule="constant",
+                  beta0=1.0,
+                  beta_gamma=0.5,
+                  beta_k=0.5,
+                  beta_min=0.0,
+                  **kwargs):
+
+    if depth is None:
+        raise ValueError("scheduled_raw requires the current depth")
+
+    _, entropy, _, p_comp = _compute_score_terms(p,
+                                                 children_map,
+                                                 group_sizes,
+                                                 n_samples,
+                                                 n_parents,
+                                                 device=device)
+    beta = _resolve_scheduled_beta(depth,
+                                   beta_schedule=beta_schedule,
+                                   beta0=beta0,
+                                   beta_gamma=beta_gamma,
+                                   beta_k=beta_k,
+                                   beta_min=beta_min)
+    score = entropy + beta * p_comp
+
+    return _finalize_score(p,
+                           children_map,
+                           group_sizes,
+                           n_samples,
+                           n_parents,
+                           score,
+                           device=device)
+
+
+def scheduled_norm(p,
+                   children_map,
+                   group_sizes,
+                   n_samples,
+                   n_parents,
+                   device="cpu",
+                   depth=None,
+                   beta_schedule="constant",
+                   beta0=1.0,
+                   beta_gamma=0.5,
+                   beta_k=0.5,
+                   beta_min=0.0,
+                   **kwargs):
+
+    if depth is None:
+        raise ValueError("scheduled_norm requires the current depth")
+
+    _, _, entropy_norm, p_comp = _compute_score_terms(p,
+                                                      children_map,
+                                                      group_sizes,
+                                                      n_samples,
+                                                      n_parents,
+                                                      device=device)
+    beta = _resolve_scheduled_beta(depth,
+                                   beta_schedule=beta_schedule,
+                                   beta0=beta0,
+                                   beta_gamma=beta_gamma,
+                                   beta_k=beta_k,
+                                   beta_min=beta_min)
+    score = entropy_norm + beta * p_comp
 
     return _finalize_score(p,
                            children_map,
