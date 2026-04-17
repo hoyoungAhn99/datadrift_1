@@ -1,6 +1,7 @@
 import argparse
 import csv
 import os
+import warnings
 from types import SimpleNamespace
 
 import torch
@@ -9,62 +10,72 @@ from gather_hinference import HInferenceEvaluator, build_uncertainty_args
 from libs.utils import score_util
 
 
-SCHEDULES = [
+warnings.filterwarnings("ignore", message="y_pred contains classes not in y_true")
+
+
+BETA_CONFIGS = [
     {
-        "name": "baseline_uniform",
+        "name": "beta_constant",
         "beta_schedule": "constant",
         "schedule_beta0": 1.0,
-        "temperature_schedule": "constant",
-        "temperature_t0": 1.0,
     },
     {
         "name": "beta_inverse_depth",
         "beta_schedule": "inverse_depth",
         "schedule_beta0": 1.0,
-        "temperature_schedule": "constant",
-        "temperature_t0": 1.0,
     },
     {
         "name": "beta_exp_decay_0p5",
         "beta_schedule": "exp_decay",
         "schedule_beta0": 1.0,
         "beta_gamma": 0.5,
+    },
+    {
+        "name": "beta_linear_decay_0p5",
+        "beta_schedule": "linear_decay",
+        "schedule_beta0": 1.0,
+        "beta_k": 0.5,
+        "beta_min": 0.0,
+    },
+]
+
+TEMPERATURE_CONFIGS = [
+    {
+        "name": "temp_constant_1p0",
         "temperature_schedule": "constant",
         "temperature_t0": 1.0,
     },
     {
         "name": "temp_constant_1p5",
-        "beta_schedule": "constant",
-        "schedule_beta0": 1.0,
         "temperature_schedule": "constant",
         "temperature_t0": 1.5,
     },
     {
         "name": "temp_linear_1p5_0p5",
-        "beta_schedule": "constant",
-        "schedule_beta0": 1.0,
         "temperature_schedule": "linear_increase",
         "temperature_t0": 1.5,
         "temperature_k": 0.5,
     },
     {
-        "name": "beta_exp_0p5_temp_const_1p5",
-        "beta_schedule": "exp_decay",
-        "schedule_beta0": 1.0,
-        "beta_gamma": 0.5,
-        "temperature_schedule": "constant",
+        "name": "temp_exp_1p5_1p25",
+        "temperature_schedule": "exp_increase",
         "temperature_t0": 1.5,
-    },
-    {
-        "name": "beta_exp_0p5_temp_linear_1p5_0p5",
-        "beta_schedule": "exp_decay",
-        "schedule_beta0": 1.0,
-        "beta_gamma": 0.5,
-        "temperature_schedule": "linear_increase",
-        "temperature_t0": 1.5,
-        "temperature_k": 0.5,
+        "temperature_r": 1.25,
     },
 ]
+
+
+def build_schedules():
+    schedules = []
+    for beta_config in BETA_CONFIGS:
+        for temperature_config in TEMPERATURE_CONFIGS:
+            schedule = {**beta_config, **temperature_config}
+            schedule["name"] = f"{beta_config['name']}__{temperature_config['name']}"
+            schedules.append(schedule)
+    return schedules
+
+
+SCHEDULES = build_schedules()
 
 
 def write_csv(path, rows):
