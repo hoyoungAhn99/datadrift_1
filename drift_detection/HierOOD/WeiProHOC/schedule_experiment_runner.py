@@ -65,14 +65,57 @@ TEMPERATURE_CONFIGS = [
 ]
 
 
-def build_schedules():
+def format_float_tag(value):
+    return str(value).replace(".", "p").replace("-", "m")
+
+
+def build_schedules(exp_beta_gamma=0.5, temp_t0=1.5, temp_linear_k=0.5, temp_exp_r=1.25):
     schedules = []
+    temperature_configs = []
+    for temperature_config in TEMPERATURE_CONFIGS:
+        temperature_config = dict(temperature_config)
+        if temperature_config.get("name") == "temp_constant_1p5":
+            temperature_config["temperature_t0"] = float(temp_t0)
+            temperature_config["name"] = f"temp_constant_{format_float_tag(temp_t0)}"
+        if temperature_config.get("temperature_schedule") == "linear_increase":
+            temperature_config["temperature_t0"] = float(temp_t0)
+            temperature_config["temperature_k"] = float(temp_linear_k)
+            temperature_config["name"] = f"temp_linear_{format_float_tag(temp_t0)}_{format_float_tag(temp_linear_k)}"
+        if temperature_config.get("temperature_schedule") == "exp_increase":
+            temperature_config["temperature_t0"] = float(temp_t0)
+            temperature_config["temperature_r"] = float(temp_exp_r)
+            temperature_config["name"] = f"temp_exp_{format_float_tag(temp_t0)}_{format_float_tag(temp_exp_r)}"
+        temperature_configs.append(temperature_config)
+
     for beta_config in BETA_CONFIGS:
-        for temperature_config in TEMPERATURE_CONFIGS:
+        beta_config = dict(beta_config)
+        if beta_config.get("beta_schedule") == "exp_decay":
+            beta_config["beta_gamma"] = float(exp_beta_gamma)
+            beta_config["name"] = f"beta_exp_decay_{format_float_tag(exp_beta_gamma)}"
+        for temperature_config in temperature_configs:
             schedule = {**beta_config, **temperature_config}
             schedule["name"] = f"{beta_config['name']}__{temperature_config['name']}"
             schedules.append(schedule)
-    return schedules
+
+    unique_schedules = []
+    seen = set()
+    for schedule in schedules:
+        key = (
+            schedule.get("beta_schedule"),
+            schedule.get("schedule_beta0", 1.0),
+            schedule.get("beta_gamma", ""),
+            schedule.get("beta_k", ""),
+            schedule.get("beta_min", ""),
+            schedule.get("temperature_schedule"),
+            schedule.get("temperature_t0", 1.0),
+            schedule.get("temperature_k", ""),
+            schedule.get("temperature_r", ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_schedules.append(schedule)
+    return unique_schedules
 
 
 SCHEDULES = build_schedules()
@@ -185,16 +228,22 @@ def main():
     parser.add_argument("--output_dir", required=True, type=str)
     parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
     parser.add_argument("--method", choices=["scheduled_raw", "scheduled_norm"], default="scheduled_raw")
+    parser.add_argument("--exp_beta_gamma", default=0.5, type=float)
+    parser.add_argument("--temp_t0", default=1.5, type=float)
+    parser.add_argument("--temp_linear_k", default=0.5, type=float)
+    parser.add_argument("--temp_exp_r", default=1.25, type=float)
     args = parser.parse_args()
 
-    base_args = make_args(args, SCHEDULES[0])
+    schedules = build_schedules(args.exp_beta_gamma, args.temp_t0, args.temp_linear_k, args.temp_exp_r)
+
+    base_args = make_args(args, schedules[0])
     evaluator = HInferenceEvaluator(base_args)
     method_fn = getattr(score_util, args.method)
 
     detail_rows = []
     summary_rows = []
 
-    for schedule in SCHEDULES:
+    for schedule in schedules:
         schedule_name = schedule["name"]
         print(f"Evaluating schedule: {schedule_name}")
         schedule_args = make_args(args, schedule)
