@@ -1,14 +1,20 @@
 import argparse
 import csv
 import os
+import sys
 import warnings
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import torch
 
 from gather_hinference import HInferenceEvaluator, build_uncertainty_args
 from libs.utils import score_util
 from schedule_experiment_runner import build_schedules, make_args
-from temperature_sweep_analysis import (
+from analyze.temperature_sweep_analysis import (
     build_leaf_descendant_map,
     build_node_analysis_plan,
     get_id_classes,

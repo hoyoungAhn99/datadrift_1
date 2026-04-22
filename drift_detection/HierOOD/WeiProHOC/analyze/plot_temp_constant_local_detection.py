@@ -1,20 +1,26 @@
 import argparse
 import csv
 import os
+import sys
 import warnings
+from pathlib import Path
 from types import SimpleNamespace
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import matplotlib.pyplot as plt
 
 from gather_hinference import HInferenceEvaluator
 from libs.utils import score_util
-from schedule_local_ood_detection import (
+from analyze.schedule_local_ood_detection import (
     add_detection_rows,
     get_split_class_names,
     merge_split_counts,
     update_counts_for_split,
 )
-from temperature_sweep_analysis import (
+from analyze.temperature_sweep_analysis import (
     build_leaf_descendant_map,
     build_node_analysis_plan,
     get_id_classes,

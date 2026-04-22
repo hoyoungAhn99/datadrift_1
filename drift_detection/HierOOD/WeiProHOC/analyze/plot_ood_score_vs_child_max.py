@@ -1,7 +1,13 @@
 import argparse
 import csv
 import os
+import sys
 from collections import defaultdict
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -11,7 +17,7 @@ from tqdm import tqdm
 
 from libs.hierarchy import Hierarchy
 from libs.utils.hierarchy_utils import get_multidepth_classes
-from temperature_sweep_analysis import (
+from analyze.temperature_sweep_analysis import (
     EPS,
     build_leaf_descendant_map,
     build_node_analysis_plan,
