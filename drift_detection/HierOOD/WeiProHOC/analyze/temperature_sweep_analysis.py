@@ -199,6 +199,7 @@ def compute_entropy_and_comp_rows(hierarchy,
     comp_rows = []
     entropy_by_child_count = defaultdict(list)
     comp_by_child_count = defaultdict(list)
+    comp_by_complement_count = defaultdict(list)
 
     id_class_names = [id_classes[int(x)] for x in val_targets_by_height[0].tolist()]
     ood_class_names = [ood_classes[int(x)] for x in ood_targets_by_height[0].tolist()]
@@ -226,6 +227,7 @@ def compute_entropy_and_comp_rows(hierarchy,
             if len(child_names) <= 1:
                 continue
             num_children = len(child_names)
+            num_complements = len(local_ood_leaf_sets[node_name])
             child_indices = [classifier_classes.index(child_name) for child_name in child_names]
 
             entropy_val, comp_val = compute_local_entropy_and_comp(probs_val, child_indices)
@@ -245,18 +247,22 @@ def compute_entropy_and_comp_rows(hierarchy,
             if id_mask.any():
                 nodes_with_id += 1
                 entropy_id_node_values = entropy_val[id_mask].detach().cpu().tolist()
+                comp_id_node_values = comp_val[id_mask].detach().cpu().tolist()
                 entropy_id_values.extend(entropy_id_node_values)
-                comp_id_values.extend(comp_val[id_mask].detach().cpu().tolist())
+                comp_id_values.extend(comp_id_node_values)
                 entropy_by_child_count[(depth, temperature, num_children, "id")].extend(entropy_id_node_values)
-                comp_by_child_count[(depth, temperature, num_children, "id")].extend(comp_val[id_mask].detach().cpu().tolist())
+                comp_by_child_count[(depth, temperature, num_children, "id")].extend(comp_id_node_values)
+                comp_by_complement_count[(depth, temperature, num_complements, "id")].extend(comp_id_node_values)
 
             if ood_mask.any():
                 nodes_with_ood += 1
                 entropy_ood_node_values = entropy_ood[ood_mask].detach().cpu().tolist()
+                comp_ood_node_values = comp_ood[ood_mask].detach().cpu().tolist()
                 entropy_ood_values.extend(entropy_ood_node_values)
-                comp_ood_values.extend(comp_ood[ood_mask].detach().cpu().tolist())
+                comp_ood_values.extend(comp_ood_node_values)
                 entropy_by_child_count[(depth, temperature, num_children, "ood")].extend(entropy_ood_node_values)
-                comp_by_child_count[(depth, temperature, num_children, "ood")].extend(comp_ood[ood_mask].detach().cpu().tolist())
+                comp_by_child_count[(depth, temperature, num_children, "ood")].extend(comp_ood_node_values)
+                comp_by_complement_count[(depth, temperature, num_complements, "ood")].extend(comp_ood_node_values)
 
         mean_ent_id, std_ent_id, count_ent_id = stats_or_nan(entropy_id_values)
         mean_ent_ood, std_ent_ood, count_ent_ood = stats_or_nan(entropy_ood_values)
@@ -338,7 +344,28 @@ def compute_entropy_and_comp_rows(hierarchy,
             "comp_gap": mean_ood - mean_id if not math.isnan(mean_id) and not math.isnan(mean_ood) else math.nan,
         })
 
-    return entropy_rows, comp_rows, entropy_child_rows, comp_child_rows
+    comp_complement_rows = []
+    grouped_complement_keys = sorted(set((depth, temperature, num_complements)
+                                         for depth, temperature, num_complements, _ in comp_by_complement_count.keys()))
+    for depth, temperature, num_complements in grouped_complement_keys:
+        id_values = comp_by_complement_count.get((depth, temperature, num_complements, "id"), [])
+        ood_values = comp_by_complement_count.get((depth, temperature, num_complements, "ood"), [])
+        mean_id, std_id, count_id = stats_or_nan(id_values)
+        mean_ood, std_ood, count_ood = stats_or_nan(ood_values)
+        comp_complement_rows.append({
+            "depth": depth,
+            "temperature": temperature,
+            "num_complements": num_complements,
+            "num_id_samples": count_id,
+            "num_ood_samples": count_ood,
+            "mean_comp_id": mean_id,
+            "std_comp_id": std_id,
+            "mean_comp_ood": mean_ood,
+            "std_comp_ood": std_ood,
+            "comp_gap": mean_ood - mean_id if not math.isnan(mean_id) and not math.isnan(mean_ood) else math.nan,
+        })
+
+    return entropy_rows, comp_rows, entropy_child_rows, comp_child_rows, comp_complement_rows
 
 
 def compute_calibration_rows(val_logits_by_height, val_targets_by_height, temperature_candidates, device):
@@ -449,7 +476,7 @@ def main():
         args.basedir, hierarchy._max_depth, "ood", device
     )
 
-    entropy_rows, comp_rows, entropy_child_rows, comp_child_rows = compute_entropy_and_comp_rows(
+    entropy_rows, comp_rows, entropy_child_rows, comp_child_rows, comp_complement_rows = compute_entropy_and_comp_rows(
         hierarchy,
         multi_classes,
         val_logits_by_height,
@@ -482,6 +509,7 @@ def main():
     write_csv(os.path.join(output_dir, "entropy_by_child_count.csv"), entropy_child_rows)
     write_csv(os.path.join(output_dir, "comp_prob_by_depth.csv"), comp_rows)
     write_csv(os.path.join(output_dir, "comp_prob_by_child_count.csv"), comp_child_rows)
+    write_csv(os.path.join(output_dir, "comp_prob_by_complement_count.csv"), comp_complement_rows)
     write_csv(os.path.join(output_dir, "calibration_by_depth.csv"), calibration_rows)
     write_csv(os.path.join(output_dir, "best_temperature_summary.csv"), summary_rows)
 

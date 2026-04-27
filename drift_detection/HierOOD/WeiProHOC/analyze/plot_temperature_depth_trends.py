@@ -155,6 +155,76 @@ def plot_entropy_gap_by_child_count(df, output_path):
     plt.close(fig)
 
 
+def plot_comp_by_child_count(df, output_path, temperature=1.0):
+    group = df[df["temperature"] == temperature].sort_values("num_children")
+    if group.empty:
+        raise ValueError(f"No child-count complementary probability rows found for temperature={temperature}")
+
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    ax.plot(group["num_children"], group["mean_comp_id"], marker="o", label="ID")
+    ax.plot(group["num_children"], group["mean_comp_ood"], marker="o", label="OOD")
+    ax.set_title(f"Complementary Probability by Number of Children at T={temperature:g}")
+    ax.set_xlabel("Number of children")
+    ax.set_ylabel("Mean complementary probability")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
+def plot_comp_gap_by_child_count(df, output_path):
+    fig, ax = plt.subplots(figsize=(8, 4.8))
+
+    for temp, group in df.groupby("temperature"):
+        group = group.sort_values("num_children")
+        ax.plot(group["num_children"], group["comp_gap"], marker="o", label=f"T={temp:g}")
+
+    ax.set_title("Complementary Probability ID/OOD Gap by Number of Children")
+    ax.set_xlabel("Number of children")
+    ax.set_ylabel("mean_ood - mean_id")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8, ncol=2)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
+def plot_comp_by_complement_count(df, output_path, temperature=1.0):
+    group = df[df["temperature"] == temperature].sort_values("num_complements")
+    if group.empty:
+        raise ValueError(f"No complementary-count rows found for temperature={temperature}")
+
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    ax.plot(group["num_complements"], group["mean_comp_id"], marker="o", label="ID")
+    ax.plot(group["num_complements"], group["mean_comp_ood"], marker="o", label="OOD")
+    ax.set_title(f"Complementary Probability by Number of Complements at T={temperature:g}")
+    ax.set_xlabel("Number of complementary leaves/classes")
+    ax.set_ylabel("Mean complementary probability")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
+def plot_comp_gap_by_complement_count(df, output_path):
+    fig, ax = plt.subplots(figsize=(8, 4.8))
+
+    for temp, group in df.groupby("temperature"):
+        group = group.sort_values("num_complements")
+        ax.plot(group["num_complements"], group["comp_gap"], marker="o", label=f"T={temp:g}")
+
+    ax.set_title("Complementary Probability ID/OOD Gap by Number of Complements")
+    ax.set_xlabel("Number of complementary leaves/classes")
+    ax.set_ylabel("mean_ood - mean_id")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=8, ncol=2)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+
 def weighted_mean(values, weights):
     weights = weights.clip(lower=0)
     total = weights.sum()
@@ -204,6 +274,40 @@ def aggregate_child_count_entropy_by_num_children(df):
     return out.sort_values(["temperature", "num_children"])
 
 
+def aggregate_child_count_comp_by_num_children(df):
+    rows = []
+    for (num_children, temperature), group in df.groupby(["num_children", "temperature"]):
+        rows.append({
+            "num_children": num_children,
+            "temperature": temperature,
+            "num_depth_bins": len(group),
+            "num_id_samples": int(group["num_id_samples"].sum()),
+            "num_ood_samples": int(group["num_ood_samples"].sum()),
+            "mean_comp_id": weighted_mean(group["mean_comp_id"], group["num_id_samples"]),
+            "mean_comp_ood": weighted_mean(group["mean_comp_ood"], group["num_ood_samples"]),
+        })
+    out = pd.DataFrame(rows)
+    out["comp_gap"] = out["mean_comp_ood"] - out["mean_comp_id"]
+    return out.sort_values(["temperature", "num_children"])
+
+
+def aggregate_complement_count_comp(df):
+    rows = []
+    for (num_complements, temperature), group in df.groupby(["num_complements", "temperature"]):
+        rows.append({
+            "num_complements": num_complements,
+            "temperature": temperature,
+            "num_depth_bins": len(group),
+            "num_id_samples": int(group["num_id_samples"].sum()),
+            "num_ood_samples": int(group["num_ood_samples"].sum()),
+            "mean_comp_id": weighted_mean(group["mean_comp_id"], group["num_id_samples"]),
+            "mean_comp_ood": weighted_mean(group["mean_comp_ood"], group["num_ood_samples"]),
+        })
+    out = pd.DataFrame(rows)
+    out["comp_gap"] = out["mean_comp_ood"] - out["mean_comp_id"]
+    return out.sort_values(["temperature", "num_complements"])
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -226,6 +330,8 @@ def main():
     entropy_df = pd.read_csv(os.path.join(input_dir, "entropy_by_depth.csv"))
     comp_df = pd.read_csv(os.path.join(input_dir, "comp_prob_by_depth.csv"))
     entropy_child_df = pd.read_csv(os.path.join(input_dir, "entropy_by_child_count.csv"))
+    comp_child_df = pd.read_csv(os.path.join(input_dir, "comp_prob_by_child_count.csv"))
+    comp_complement_df = pd.read_csv(os.path.join(input_dir, "comp_prob_by_complement_count.csv"))
     entropy_child_depth_df = aggregate_child_count_entropy_by_depth(entropy_child_df)
     entropy_child_depth_df.to_csv(
         os.path.join(output_dir, "entropy_by_depth_from_child_count_agg.csv"),
@@ -234,6 +340,16 @@ def main():
     entropy_child_count_df = aggregate_child_count_entropy_by_num_children(entropy_child_df)
     entropy_child_count_df.to_csv(
         os.path.join(output_dir, "entropy_by_child_count_agg.csv"),
+        index=False,
+    )
+    comp_child_count_df = aggregate_child_count_comp_by_num_children(comp_child_df)
+    comp_child_count_df.to_csv(
+        os.path.join(output_dir, "comp_prob_by_child_count_agg.csv"),
+        index=False,
+    )
+    comp_complement_count_df = aggregate_complement_count_comp(comp_complement_df)
+    comp_complement_count_df.to_csv(
+        os.path.join(output_dir, "comp_prob_by_complement_count_agg.csv"),
         index=False,
     )
 
@@ -292,6 +408,38 @@ def main():
     plot_entropy_gap_by_child_count(
         entropy_child_count_df,
         os.path.join(output_dir, "entropy_gap_by_child_count_agg.png"),
+    )
+    plot_comp_by_child_count(
+        comp_child_df,
+        os.path.join(output_dir, "comp_prob_id_ood_by_child_count_T1.png"),
+    )
+    plot_comp_gap_by_child_count(
+        comp_child_df,
+        os.path.join(output_dir, "comp_prob_gap_by_child_count.png"),
+    )
+    plot_comp_by_child_count(
+        comp_child_count_df,
+        os.path.join(output_dir, "comp_prob_id_ood_by_child_count_T1_agg.png"),
+    )
+    plot_comp_gap_by_child_count(
+        comp_child_count_df,
+        os.path.join(output_dir, "comp_prob_gap_by_child_count_agg.png"),
+    )
+    plot_comp_by_complement_count(
+        comp_complement_df,
+        os.path.join(output_dir, "comp_prob_id_ood_by_complement_count_T1.png"),
+    )
+    plot_comp_gap_by_complement_count(
+        comp_complement_df,
+        os.path.join(output_dir, "comp_prob_gap_by_complement_count.png"),
+    )
+    plot_comp_by_complement_count(
+        comp_complement_count_df,
+        os.path.join(output_dir, "comp_prob_id_ood_by_complement_count_T1_agg.png"),
+    )
+    plot_comp_gap_by_complement_count(
+        comp_complement_count_df,
+        os.path.join(output_dir, "comp_prob_gap_by_complement_count_agg.png"),
     )
 
     print(f"Saved plots to {os.path.abspath(output_dir)}")

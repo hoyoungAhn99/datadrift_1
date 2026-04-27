@@ -42,11 +42,12 @@ parser.add_argument("--beta_gamma", type=float, default=0.5)
 parser.add_argument("--beta_k", type=float, default=0.5)
 parser.add_argument("--beta_min", type=float, default=0.0)
 parser.add_argument("--temperature_schedule",
-                    choices=["constant", "linear_increase", "exp_increase"],
+                    choices=["constant", "linear_increase", "exp_increase", "linear_decrease", "exp_decrease", "depth_vector"],
                     default="constant")
 parser.add_argument("--temperature_t0", type=float, default=1.0)
 parser.add_argument("--temperature_k", type=float, default=0.5)
 parser.add_argument("--temperature_r", type=float, default=1.5)
+parser.add_argument("--temperature_vector_json", type=str, default=None)
 
 
 def get_id_classes(id_classes_fn):
@@ -123,14 +124,28 @@ def resolve_temperature(depth,
                         temperature_schedule="constant",
                         temperature_t0=1.0,
                         temperature_k=0.5,
-                        temperature_r=1.5):
+                        temperature_r=1.5,
+                        temperature_vector=None):
     d = depth + 1
+    if temperature_schedule == "depth_vector":
+        if temperature_vector is None:
+            raise ValueError("temperature_vector is required when temperature_schedule='depth_vector'")
+        if depth >= len(temperature_vector):
+            raise ValueError(
+                f"temperature_vector length mismatch: requested depth index {depth}, "
+                f"but only {len(temperature_vector)} values were provided"
+            )
+        return max(1e-6, float(temperature_vector[depth]))
     if temperature_schedule == "constant":
         return float(temperature_t0)
     if temperature_schedule == "linear_increase":
         return float(temperature_t0) + float(temperature_k) * (d - 1)
     if temperature_schedule == "exp_increase":
         return float(temperature_t0) * (float(temperature_r) ** (d - 1))
+    if temperature_schedule == "linear_decrease":
+        return max(1e-6, float(temperature_t0) - float(temperature_k) * (d - 1))
+    if temperature_schedule == "exp_decrease":
+        return max(1e-6, float(temperature_t0) / (float(temperature_r) ** (d - 1)))
     raise ValueError(f"Unknown temperature_schedule: {temperature_schedule}")
 
 
@@ -138,7 +153,8 @@ def build_softmax_with_temperature(logits,
                                    temperature_schedule="constant",
                                    temperature_t0=1.0,
                                    temperature_k=0.5,
-                                   temperature_r=1.5):
+                                   temperature_r=1.5,
+                                   temperature_vector=None):
     max_height = len(logits)
     softmax = []
     for height_index, logit in enumerate(logits):
@@ -149,7 +165,8 @@ def build_softmax_with_temperature(logits,
                                               temperature_schedule=temperature_schedule,
                                               temperature_t0=temperature_t0,
                                               temperature_k=temperature_k,
-                                              temperature_r=temperature_r)
+                                              temperature_r=temperature_r,
+                                              temperature_vector=temperature_vector)
         else:
             temperature = 1.0
         softmax.append(torch.softmax(logit / temperature, dim=-1))
@@ -479,6 +496,10 @@ class HInferenceEvaluator:
 
 
 def build_run_metadata(args, evaluator):
+    temperature_vector = None
+    if getattr(args, "temperature_vector_json", None):
+        with open(args.temperature_vector_json, "r", encoding="utf-8") as f:
+            temperature_vector = [float(x) for x in json.load(f)]
     return {
         "uncertainty_methods": list(args.uncertainty_methods),
         "betas": [float(x) for x in args.betas],
@@ -497,6 +518,7 @@ def build_run_metadata(args, evaluator):
         "temperature_t0": args.temperature_t0,
         "temperature_k": args.temperature_k,
         "temperature_r": args.temperature_r,
+        "temperature_vector": temperature_vector,
         "score_depths": evaluator.score_depths,
         "score_num_classes_by_depth": evaluator.score_num_classes_by_depth,
         "parent_names_by_depth": evaluator.parent_names_by_depth,
@@ -524,7 +546,11 @@ def main(args):
             "temperature_t0": args.temperature_t0,
             "temperature_k": args.temperature_k,
             "temperature_r": args.temperature_r,
+            "temperature_vector": None,
         }
+        if args.temperature_vector_json is not None:
+            with open(args.temperature_vector_json, "r", encoding="utf-8") as f:
+                temperature_args["temperature_vector"] = [float(x) for x in json.load(f)]
 
         for beta in betas:
             res = hinf.predict_and_eval(u_method=method_fun,
