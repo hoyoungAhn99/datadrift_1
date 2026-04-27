@@ -1,7 +1,6 @@
 import argparse
 import csv
 import itertools
-import math
 import os
 import sys
 from pathlib import Path
@@ -52,6 +51,11 @@ def write_csv(path, rows):
         writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         writer.writeheader()
         writer.writerows(rows)
+
+
+def maybe_write_csv(path, rows):
+    if rows:
+        write_csv(path, rows)
 
 
 def scalar(x):
@@ -156,23 +160,46 @@ def iterate_depthwise_vectors(candidates, score_depths, monotonic="none"):
         yield tuple(float(x) for x in vector)
 
 
-def count_depthwise_vectors(candidates, score_depths, monotonic="none"):
-    if monotonic == "none":
+def count_depthwise_vectors(candidates, score_depths, monotonic="none", num_shards=1, shard_index=0):
+    if monotonic == "none" and num_shards == 1:
         return len(candidates) ** score_depths
     count = 0
-    for _ in iterate_depthwise_vectors(candidates, score_depths, monotonic=monotonic):
+    for idx, _ in enumerate(iterate_depthwise_vectors(candidates, score_depths, monotonic=monotonic)):
+        if idx % num_shards != shard_index:
+            continue
         count += 1
     return count
 
 
-def run_depthwise_search(args, evaluator, method_fn, candidates, score_depths, monotonic="none"):
+def run_depthwise_search(args,
+                         evaluator,
+                         method_fn,
+                         candidates,
+                         score_depths,
+                         output_dir,
+                         monotonic="none",
+                         num_shards=1,
+                         shard_index=0,
+                         batch_size=100):
     rows = []
     run_names = [f"{args.method}_argmax", f"{args.method}_minhdist"]
     schedule_args = build_base_namespace(args)
-    total = count_depthwise_vectors(candidates, score_depths, monotonic=monotonic)
+    total = count_depthwise_vectors(
+        candidates,
+        score_depths,
+        monotonic=monotonic,
+        num_shards=num_shards,
+        shard_index=shard_index,
+    )
 
     iterator = iterate_depthwise_vectors(candidates, score_depths, monotonic=monotonic)
-    for vector in tqdm(iterator, total=total, desc="Depth-wise search", unit="grid"):
+    processed = 0
+    partial_path = os.path.join(output_dir, f"depthwise_temperature_search.shard_{shard_index}_partial.csv")
+    final_path = os.path.join(output_dir, f"depthwise_temperature_search.shard_{shard_index}.csv")
+
+    for idx, vector in enumerate(tqdm(iterator, total=None, desc="Depth-wise search", unit="grid")):
+        if idx % num_shards != shard_index:
+            continue
         temperature_args = {
             "temperature_schedule": "depth_vector",
             "temperature_t0": float(vector[0]),
@@ -193,6 +220,14 @@ def run_depthwise_search(args, evaluator, method_fn, candidates, score_depths, m
                 row[f"T_depth{idx}"] = float(value)
             row.update(metrics)
             rows.append(row)
+        processed += 1
+        if batch_size > 0 and processed % batch_size == 0:
+            rows.sort(key=lambda r: (r["run"], r["temperature_spec"]))
+            maybe_write_csv(partial_path, rows)
+
+    rows.sort(key=lambda r: (r["run"], r["temperature_spec"]))
+    maybe_write_csv(final_path, rows)
+    maybe_write_csv(partial_path, rows)
     return rows
 
 
@@ -329,6 +364,10 @@ def main():
     )
     parser.add_argument("--search_mode", choices=["full_grid"], default="full_grid")
     parser.add_argument("--monotonic", choices=["none", "increasing", "decreasing"], default="none")
+    parser.add_argument("--num_shards", type=int, default=1)
+    parser.add_argument("--shard_index", type=int, default=0)
+    parser.add_argument("--batch_size", type=int, default=100)
+    parser.add_argument("--skip_global", action="store_true")
     args = parser.parse_args()
 
     if args.dataset is not None:
@@ -344,6 +383,10 @@ def main():
         raise ValueError(f"Missing required arguments: {', '.join(missing)}")
 
     candidates = parse_candidates(args.temperature_candidates)
+    if args.num_shards < 1:
+        raise ValueError("--num_shards must be >= 1")
+    if not (0 <= args.shard_index < args.num_shards):
+        raise ValueError("--shard_index must satisfy 0 <= shard_index < num_shards")
     output_dir = os.path.abspath(args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
 
@@ -352,17 +395,32 @@ def main():
     method_fn = getattr(score_util, args.method)
     score_depths = evaluator.score_depths
 
-    global_rows = run_global_sweep(args, evaluator, method_fn, candidates, score_depths)
-    depth_rows = run_depthwise_search(args, evaluator, method_fn, candidates, score_depths, monotonic=args.monotonic)
-    summary_rows = summarize_best(global_rows, depth_rows)
+    global_rows = []
+    if not args.skip_global and args.shard_index == 0:
+        global_rows = run_global_sweep(args, evaluator, method_fn, candidates, score_depths)
+        write_csv(os.path.join(output_dir, "global_temperature_sweep.csv"), global_rows)
+        plot_global_sweep(global_rows, os.path.join(output_dir, "global_temperature_sweep.png"))
 
-    write_csv(os.path.join(output_dir, "global_temperature_sweep.csv"), global_rows)
-    write_csv(os.path.join(output_dir, "depthwise_temperature_search.csv"), depth_rows)
-    write_csv(os.path.join(output_dir, "temperature_comparison_summary.csv"), summary_rows)
+    depth_rows = run_depthwise_search(
+        args,
+        evaluator,
+        method_fn,
+        candidates,
+        score_depths,
+        output_dir,
+        monotonic=args.monotonic,
+        num_shards=args.num_shards,
+        shard_index=args.shard_index,
+        batch_size=args.batch_size,
+    )
 
-    plot_global_sweep(global_rows, os.path.join(output_dir, "global_temperature_sweep.png"))
-    plot_best_comparison(summary_rows, os.path.join(output_dir, "global_vs_depthwise_best.png"))
-    plot_best_depth_profiles(summary_rows, os.path.join(output_dir, "best_depthwise_temperature_profiles.png"))
+    if args.num_shards == 1:
+        write_csv(os.path.join(output_dir, "depthwise_temperature_search.csv"), depth_rows)
+        if global_rows:
+            summary_rows = summarize_best(global_rows, depth_rows)
+            write_csv(os.path.join(output_dir, "temperature_comparison_summary.csv"), summary_rows)
+            plot_best_comparison(summary_rows, os.path.join(output_dir, "global_vs_depthwise_best.png"))
+            plot_best_depth_profiles(summary_rows, os.path.join(output_dir, "best_depthwise_temperature_profiles.png"))
 
     metadata_rows = [{
         "dataset": args.dataset or "",
@@ -374,11 +432,14 @@ def main():
         "temperature_candidates": ",".join(str(x) for x in candidates),
         "search_mode": args.search_mode,
         "monotonic": args.monotonic,
+        "num_shards": args.num_shards,
+        "shard_index": args.shard_index,
+        "batch_size": args.batch_size,
         "score_depths": score_depths,
         "global_count": len(global_rows) // 2,
         "depthwise_grid_count": len(depth_rows) // 2,
     }]
-    write_csv(os.path.join(output_dir, "experiment_metadata.csv"), metadata_rows)
+    write_csv(os.path.join(output_dir, f"experiment_metadata.shard_{args.shard_index}.csv"), metadata_rows)
 
     print(f"Saved experiment outputs to {output_dir}")
 
