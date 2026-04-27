@@ -360,7 +360,7 @@ def main():
     parser.add_argument(
         "--temperature_candidates",
         type=str,
-        default="0.1,0.2,0.3,0.5,0.8,1.0,1.2,1.5,2.0,3.0,5.0,8.0,10.0",
+        default="0.1,0.2,0.3,0.5,1.0,1.5,2.0,3.0,5.0,10.0",
     )
     parser.add_argument("--search_mode", choices=["full_grid"], default="full_grid")
     parser.add_argument("--monotonic", choices=["none", "increasing", "decreasing"], default="none")
