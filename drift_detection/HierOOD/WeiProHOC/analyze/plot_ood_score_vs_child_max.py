@@ -12,6 +12,8 @@ if str(ROOT) not in sys.path:
 import matplotlib.pyplot as plt
 import pandas as pd
 import torch
+from matplotlib.lines import Line2D
+from matplotlib.ticker import FixedLocator
 from sklearn.metrics import average_precision_score, balanced_accuracy_score, roc_auc_score
 from tqdm import tqdm
 
@@ -325,6 +327,65 @@ def plot_score_vs_child_max(df, output_path):
     plt.close(fig)
 
 
+def plot_score_vs_child_max_single_schedule_flat(df, schedule_name, output_path):
+    group = df[df["schedule_name"] == schedule_name].sort_values(["split", "hierarchy_depth"])
+    if group.empty:
+        raise ValueError(f"No rows found for schedule: {schedule_name}")
+
+    fig, ax = plt.subplots(figsize=(8.2, 3.5))
+    split_colors = {
+        "ID": "tab:blue",
+        "OOD": "tab:red",
+    }
+    labels = {
+        ("ID", "mean_score"): "ID OOD score",
+        ("ID", "mean_max_child_prob"): "ID max child prob",
+        ("OOD", "mean_score"): "OOD OOD score",
+        ("OOD", "mean_max_child_prob"): "OOD max child prob",
+    }
+
+    for split, split_group in group.groupby("split"):
+        split_group = split_group.sort_values("hierarchy_depth")
+        for column in ["mean_score", "mean_max_child_prob"]:
+            linestyle = "-" if column == "mean_score" else (0, (2.2, 1.6))
+            ax.plot(
+                split_group["hierarchy_depth"],
+                split_group[column],
+                marker="o",
+                linestyle=linestyle,
+                color=split_colors.get(split),
+                linewidth=1.8,
+                markersize=5,
+                label=labels[(split, column)],
+            )
+
+    ax.set_xlabel("Hierarchy parent depth")
+    ax.set_ylabel("Mean value")
+    ax.xaxis.set_major_locator(FixedLocator(sorted(group["hierarchy_depth"].unique())))
+    ax.tick_params(axis="both", labelsize=11.5)
+    ax.xaxis.label.set_size(12.5)
+    ax.yaxis.label.set_size(12.5)
+    ax.grid(True, alpha=0.3)
+    legend_handles = [
+        Line2D([0], [0], color="tab:blue", linestyle="-", linewidth=1.8, marker="o", markersize=5, label="ID OOD score"),
+        Line2D([0], [0], color="tab:blue", linestyle=(0, (2.2, 1.6)), linewidth=1.8, marker="o", markersize=5, label="ID max child prob"),
+        Line2D([0], [0], color="tab:red", linestyle="-", linewidth=1.8, marker="o", markersize=5, label="OOD OOD score"),
+        Line2D([0], [0], color="tab:red", linestyle=(0, (2.2, 1.6)), linewidth=1.8, marker="o", markersize=5, label="OOD max child prob"),
+    ]
+    ax.legend(
+        handles=legend_handles,
+        fontsize=10.8,
+        ncol=2,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.31),
+        handlelength=2.8,
+        columnspacing=1.4,
+    )
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_score_vs_child_max_for_split(df, split, output_path):
     split_df = df[df["split"] == split]
     schedules = list(split_df["schedule_name"].unique())
@@ -561,6 +622,11 @@ def main():
     df = pd.DataFrame(rows)
     binary_df = pd.DataFrame(binary_rows)
     plot_score_vs_child_max(df, os.path.join(output_dir, f"ood_score_vs_child_max_by_depth{suffix}.png"))
+    plot_score_vs_child_max_single_schedule_flat(
+        df,
+        schedules[0]["name"],
+        os.path.join(output_dir, f"ood_score_vs_child_max_baseline_flat{suffix}.png"),
+    )
     plot_score_vs_child_max_for_split(
         df,
         "ID",

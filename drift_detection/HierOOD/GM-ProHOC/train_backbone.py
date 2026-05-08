@@ -78,6 +78,84 @@ def build_scheduler(optimizer, config):
     raise ValueError(f"Unsupported scheduler: {sched_cfg.get('name')}")
 
 
+def extract_model_state(checkpoint):
+    if not isinstance(checkpoint, dict):
+        return checkpoint
+    for key in ("model_state_dict", "model", "state_dict", "backbone_state_dict"):
+        if key in checkpoint:
+            return checkpoint[key]
+    if checkpoint and all(torch.is_tensor(value) for value in checkpoint.values()):
+        return checkpoint
+    raise ValueError("Could not find model weights in checkpoint.")
+
+
+def load_model_weights(model, checkpoint):
+    state_dict = extract_model_state(checkpoint)
+    target_model = unwrap_model(model)
+    try:
+        target_model.load_state_dict(state_dict)
+        return
+    except RuntimeError:
+        stripped = {
+            key[7:] if key.startswith("module.") else key: value
+            for key, value in state_dict.items()
+        }
+        target_model.load_state_dict(stripped)
+
+
+def load_resume_checkpoint(model, optimizer, scheduler, config, device):
+    resume_from = config["training"].get("resume_from")
+    if not resume_from:
+        return 0, float("inf"), None
+
+    checkpoint = torch.load(resume_from, map_location=device)
+    load_model_weights(model, checkpoint)
+
+    start_epoch = 0
+    best_val_loss = float("inf")
+    history = None
+
+    if isinstance(checkpoint, dict):
+        if "optimizer_state_dict" in checkpoint:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if scheduler is not None and "scheduler_state_dict" in checkpoint:
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        start_epoch = int(checkpoint.get("epoch", -1)) + 1
+        best_val_loss = float(checkpoint.get("best_val_loss", best_val_loss))
+        history = checkpoint.get("history")
+
+    print(f"Resumed from checkpoint: {resume_from}")
+    if start_epoch > 0:
+        print(f"Continuing at epoch {start_epoch + 1}")
+    else:
+        print("Loaded model weights only; optimizer and epoch state were not found.")
+    return start_epoch, best_val_loss, history
+
+
+def save_training_checkpoint(
+    path,
+    model,
+    optimizer,
+    scheduler,
+    epoch,
+    best_val_loss,
+    history,
+    config,
+    path_meta,
+):
+    payload = {
+        "epoch": epoch,
+        "model_state_dict": unwrap_model(model).state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
+        "best_val_loss": best_val_loss,
+        "history": history,
+        "config": config,
+        "path_metadata": path_meta,
+    }
+    torch.save(payload, path)
+
+
 def evaluate_loss(model, loader, loss_fn, leaf_path_matrix, device, desc="Val loss"):
     model.eval()
     total_loss = 0.0
@@ -276,13 +354,21 @@ def main():
     scheduler = build_scheduler(optimizer, config)
 
     epochs = config["training"]["epochs"]
-    best_val_loss = float("inf")
     history = {"train_loss": [], "val_loss": []}
+    start_epoch, best_val_loss, resume_history = load_resume_checkpoint(
+        model,
+        optimizer,
+        scheduler,
+        config,
+        device,
+    )
+    if resume_history is not None:
+        history = resume_history
     validation_cfg = config.get("validation", {})
     enable_depth_eval = validation_cfg.get("enable_depth_eval", False)
     depth_eval_every = max(int(validation_cfg.get("depth_eval_every", 1)), 1)
 
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, epochs):
         model.train()
         running_loss = 0.0
         steps = 0
@@ -355,6 +441,29 @@ def main():
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save(unwrap_model(model).state_dict(), experiment_dir / "checkpoint_backbone.pt")
+            save_training_checkpoint(
+                experiment_dir / "checkpoint_best.pt",
+                model,
+                optimizer,
+                scheduler,
+                epoch,
+                best_val_loss,
+                history,
+                config,
+                path_meta,
+            )
+
+        save_training_checkpoint(
+            experiment_dir / "checkpoint_latest.pt",
+            model,
+            optimizer,
+            scheduler,
+            epoch,
+            best_val_loss,
+            history,
+            config,
+            path_meta,
+        )
 
     save_artifact(
         {
