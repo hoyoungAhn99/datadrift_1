@@ -1,5 +1,7 @@
 seed: 42
 device: cuda
+multi_gpu: data_parallel
+device_ids: [0, 1]
 
 dataset:
   name: Reuters-10k
@@ -11,7 +13,7 @@ model:
   embedding_dim: 128
 
 training:
-  batch_size: 128
+  batch_size: 256
   num_workers: 0
   lr: 0.001
   weight_decay: 0.0001

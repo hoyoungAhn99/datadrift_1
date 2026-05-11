@@ -8,7 +8,16 @@ import torch
 
 from data import build_dataloaders
 from models import build_model
+from utils.gpu import get_device, maybe_data_parallel
 from utils.io import load_config
+
+
+def _base_state_dict(checkpoint: dict):
+    state = checkpoint.get("base_model_state", checkpoint["model_state"])
+    return {
+        key.removeprefix("module."): value
+        for key, value in state.items()
+    }
 
 
 @torch.no_grad()
@@ -25,16 +34,18 @@ def _collect(model, loader, device):
 
 
 def extract_features(config: dict, checkpoint_path: str | Path, output_path: str | Path):
-    device = torch.device(config.get("device", "cuda" if torch.cuda.is_available() else "cpu"))
+    device = get_device(config)
     datasets, loaders = build_dataloaders(config)
     model = build_model(
         config,
         datasets["input_shape"],
         datasets["input_dim"],
         datasets["input_kind"],
-    ).to(device)
+    )
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(checkpoint["model_state"])
+    model.load_state_dict(_base_state_dict(checkpoint))
+    model = model.to(device)
+    model = maybe_data_parallel(model, config)
 
     split = datasets["split_info"]
     arrays = {}

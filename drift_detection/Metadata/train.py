@@ -8,6 +8,7 @@ import torch
 from MS import MS_loss
 from data import build_dataloaders
 from models import build_model
+from utils.gpu import get_device, maybe_data_parallel, unwrap_model
 from utils.io import load_config, save_json
 from utils.seed import set_seed
 
@@ -40,7 +41,7 @@ def train_model(config: dict, run_dir: str | Path):
 
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
-    device = torch.device(config.get("device", "cuda" if torch.cuda.is_available() else "cpu"))
+    device = get_device(config)
 
     datasets, loaders = build_dataloaders(config)
     model = build_model(
@@ -49,6 +50,7 @@ def train_model(config: dict, run_dir: str | Path):
         datasets["input_dim"],
         datasets["input_kind"],
     ).to(device)
+    model = maybe_data_parallel(model, config)
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -74,10 +76,12 @@ def train_model(config: dict, run_dir: str | Path):
             torch.save(
                 {
                     "model_state": model.state_dict(),
+                    "base_model_state": unwrap_model(model).state_dict(),
                     "config": config,
                     "input_shape": datasets["input_shape"],
                     "input_dim": datasets["input_dim"],
                     "input_kind": datasets["input_kind"],
+                    "data_parallel": isinstance(model, torch.nn.DataParallel),
                 },
                 checkpoint_path,
             )
@@ -94,6 +98,9 @@ def train_model(config: dict, run_dir: str | Path):
             "ood_classes": list(split.ood_classes),
             "best_val_loss": best_val,
             "epochs_ran": len(history),
+            "device": str(device),
+            "data_parallel": isinstance(model, torch.nn.DataParallel),
+            "cuda_device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
         },
     )
     save_json(run_dir / "train_log.json", {"history": history})
