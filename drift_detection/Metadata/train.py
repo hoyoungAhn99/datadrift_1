@@ -143,17 +143,38 @@ def train_model(config: dict, run_dir: str | Path):
     )
 
     max_epochs = int(config["training"].get("epochs", 50))
-    patience = int(config["training"].get("patience", 10))
     show_progress = bool(config["training"].get("progress_bar", True))
+    selection_cfg = config.get("model_selection", {})
+    default_checkpoint = selection_cfg.get("default_checkpoint", "auroc")
     best_val_loss = float("inf")
     best_val_auroc = -float("inf")
-    bad_epochs = 0
+    best_train_loss = float("inf")
     history = []
-    checkpoint_path = run_dir / "checkpoint.pt"
+    checkpoint_paths = {
+        "train_loss": run_dir / "checkpoint_best_train_loss.pt",
+        "val_loss": run_dir / "checkpoint_best_val_loss.pt",
+        "auroc": run_dir / "checkpoint_best_val_ood_auroc.pt",
+    }
     tensorboard_cfg = config.get("tensorboard", {})
     use_tensorboard = bool(tensorboard_cfg.get("enabled", True))
     writer = SummaryWriter(run_dir / tensorboard_cfg.get("log_dir", "tensorboard")) if use_tensorboard else None
     global_step = 0
+
+    def save_checkpoint(path: Path, selection_metric: str, selection_score: float) -> None:
+        torch.save(
+            {
+                "model_state": model.state_dict(),
+                "base_model_state": unwrap_model(model).state_dict(),
+                "config": config,
+                "input_shape": datasets["input_shape"],
+                "input_dim": datasets["input_dim"],
+                "input_kind": datasets["input_kind"],
+                "data_parallel": isinstance(model, torch.nn.DataParallel),
+                "selection_metric": selection_metric,
+                "selection_score": selection_score,
+            },
+            path,
+        )
 
     epoch_iter = tqdm(
         range(1, max_epochs + 1),
@@ -196,6 +217,8 @@ def train_model(config: dict, run_dir: str | Path):
             if writer is not None:
                 writer.add_scalar("selection/val_ood_auroc", val_auroc, epoch)
                 writer.add_scalar("selection/best_val_ood_auroc", max(best_val_auroc, val_auroc), epoch)
+                writer.add_scalar("selection/best_train_loss", min(best_train_loss, train_loss), epoch)
+                writer.add_scalar("selection/best_val_loss", min(best_val_loss, val_loss), epoch)
             epoch_iter.set_postfix(
                 train_loss=f"{train_loss:.4f}",
                 val_loss=f"{val_loss:.4f}",
@@ -203,35 +226,27 @@ def train_model(config: dict, run_dir: str | Path):
                 best_auroc=f"{max(best_val_auroc, val_auroc):.4f}",
             )
 
-            best_val_loss = min(best_val_loss, val_loss)
+            saved = []
+            if train_loss < best_train_loss:
+                best_train_loss = train_loss
+                save_checkpoint(
+                    checkpoint_paths["train_loss"], "min_train_loss", best_train_loss
+                )
+                saved.append("train_loss")
+
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                save_checkpoint(checkpoint_paths["val_loss"], "min_val_loss", best_val_loss)
+                saved.append("val_loss")
+
             if val_auroc > best_val_auroc:
                 best_val_auroc = val_auroc
-                bad_epochs = 0
-                status = "saved checkpoint by AUROC"
-                torch.save(
-                    {
-                        "model_state": model.state_dict(),
-                        "base_model_state": unwrap_model(model).state_dict(),
-                        "config": config,
-                        "input_shape": datasets["input_shape"],
-                        "input_dim": datasets["input_dim"],
-                        "input_kind": datasets["input_kind"],
-                        "data_parallel": isinstance(model, torch.nn.DataParallel),
-                        "selection_metric": "val_ood_auroc",
-                        "selection_score": best_val_auroc,
-                    },
-                    checkpoint_path,
+                save_checkpoint(
+                    checkpoint_paths["auroc"], "max_val_ood_auroc", best_val_auroc
                 )
-            else:
-                bad_epochs += 1
-                status = f"no improvement {bad_epochs}/{patience}"
-                if bad_epochs >= patience:
-                    tqdm.write(
-                        f"early stopping at epoch {epoch}: "
-                        f"train_loss={train_loss:.4f}, val_loss={val_loss:.4f}, "
-                        f"val_ood_auroc={val_auroc:.4f}, best_val_ood_auroc={best_val_auroc:.4f}"
-                    )
-                    break
+                saved.append("auroc")
+
+            status = f"saved: {', '.join(saved)}" if saved else "no checkpoint update"
             tqdm.write(
                 f"epoch {epoch}/{max_epochs}: train_loss={train_loss:.4f}, "
                 f"val_loss={val_loss:.4f}, val_ood_auroc={val_auroc:.4f}, "
@@ -248,9 +263,15 @@ def train_model(config: dict, run_dir: str | Path):
         {
             "id_classes": list(split.id_classes),
             "ood_classes": list(split.ood_classes),
+            "best_train_loss": best_train_loss,
             "best_val_loss": best_val_loss,
             "best_val_ood_auroc": best_val_auroc,
-            "checkpoint_selection": "max_val_ood_auroc",
+            "checkpoint_selection": "all_epochs_best_train_loss_best_val_loss_best_val_ood_auroc",
+            "default_checkpoint": default_checkpoint,
+            "checkpoints": {
+                key: str(path)
+                for key, path in checkpoint_paths.items()
+            },
             "selection_ood_score": config.get("model_selection", {}).get("ood_score", "knn"),
             "selection_ood_split": "ood_test",
             "epochs_ran": len(history),
@@ -260,7 +281,12 @@ def train_model(config: dict, run_dir: str | Path):
         },
     )
     save_json(run_dir / "train_log.json", {"history": history})
-    return checkpoint_path
+    if default_checkpoint not in checkpoint_paths:
+        raise ValueError(
+            f"Unknown model_selection.default_checkpoint={default_checkpoint}. "
+            f"Choose one of {list(checkpoint_paths)}."
+        )
+    return checkpoint_paths[default_checkpoint]
 
 
 def main():

@@ -30,6 +30,7 @@ tensorboard:
 model_selection:
   metric: val_ood_auroc
   ood_score: knn
+  default_checkpoint: auroc
 
 ood:
   k: 5
