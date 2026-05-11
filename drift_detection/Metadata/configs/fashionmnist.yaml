@@ -33,5 +33,5 @@ model_selection:
   default_checkpoint: auroc
 
 ood:
-  k: 5
+  k: 1
   cov_reg: 0.00001
