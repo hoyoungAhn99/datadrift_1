@@ -63,7 +63,15 @@ def fit_node_distributions(
             covariance_matrices[node_idx] = _fit_full_covariance(node_features, means[node_idx], eps)
 
     if covariance_type == "shared_full":
-        shared_covariance = _fit_shared_full_covariance(node_features_by_idx, means, feat_dim, features.dtype, eps)
+        shared_covariance = _fit_depth_shared_full_covariance(
+            node_features_by_idx,
+            means,
+            hierarchy,
+            feat_dim,
+            features.dtype,
+            features.device,
+            eps,
+        )
         covariance_matrices = None
 
     return {
@@ -158,25 +166,44 @@ def _fit_full_covariance(node_features: torch.Tensor, mean: torch.Tensor, eps: f
     return cov + eye * eps
 
 
-def _fit_shared_full_covariance(
+def _fit_depth_shared_full_covariance(
     node_features_by_idx: list[torch.Tensor],
     means: torch.Tensor,
+    hierarchy,
     feat_dim: int,
     dtype: torch.dtype,
+    device: torch.device,
     eps: float,
 ) -> torch.Tensor:
-    eye = torch.eye(feat_dim, dtype=dtype)
-    total_count = 0
-    scatter = torch.zeros((feat_dim, feat_dim), dtype=dtype)
-    for node_idx, node_features in enumerate(node_features_by_idx):
-        if node_features.shape[0] == 0:
-            continue
-        centered = node_features - means[node_idx].unsqueeze(0)
-        scatter += centered.transpose(0, 1).matmul(centered)
-        total_count += node_features.shape[0]
-    if total_count == 0:
-        return eye * eps
-    return scatter / total_count + eye * eps
+    eye = torch.eye(feat_dim, dtype=dtype, device=device)
+    n_nodes = len(node_features_by_idx)
+    covariances = torch.empty((n_nodes, feat_dim, feat_dim), dtype=dtype, device=device)
+    depth_to_nodes: dict[int, list[int]] = {}
+
+    for node_idx, node_name in enumerate(hierarchy.id_node_list):
+        depth = len(hierarchy.node_ancestors[node_name])
+        depth_to_nodes.setdefault(depth, []).append(node_idx)
+
+    for node_indices in depth_to_nodes.values():
+        total_count = 0
+        scatter = torch.zeros((feat_dim, feat_dim), dtype=dtype, device=device)
+        for node_idx in node_indices:
+            node_features = node_features_by_idx[node_idx]
+            if node_features.shape[0] == 0:
+                continue
+            centered = node_features - means[node_idx].unsqueeze(0)
+            scatter += centered.transpose(0, 1).matmul(centered)
+            total_count += node_features.shape[0]
+
+        if total_count == 0:
+            shared_cov = eye * eps
+        else:
+            shared_cov = scatter / total_count + eye * eps
+
+        for node_idx in node_indices:
+            covariances[node_idx] = shared_cov
+
+    return covariances
 
 
 def _gaussian_terms(
@@ -206,6 +233,13 @@ def _gaussian_terms(
     if covariance_type == "shared_full":
         if shared_covariance is None:
             raise ValueError("shared_covariance is required for shared_full scoring")
+        if shared_covariance.dim() == 3:
+            inv_cov = torch.linalg.inv(shared_covariance)
+            sign, logabsdet = torch.linalg.slogdet(shared_covariance)
+            if not torch.all(sign > 0):
+                raise ValueError("depth-shared full covariance matrices must be positive definite")
+            maha = torch.einsum("bnd,nde,bne->bn", diff, inv_cov, diff)
+            return maha, logabsdet
         inv_cov = torch.linalg.inv(shared_covariance)
         sign, logabsdet = torch.linalg.slogdet(shared_covariance)
         if not bool(sign.item() > 0):
