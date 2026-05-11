@@ -3,23 +3,48 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import numpy as np
 import torch
+from torch.utils.tensorboard import SummaryWriter
+from tqdm.auto import tqdm
+from sklearn.metrics import roc_auc_score
 
 from MS import MS_loss
 from data import build_dataloaders
 from models import build_model
+from ood.gaussian import gaussian_scores
+from ood.knn import knn_scores
+from ood.mahalanobis import mahalanobis_scores
 from utils.gpu import get_device, maybe_data_parallel, unwrap_model
 from utils.io import load_config, save_json
 from utils.seed import set_seed
 
 
-def _run_epoch(model, loader, optimizer, device):
+def _run_epoch(
+    model,
+    loader,
+    optimizer,
+    device,
+    epoch: int,
+    max_epochs: int,
+    show_progress: bool,
+    writer: SummaryWriter | None = None,
+    global_step: int = 0,
+):
     train = optimizer is not None
     model.train(train)
     total_loss = 0.0
     total_count = 0
+    phase = "train" if train else "val"
+    iterator = tqdm(
+        loader,
+        desc=f"epoch {epoch}/{max_epochs} {phase}",
+        leave=False,
+        disable=not show_progress,
+        dynamic_ncols=True,
+    )
 
-    for x, y in loader:
+    for x, y in iterator:
         x = x.to(device)
         y = y.to(device)
         with torch.set_grad_enabled(train):
@@ -31,8 +56,67 @@ def _run_epoch(model, loader, optimizer, device):
                 optimizer.step()
         total_loss += float(loss.detach()) * x.size(0)
         total_count += x.size(0)
+        running_loss = total_loss / max(total_count, 1)
+        iterator.set_postfix(loss=f"{running_loss:.4f}")
+        if writer is not None and train:
+            writer.add_scalar("batch/train_loss", float(loss.detach()), global_step)
+            writer.add_scalar("batch/train_running_loss", running_loss, global_step)
+            global_step += 1
 
-    return total_loss / max(total_count, 1)
+    return total_loss / max(total_count, 1), global_step
+
+
+@torch.no_grad()
+def _collect_embeddings(model, loader, device, show_progress: bool, desc: str):
+    model.eval()
+    features = []
+    labels = []
+    iterator = tqdm(
+        loader,
+        desc=desc,
+        leave=False,
+        disable=not show_progress,
+        dynamic_ncols=True,
+    )
+    for x, y in iterator:
+        x = x.to(device)
+        features.append(model(x).detach().cpu().numpy())
+        labels.append(y.numpy())
+    return np.concatenate(features, axis=0), np.concatenate(labels, axis=0)
+
+
+def _score_ood(config: dict, train_features, train_labels, test_features):
+    method = config.get("model_selection", {}).get("ood_score", "knn").lower()
+    k = int(config.get("ood", {}).get("k", 5))
+    cov_reg = float(config.get("ood", {}).get("cov_reg", 1e-5))
+
+    if method in {"knn", "kNN".lower()}:
+        return knn_scores(train_features, test_features, k)
+    if method == "mahalanobis":
+        return mahalanobis_scores(train_features, train_labels, test_features, cov_reg)
+    if method in {"gaussian", "gaussian_likelihood"}:
+        return gaussian_scores(train_features, train_labels, test_features, cov_reg)
+    raise ValueError(f"Unsupported model_selection.ood_score: {method}")
+
+
+def _validation_ood_auroc(config: dict, model, loaders, device, epoch: int, show_progress: bool):
+    train_features, train_labels = _collect_embeddings(
+        model, loaders["train"], device, show_progress, f"epoch {epoch} OOD bank"
+    )
+    id_features, _ = _collect_embeddings(
+        model, loaders["val"], device, show_progress, f"epoch {epoch} OOD ID-val"
+    )
+    ood_features, _ = _collect_embeddings(
+        model, loaders["ood_test"], device, show_progress, f"epoch {epoch} OOD OOD-val"
+    )
+
+    id_scores = _score_ood(config, train_features, train_labels, id_features)
+    ood_scores = _score_ood(config, train_features, train_labels, ood_features)
+    labels = np.concatenate(
+        [np.zeros(len(id_scores), dtype=np.int64), np.ones(len(ood_scores), dtype=np.int64)]
+    )
+    scores = np.concatenate([id_scores, ood_scores])
+    return float(roc_auc_score(labels, scores))
 
 
 def train_model(config: dict, run_dir: str | Path):
@@ -60,35 +144,103 @@ def train_model(config: dict, run_dir: str | Path):
 
     max_epochs = int(config["training"].get("epochs", 50))
     patience = int(config["training"].get("patience", 10))
-    best_val = float("inf")
+    show_progress = bool(config["training"].get("progress_bar", True))
+    best_val_loss = float("inf")
+    best_val_auroc = -float("inf")
     bad_epochs = 0
     history = []
     checkpoint_path = run_dir / "checkpoint.pt"
+    tensorboard_cfg = config.get("tensorboard", {})
+    use_tensorboard = bool(tensorboard_cfg.get("enabled", True))
+    writer = SummaryWriter(run_dir / tensorboard_cfg.get("log_dir", "tensorboard")) if use_tensorboard else None
+    global_step = 0
 
-    for epoch in range(1, max_epochs + 1):
-        train_loss = _run_epoch(model, loaders["train"], optimizer, device)
-        val_loss = _run_epoch(model, loaders["val"], None, device)
-        history.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss})
-
-        if val_loss < best_val:
-            best_val = val_loss
-            bad_epochs = 0
-            torch.save(
-                {
-                    "model_state": model.state_dict(),
-                    "base_model_state": unwrap_model(model).state_dict(),
-                    "config": config,
-                    "input_shape": datasets["input_shape"],
-                    "input_dim": datasets["input_dim"],
-                    "input_kind": datasets["input_kind"],
-                    "data_parallel": isinstance(model, torch.nn.DataParallel),
-                },
-                checkpoint_path,
+    epoch_iter = tqdm(
+        range(1, max_epochs + 1),
+        desc="training",
+        disable=not show_progress,
+        dynamic_ncols=True,
+    )
+    try:
+        for epoch in epoch_iter:
+            train_loss, global_step = _run_epoch(
+                model,
+                loaders["train"],
+                optimizer,
+                device,
+                epoch,
+                max_epochs,
+                show_progress,
+                writer,
+                global_step,
             )
-        else:
-            bad_epochs += 1
-            if bad_epochs >= patience:
-                break
+            val_loss, global_step = _run_epoch(
+                model, loaders["val"], None, device, epoch, max_epochs, show_progress, None, global_step
+            )
+            if writer is not None:
+                writer.add_scalar("epoch/train_loss", train_loss, epoch)
+                writer.add_scalar("epoch/val_loss", val_loss, epoch)
+                writer.add_scalar("epoch/lr", optimizer.param_groups[0]["lr"], epoch)
+                writer.add_scalar("epoch/best_val_loss", min(best_val_loss, val_loss), epoch)
+            val_auroc = _validation_ood_auroc(
+                config, model, loaders, device, epoch, show_progress
+            )
+            history.append(
+                {
+                    "epoch": epoch,
+                    "train_loss": train_loss,
+                    "val_loss": val_loss,
+                    "val_ood_auroc": val_auroc,
+                }
+            )
+            if writer is not None:
+                writer.add_scalar("selection/val_ood_auroc", val_auroc, epoch)
+                writer.add_scalar("selection/best_val_ood_auroc", max(best_val_auroc, val_auroc), epoch)
+            epoch_iter.set_postfix(
+                train_loss=f"{train_loss:.4f}",
+                val_loss=f"{val_loss:.4f}",
+                val_auroc=f"{val_auroc:.4f}",
+                best_auroc=f"{max(best_val_auroc, val_auroc):.4f}",
+            )
+
+            best_val_loss = min(best_val_loss, val_loss)
+            if val_auroc > best_val_auroc:
+                best_val_auroc = val_auroc
+                bad_epochs = 0
+                status = "saved checkpoint by AUROC"
+                torch.save(
+                    {
+                        "model_state": model.state_dict(),
+                        "base_model_state": unwrap_model(model).state_dict(),
+                        "config": config,
+                        "input_shape": datasets["input_shape"],
+                        "input_dim": datasets["input_dim"],
+                        "input_kind": datasets["input_kind"],
+                        "data_parallel": isinstance(model, torch.nn.DataParallel),
+                        "selection_metric": "val_ood_auroc",
+                        "selection_score": best_val_auroc,
+                    },
+                    checkpoint_path,
+                )
+            else:
+                bad_epochs += 1
+                status = f"no improvement {bad_epochs}/{patience}"
+                if bad_epochs >= patience:
+                    tqdm.write(
+                        f"early stopping at epoch {epoch}: "
+                        f"train_loss={train_loss:.4f}, val_loss={val_loss:.4f}, "
+                        f"val_ood_auroc={val_auroc:.4f}, best_val_ood_auroc={best_val_auroc:.4f}"
+                    )
+                    break
+            tqdm.write(
+                f"epoch {epoch}/{max_epochs}: train_loss={train_loss:.4f}, "
+                f"val_loss={val_loss:.4f}, val_ood_auroc={val_auroc:.4f}, "
+                f"best_val_ood_auroc={best_val_auroc:.4f}, {status}"
+            )
+    finally:
+        if writer is not None:
+            writer.flush()
+            writer.close()
 
     split = datasets["split_info"]
     save_json(
@@ -96,7 +248,11 @@ def train_model(config: dict, run_dir: str | Path):
         {
             "id_classes": list(split.id_classes),
             "ood_classes": list(split.ood_classes),
-            "best_val_loss": best_val,
+            "best_val_loss": best_val_loss,
+            "best_val_ood_auroc": best_val_auroc,
+            "checkpoint_selection": "max_val_ood_auroc",
+            "selection_ood_score": config.get("model_selection", {}).get("ood_score", "knn"),
+            "selection_ood_split": "ood_test",
             "epochs_ran": len(history),
             "device": str(device),
             "data_parallel": isinstance(model, torch.nn.DataParallel),

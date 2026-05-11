@@ -1,7 +1,9 @@
 seed: 42
 device: cuda
-multi_gpu: data_parallel
-device_ids: [0, 1]
+multi_gpu:
+  enabled: false
+  backend: data_parallel
+  device_ids: [0, 1]
 
 dataset:
   name: USPS
@@ -15,10 +17,19 @@ model:
 training:
   batch_size: 256
   num_workers: 0
-  lr: 0.001
-  weight_decay: 0.0001
+  lr: 0.0001
+  weight_decay: 0.00001
   epochs: 1
   patience: 1
+  progress_bar: true
+
+tensorboard:
+  enabled: true
+  log_dir: tensorboard
+
+model_selection:
+  metric: val_ood_auroc
+  ood_score: knn
 
 ood:
   k: 3

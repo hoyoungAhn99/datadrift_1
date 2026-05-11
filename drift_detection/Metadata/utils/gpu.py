@@ -14,16 +14,40 @@ def get_device(config: dict) -> torch.device:
 
 
 def configured_device_ids(config: dict) -> list[int]:
-    device_ids = config.get("device_ids")
+    multi_gpu = config.get("multi_gpu", {})
+    if isinstance(multi_gpu, dict):
+        device_ids = multi_gpu.get("device_ids", config.get("device_ids"))
+    else:
+        device_ids = config.get("device_ids")
     if device_ids is None:
         return list(range(torch.cuda.device_count()))
     return [int(device_id) for device_id in device_ids]
 
 
+def multi_gpu_enabled(config: dict) -> bool:
+    multi_gpu = config.get("multi_gpu", {})
+    if isinstance(multi_gpu, dict):
+        return bool(multi_gpu.get("enabled", False))
+    return multi_gpu in {"data_parallel", "dp", True}
+
+
+def multi_gpu_backend(config: dict) -> str:
+    multi_gpu = config.get("multi_gpu", {})
+    if isinstance(multi_gpu, dict):
+        return str(multi_gpu.get("backend", "data_parallel"))
+    if multi_gpu in {"data_parallel", "dp", True}:
+        return "data_parallel"
+    return "none"
+
+
 def maybe_data_parallel(model: torch.nn.Module, config: dict) -> torch.nn.Module:
     if config.get("device") != "cuda":
         return model
-    if config.get("multi_gpu") != "data_parallel":
+    if not multi_gpu_enabled(config):
+        return model
+    if multi_gpu_backend(config) != "data_parallel":
+        raise ValueError(f"Unsupported multi_gpu backend: {multi_gpu_backend(config)}")
+    if torch.cuda.device_count() < 2:
         return model
 
     device_ids = configured_device_ids(config)

@@ -4,6 +4,8 @@ import argparse
 import shutil
 from pathlib import Path
 
+from torch.utils.tensorboard import SummaryWriter
+
 from evaluate_ood import evaluate_features
 from extract_features import extract_features
 from train import train_model
@@ -29,6 +31,15 @@ def run_experiment(config_path: str | Path, run_dir: str | Path | None = None):
     checkpoint = train_model(config, run_dir)
     features = extract_features(config, checkpoint, run_dir / "features.npz")
     rows = evaluate_features(features, run_dir / "results.csv", config)
+    tensorboard_cfg = config.get("tensorboard", {})
+    if bool(tensorboard_cfg.get("enabled", True)):
+        writer = SummaryWriter(run_dir / tensorboard_cfg.get("log_dir", "tensorboard"))
+        for row in rows:
+            method = row["OOD Score"]
+            for metric in ("AUROC", "FPR@95", "Detection Accuracy", "F1"):
+                writer.add_scalar(f"ood/{method}/{metric}", row[metric], 0)
+        writer.flush()
+        writer.close()
     return rows
 
 
