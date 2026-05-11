@@ -1,0 +1,23 @@
+seed: 42
+device: cuda
+
+dataset:
+  name: USPS
+  root: dataset
+  val_ratio: 0.2
+
+model:
+  type: resnet18
+  embedding_dim: 128
+
+training:
+  batch_size: 128
+  num_workers: 0
+  lr: 0.001
+  weight_decay: 0.0001
+  epochs: 30
+  patience: 5
+
+ood:
+  k: 5
+  cov_reg: 0.00001
