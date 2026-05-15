@@ -49,6 +49,34 @@ class MLPEncoder(nn.Module):
         return F.normalize(self.net(x), dim=1)
 
 
+class CLIPTextEncoder(nn.Module):
+    def __init__(self, config: dict, embedding_dim: int):
+        super().__init__()
+        try:
+            from transformers import CLIPTextModel
+        except ImportError as exc:
+            raise ImportError("clip_text model requires transformers.") from exc
+
+        model_name = config["model"].get("clip_model_name", "openai/clip-vit-base-patch32")
+        local_files_only = bool(config["model"].get("local_files_only", False))
+        self.text_model = CLIPTextModel.from_pretrained(
+            model_name,
+            local_files_only=local_files_only,
+        )
+        if bool(config["model"].get("freeze_clip", True)):
+            for param in self.text_model.parameters():
+                param.requires_grad = False
+        hidden_size = self.text_model.config.hidden_size
+        self.proj = nn.Linear(hidden_size, embedding_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.long()
+        input_ids = x[:, 0, :]
+        attention_mask = x[:, 1, :]
+        out = self.text_model(input_ids=input_ids, attention_mask=attention_mask)
+        return F.normalize(self.proj(out.pooler_output), dim=1)
+
+
 class BasicBlock(nn.Module):
     expansion = 1
 
@@ -124,4 +152,10 @@ def build_model(config: dict, input_shape: tuple[int, ...], input_dim: int, inpu
         return ResNet18Encoder(input_shape, embedding_dim)
     if model_type == "mlp":
         return MLPEncoder(input_dim, embedding_dim)
+    if model_type == "tfidf_mlp":
+        return MLPEncoder(input_dim, embedding_dim)
+    if model_type == "clip_text":
+        if input_kind != "clip_text":
+            raise ValueError("clip_text requires Reuters raw text token input")
+        return CLIPTextEncoder(config, embedding_dim)
     raise ValueError(f"Unknown model type: {config['model']['type']}")

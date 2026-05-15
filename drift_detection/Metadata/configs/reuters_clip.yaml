@@ -6,16 +6,23 @@ multi_gpu:
   device_ids: [0, 1]
 
 dataset:
-  name: Reuters-10k  # options: FashionMNIST, USPS, Reuters-10k, Reuters
+  name: Reuters  # options: FashionMNIST, USPS, Reuters-10k, Reuters
   root: dataset
   val_ratio: 0.2
+  num_classes: 46
+  id_class_count: 30
+  split_strategy: balanced_sample_count  # options: top_frequency, balanced_sample_count
 
 model:
-  type: mlp  # options: cnn, resnet18, mlp, tfidf_mlp, clip_text
+  type: clip_text  # options: cnn, resnet18, mlp, tfidf_mlp, clip_text
   embedding_dim: 128
+  clip_model_name: openai/clip-vit-base-patch32
+  max_length: 77
+  freeze_clip: true  # options: true, false
+  local_files_only: false  # options: true, false
 
 training:
-  batch_size: 256
+  batch_size: 128
   num_workers: 0
   lr: 0.00001
   weight_decay: 0.0001

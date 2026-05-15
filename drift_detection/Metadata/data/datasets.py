@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import torch
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.feature_extraction.text import TfidfVectorizer
 from torch.utils.data import DataLoader, Dataset
 
 
@@ -95,6 +96,137 @@ def _load_reuters10k(root: Path):
     return x_train, y_train, x_test, y_test, split, "tabular"
 
 
+def _read_reuters_raw_split(base: Path, split_name: str, label_by_path: dict[str, str]):
+    texts = []
+    labels = []
+    split_dir = base / split_name
+    for path in sorted(split_dir.iterdir(), key=lambda p: int(p.name)):
+        rel = f"{split_name}/{path.name}"
+        if rel not in label_by_path:
+            continue
+        texts.append(path.read_text(encoding="latin-1", errors="ignore"))
+        labels.append(label_by_path[rel])
+    return texts, np.asarray(labels, dtype=object)
+
+
+def _reuters_primary_labels(base: Path):
+    label_by_path = {}
+    for line in (base / "cats.txt").read_text(encoding="utf-8").splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        label_by_path[parts[0]] = parts[1]
+    return label_by_path
+
+
+def _encode_reuters_labels(train_labels, test_labels, num_classes: int):
+    classes, counts = np.unique(train_labels, return_counts=True)
+    ordered = classes[np.argsort(counts)[::-1]]
+    selected = ordered[:num_classes]
+    label_to_id = {label: idx for idx, label in enumerate(selected)}
+
+    train_mask = np.isin(train_labels, selected)
+    test_mask = np.isin(test_labels, selected)
+    y_train = np.asarray([label_to_id[label] for label in train_labels[train_mask]], dtype=np.int64)
+    y_test = np.asarray([label_to_id[label] for label in test_labels[test_mask]], dtype=np.int64)
+    return selected, train_mask, test_mask, y_train, y_test
+
+
+def _balanced_id_classes(train_labels: np.ndarray, selected: np.ndarray, id_class_count: int):
+    counts = np.asarray([np.sum(train_labels == label) for label in selected], dtype=np.int64)
+    target = int(counts.sum() // 2)
+    dp = {(0, 0): None}
+
+    for idx, count in enumerate(counts.tolist()):
+        for key in list(dp.keys())[::-1]:
+            k, total = key
+            next_key = (k + 1, total + count)
+            if k + 1 <= id_class_count and next_key not in dp:
+                dp[next_key] = (k, total, idx)
+
+    candidates = [total for k, total in dp if k == id_class_count]
+    if not candidates:
+        raise ValueError(f"Cannot choose {id_class_count} ID classes from {len(selected)} classes.")
+    best_total = min(candidates, key=lambda total: abs(total - target))
+
+    id_indices = []
+    state = (id_class_count, best_total)
+    while state != (0, 0):
+        prev_k, prev_total, idx = dp[state]
+        id_indices.append(idx)
+        state = (prev_k, prev_total)
+    return tuple(sorted(int(idx) for idx in id_indices))
+
+
+def _tokenize_clip_texts(texts: list[str], config: dict):
+    try:
+        from transformers import CLIPTokenizer
+    except ImportError as exc:
+        raise ImportError("CLIP text encoder requires transformers.") from exc
+
+    model_name = config["model"].get("clip_model_name", "openai/clip-vit-base-patch32")
+    max_length = int(config["model"].get("max_length", 77))
+    local_files_only = bool(config["model"].get("local_files_only", False))
+    tokenizer = CLIPTokenizer.from_pretrained(model_name, local_files_only=local_files_only)
+    encoded = tokenizer(
+        texts,
+        padding="max_length",
+        truncation=True,
+        max_length=max_length,
+        return_tensors="np",
+    )
+    return np.stack([encoded["input_ids"], encoded["attention_mask"]], axis=1).astype(np.int64)
+
+
+def _load_reuters_raw(root: Path, config: dict):
+    base = root / "reuters"
+    num_classes = int(config["dataset"].get("num_classes", 46))
+    id_class_count = int(config["dataset"].get("id_class_count", 2))
+    split_strategy = config["dataset"].get("split_strategy", "top_frequency")
+    label_by_path = _reuters_primary_labels(base)
+    train_texts, train_labels = _read_reuters_raw_split(base, "training", label_by_path)
+    test_texts, test_labels = _read_reuters_raw_split(base, "test", label_by_path)
+
+    selected, train_mask, test_mask, y_train, y_test = _encode_reuters_labels(
+        train_labels, test_labels, num_classes
+    )
+    train_texts = [text for text, keep in zip(train_texts, train_mask) if keep]
+    test_texts = [text for text, keep in zip(test_texts, test_mask) if keep]
+
+    id_class_count = min(id_class_count, num_classes)
+    if split_strategy == "balanced_sample_count":
+        id_classes = _balanced_id_classes(train_labels[train_mask], selected, id_class_count)
+    elif split_strategy == "top_frequency":
+        id_classes = tuple(range(id_class_count))
+    else:
+        raise ValueError(f"Unknown Reuters split_strategy: {split_strategy}")
+    ood_classes = tuple(range(len(selected))[len(id_classes):])
+    ood_classes = tuple(idx for idx in range(len(selected)) if idx not in id_classes)
+    split = SplitInfo(id_classes=id_classes, ood_classes=ood_classes)
+    model_type = config["model"].get("type", "tfidf_mlp").lower()
+
+    if model_type == "clip_text":
+        x_train = _tokenize_clip_texts(train_texts, config)
+        x_test = _tokenize_clip_texts(test_texts, config)
+        return x_train, y_train, x_test, y_test, split, "clip_text"
+
+    max_features = int(config["model"].get("max_features", 20000))
+    id_train_texts = [
+        text for text, label in zip(train_texts, y_train)
+        if label in split.id_classes
+    ]
+    vectorizer = TfidfVectorizer(
+        max_features=max_features,
+        lowercase=True,
+        stop_words="english",
+        dtype=np.float32,
+    )
+    vectorizer.fit(id_train_texts)
+    x_train = vectorizer.transform(train_texts).toarray().astype(np.float32)
+    x_test = vectorizer.transform(test_texts).toarray().astype(np.float32)
+    return x_train, y_train, x_test, y_test, split, "tabular"
+
+
 def build_datasets(config: dict):
     dataset_name = config["dataset"]["name"].lower()
     root = Path(config["dataset"].get("root", "dataset"))
@@ -107,6 +239,8 @@ def build_datasets(config: dict):
         x_train, y_train, x_test, y_test, split, input_kind = _load_usps(root)
     elif dataset_name in {"reuters10k", "reuters-10k"}:
         x_train, y_train, x_test, y_test, split, input_kind = _load_reuters10k(root)
+    elif dataset_name == "reuters":
+        x_train, y_train, x_test, y_test, split, input_kind = _load_reuters_raw(root, config)
     else:
         raise ValueError(f"Unknown dataset: {config['dataset']['name']}")
 

@@ -9,7 +9,12 @@ from ood import compute_metrics, gaussian_scores, knn_scores, mahalanobis_scores
 from utils.io import append_csv
 
 
-def evaluate_features(feature_path: str | Path, output_csv: str | Path, config: dict):
+def evaluate_features(
+    feature_path: str | Path,
+    output_csv: str | Path,
+    config: dict,
+    extra_fields: dict | None = None,
+):
     data = np.load(feature_path)
     train_features = data["train_features"]
     train_labels = data["train_labels"]
@@ -40,6 +45,7 @@ def evaluate_features(feature_path: str | Path, output_csv: str | Path, config: 
     for method, (id_scores, ood_scores) in methods.items():
         metrics = compute_metrics(id_scores, ood_scores)
         row = {
+            **(extra_fields or {}),
             "Dataset": dataset,
             "Feature Extractor": model,
             "OOD Score": method,
