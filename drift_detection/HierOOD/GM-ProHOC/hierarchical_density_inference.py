@@ -14,7 +14,7 @@ from libs.hierarchy import Hierarchy
 from libs.utils.dataset_util import get_id_classes
 
 
-def evaluate_split(split_artifact, features, hierarchy, density_payload, inference_cfg, feature_meta):
+def evaluate_split(split_artifact, features, hierarchy, density_payload, inference_cfg, feature_meta, include_debug=True):
     final_probs, debug = hierarchical_node_probabilities(
         features,
         hierarchy,
@@ -24,6 +24,7 @@ def evaluate_split(split_artifact, features, hierarchy, density_payload, inferen
         kappa=inference_cfg.get("kappa", 20.0),
         alpha=inference_cfg.get("alpha", 1.0),
         beta=inference_cfg.get("beta", 1.0),
+        include_debug=include_debug,
     )
     preds = predict_from_probabilities(final_probs, hierarchy, mode=inference_cfg.get("prediction_mode", "argmax"))
     metrics = evaluate_predictions(preds, split_artifact["node_targets"], hierarchy)

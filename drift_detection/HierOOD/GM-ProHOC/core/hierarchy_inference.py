@@ -115,6 +115,7 @@ def hierarchical_node_probabilities(
     kappa: float = 20.0,
     alpha: float = 1.0,
     beta: float = 1.0,
+    include_debug: bool = True,
 ):
     node_scores = score_nodes(
         features,
@@ -167,27 +168,32 @@ def hierarchical_node_probabilities(
     final_probs = final_probs / final_probs.sum(dim=1, keepdim=True).clamp_min(1e-12)
 
     debug = {
-        "node_scores": node_scores.cpu(),
         "temperature": temperature,
         "alpha": alpha,
         "beta": beta,
-        "depth_probs": {depth: probs.cpu() for depth, probs in depth_probs.items()},
-        "local_info": {
-            name: {
-                "child_indices": payload["child_indices"],
-                "child_depth_probs": payload["child_depth_probs"].cpu(),
-                "child_local_probs": payload["child_local_probs"].cpu(),
-                "child_probs": payload["child_probs"].cpu(),
-                "ood_prob": payload["ood_prob"].cpu(),
-                "ood_score": payload["ood_score"].cpu(),
-                "alpha": payload["alpha"],
-                "beta": payload["beta"],
-                "p_comp": payload["p_comp"].cpu(),
-                "entropy": payload["entropy"].cpu(),
-            }
-            for name, payload in local_info.items()
-        },
     }
+    if include_debug:
+        debug.update(
+            {
+                "node_scores": node_scores.cpu(),
+                "depth_probs": {depth: probs.cpu() for depth, probs in depth_probs.items()},
+                "local_info": {
+                    name: {
+                        "child_indices": payload["child_indices"],
+                        "child_depth_probs": payload["child_depth_probs"].cpu(),
+                        "child_local_probs": payload["child_local_probs"].cpu(),
+                        "child_probs": payload["child_probs"].cpu(),
+                        "ood_prob": payload["ood_prob"].cpu(),
+                        "ood_score": payload["ood_score"].cpu(),
+                        "alpha": payload["alpha"],
+                        "beta": payload["beta"],
+                        "p_comp": payload["p_comp"].cpu(),
+                        "entropy": payload["entropy"].cpu(),
+                    }
+                    for name, payload in local_info.items()
+                },
+            }
+        )
     return final_probs, debug
 
 
