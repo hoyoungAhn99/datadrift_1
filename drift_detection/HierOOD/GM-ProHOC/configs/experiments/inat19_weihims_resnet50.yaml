@@ -60,12 +60,12 @@ loss:
   dist_pow: 1.0                         # choices: any positive float, weihims only
 
 training:
-  epochs: 200                           # choices: any positive int
+  epochs: 13                           # choices: any positive int
   grad_clip_norm: null                  # choices: null or positive float
   amp: false                            # choices: true, false
   checkpoint_metric: val_loss           # choices: val_loss
   checkpoint_mode: min                  # choices: min
-  resume_from: null                     # choices: null or checkpoint path
+  resume_from: C:\HOYOUNG\datadrift_1\drift_detection\HierOOD\GM-ProHOC\outputs\inat19-weihims-resnet50\checkpoint_backbone.pt                     # choices: null or checkpoint path
 
 validation:
   enable_depth_eval: true               # choices: true, false

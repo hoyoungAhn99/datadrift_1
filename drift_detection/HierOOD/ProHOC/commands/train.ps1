@@ -9,7 +9,7 @@ foreach ($HEIGHT in $HEIGHTS) {
     $BATCH_SIZE_PER_GPU = [Math]::Max(1, [int]($GLOBAL_BATCH_SIZE / [int]$env:NPROC_PER_NODE))
 
     python "$PROHOC\main_multidepth.py" `
-        --datadir "$PROHOCDATA\$DSET" `
+        --datadir "$PROHOCDATA\$DATASOURCE" `
         --hierarchy "$PROHOC\hierarchies\$DSET.json" `
         --traindir "$TRAINDIR\$DSET\H$HEIGHT" `
         --id_split "$PROHOC\data\$DSET-id-labels.csv" `
