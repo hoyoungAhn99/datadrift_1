@@ -107,7 +107,7 @@ def _local_probabilities_for_node(
 
 
 def hierarchical_node_probabilities(
-    features: torch.Tensor,
+    features: torch.Tensor | None,
     hierarchy,
     density_payload: dict[str, Any],
     score_type: str = "gaussian_loglik",
@@ -116,25 +116,29 @@ def hierarchical_node_probabilities(
     alpha: float = 1.0,
     beta: float = 1.0,
     include_debug: bool = True,
+    node_scores: torch.Tensor | None = None,
 ):
-    node_scores = score_nodes(
-        features,
-        density_payload["means"],
-        density_payload.get("variances"),
-        covariance_matrices=density_payload.get("covariance_matrices"),
-        shared_covariance=density_payload.get("shared_covariance"),
-        mean_directions=density_payload.get("mean_directions"),
-        covariance_type=density_payload.get("covariance_type", density_payload.get("config", {}).get("covariance_type", "diag")),
-        score_type=score_type,
-        kappa=kappa,
-    )
+    if node_scores is None:
+        if features is None:
+            raise ValueError("features are required when node_scores are not provided")
+        node_scores = score_nodes(
+            features,
+            density_payload["means"],
+            density_payload.get("variances"),
+            covariance_matrices=density_payload.get("covariance_matrices"),
+            shared_covariance=density_payload.get("shared_covariance"),
+            mean_directions=density_payload.get("mean_directions"),
+            covariance_type=density_payload.get("covariance_type", density_payload.get("config", {}).get("covariance_type", "diag")),
+            score_type=score_type,
+            kappa=kappa,
+        )
     nodes_by_depth = build_depth_maps(hierarchy)
     non_root_depths = sorted(depth for depth in nodes_by_depth.keys() if depth != 0)
     depth_probs = compute_depth_probs(node_scores, nodes_by_depth, temperature=temperature)
     alpha_by_depth = _normalize_depthwise_param(alpha, non_root_depths)
     beta_by_depth = _normalize_depthwise_param(beta, non_root_depths)
 
-    n_samples = features.shape[0]
+    n_samples = node_scores.shape[0]
     n_nodes = len(hierarchy.id_node_list)
     final_probs = torch.zeros((n_samples, n_nodes), dtype=node_scores.dtype, device=node_scores.device)
     local_info = {}

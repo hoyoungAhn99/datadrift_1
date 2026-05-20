@@ -14,6 +14,7 @@ from core.config import load_config
 from core.eval import evaluate_predictions
 from core.feature_io import load_artifact
 from core.hierarchy_inference import hierarchical_node_probabilities, predict_from_probabilities
+from core.density import score_nodes
 from feature_generation.utils.io import resolve_feature_tensor
 from libs.hierarchy import Hierarchy
 from libs.utils.dataset_util import get_id_classes
@@ -114,6 +115,7 @@ def evaluate_split_for_tuning(
     feature_meta,
     device: torch.device,
     eval_batch_size: int,
+    node_scores: torch.Tensor | None = None,
 ):
     preds = []
     n_samples = int(features.shape[0])
@@ -121,7 +123,8 @@ def evaluate_split_for_tuning(
 
     with torch.no_grad():
         for start in range(0, n_samples, batch_size):
-            batch_features = features[start : start + batch_size].to(device)
+            batch_features = None if node_scores is not None else features[start : start + batch_size].to(device)
+            batch_scores = None if node_scores is None else node_scores[start : start + batch_size].to(device)
             final_probs, _ = hierarchical_node_probabilities(
                 batch_features,
                 hierarchy,
@@ -132,6 +135,7 @@ def evaluate_split_for_tuning(
                 alpha=inference_cfg.get("alpha", 1.0),
                 beta=inference_cfg.get("beta", 1.0),
                 include_debug=False,
+                node_scores=batch_scores,
             )
             batch_preds = predict_from_probabilities(
                 final_probs,
@@ -156,6 +160,34 @@ def evaluate_split_for_tuning(
         }
     )
     return metrics
+
+
+def precompute_node_scores(
+    features: torch.Tensor,
+    density_payload,
+    inference_cfg,
+    device: torch.device,
+    eval_batch_size: int,
+) -> torch.Tensor:
+    scores = []
+    n_samples = int(features.shape[0])
+    batch_size = n_samples if eval_batch_size <= 0 else int(eval_batch_size)
+    with torch.no_grad():
+        for start in tqdm(range(0, n_samples, batch_size), desc="Precompute node scores"):
+            batch_features = features[start : start + batch_size].to(device)
+            batch_scores = score_nodes(
+                batch_features,
+                density_payload["means"],
+                density_payload.get("variances"),
+                covariance_matrices=density_payload.get("covariance_matrices"),
+                shared_covariance=density_payload.get("shared_covariance"),
+                mean_directions=density_payload.get("mean_directions"),
+                covariance_type=density_payload.get("covariance_type", density_payload.get("config", {}).get("covariance_type", "diag")),
+                score_type=inference_cfg.get("score_type", "gaussian_loglik"),
+                kappa=inference_cfg.get("kappa", 20.0),
+            )
+            scores.append(batch_scores.cpu())
+    return torch.cat(scores, dim=0)
 
 
 def write_tuning_outputs(
@@ -283,6 +315,7 @@ def main():
     parser.add_argument("--topk", type=int, default=5)
     parser.add_argument("--device", default="cpu", help="Device for tensor inference, e.g. cpu, cuda, cuda:0.")
     parser.add_argument("--eval_batch_size", type=int, default=0, help="Batch size for evaluation. Use 0 to evaluate each split at once.")
+    parser.add_argument("--no_cache_node_scores", action="store_true", help="Recompute Gaussian node scores for every grid combination.")
     parser.add_argument("--save_every", type=int, default=0, help="Write partial tuning results every N grid combinations. Use 0 to save only at the end.")
     parser.add_argument("--num_shards", type=int, default=1, help="Split the hyperparameter grid into this many shards.")
     parser.add_argument("--shard_index", type=int, default=0, help="Zero-based shard index to run.")
@@ -341,6 +374,23 @@ def main():
     if args.eval_batch_size <= 0:
         val_features = val_features.to(device)
         ood_features = ood_features.to(device)
+    val_node_scores = None
+    ood_node_scores = None
+    if not args.no_cache_node_scores:
+        val_node_scores = precompute_node_scores(
+            val_features,
+            density_payload,
+            config["inference"],
+            device,
+            args.eval_batch_size,
+        )
+        ood_node_scores = precompute_node_scores(
+            ood_features,
+            density_payload,
+            config["inference"],
+            device,
+            args.eval_batch_size,
+        )
 
     rows: list[dict[str, Any]] = []
 
@@ -377,6 +427,7 @@ def main():
             val_feature_meta,
             device,
             args.eval_batch_size,
+            node_scores=val_node_scores,
         )
         ood_metrics = evaluate_split_for_tuning(
             ood_artifact,
@@ -387,6 +438,7 @@ def main():
             ood_feature_meta,
             device,
             args.eval_batch_size,
+            node_scores=ood_node_scores,
         )
 
         for split_name, metrics in [("val", val_metrics), ("ood", ood_metrics)]:
