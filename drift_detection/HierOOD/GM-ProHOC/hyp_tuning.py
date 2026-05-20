@@ -168,6 +168,7 @@ def precompute_node_scores(
     inference_cfg,
     device: torch.device,
     eval_batch_size: int,
+    cache_device: torch.device,
 ) -> torch.Tensor:
     scores = []
     n_samples = int(features.shape[0])
@@ -186,7 +187,7 @@ def precompute_node_scores(
                 score_type=inference_cfg.get("score_type", "gaussian_loglik"),
                 kappa=inference_cfg.get("kappa", 20.0),
             )
-            scores.append(batch_scores.cpu())
+            scores.append(batch_scores.to(cache_device))
     return torch.cat(scores, dim=0)
 
 
@@ -316,6 +317,7 @@ def main():
     parser.add_argument("--device", default="cpu", help="Device for tensor inference, e.g. cpu, cuda, cuda:0.")
     parser.add_argument("--eval_batch_size", type=int, default=0, help="Batch size for evaluation. Use 0 to evaluate each split at once.")
     parser.add_argument("--no_cache_node_scores", action="store_true", help="Recompute Gaussian node scores for every grid combination.")
+    parser.add_argument("--cache_node_scores_on_cpu", action="store_true", help="Keep cached node scores on CPU instead of the inference device.")
     parser.add_argument("--save_every", type=int, default=0, help="Write partial tuning results every N grid combinations. Use 0 to save only at the end.")
     parser.add_argument("--num_shards", type=int, default=1, help="Split the hyperparameter grid into this many shards.")
     parser.add_argument("--shard_index", type=int, default=0, help="Zero-based shard index to run.")
@@ -377,12 +379,14 @@ def main():
     val_node_scores = None
     ood_node_scores = None
     if not args.no_cache_node_scores:
+        cache_device = torch.device("cpu") if args.cache_node_scores_on_cpu else device
         val_node_scores = precompute_node_scores(
             val_features,
             density_payload,
             config["inference"],
             device,
             args.eval_batch_size,
+            cache_device,
         )
         ood_node_scores = precompute_node_scores(
             ood_features,
@@ -390,6 +394,7 @@ def main():
             config["inference"],
             device,
             args.eval_batch_size,
+            cache_device,
         )
 
     rows: list[dict[str, Any]] = []
