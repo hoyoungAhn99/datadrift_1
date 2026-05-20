@@ -11,9 +11,10 @@ from tqdm import tqdm
 
 from compare_results import load_result_rows
 from core.config import load_config
+from core.eval import evaluate_predictions
 from core.feature_io import load_artifact
+from core.hierarchy_inference import hierarchical_node_probabilities, predict_from_probabilities
 from feature_generation.utils.io import resolve_feature_tensor
-from hierarchical_density_inference import evaluate_split
 from libs.hierarchy import Hierarchy
 from libs.utils.dataset_util import get_id_classes
 
@@ -102,6 +103,59 @@ def move_tensors_to_device(payload: Any, device: torch.device) -> Any:
     if isinstance(payload, tuple):
         return tuple(move_tensors_to_device(value, device) for value in payload)
     return payload
+
+
+def evaluate_split_for_tuning(
+    split_artifact,
+    features: torch.Tensor,
+    hierarchy,
+    density_payload,
+    inference_cfg,
+    feature_meta,
+    device: torch.device,
+    eval_batch_size: int,
+):
+    preds = []
+    n_samples = int(features.shape[0])
+    batch_size = n_samples if eval_batch_size <= 0 else int(eval_batch_size)
+
+    with torch.no_grad():
+        for start in range(0, n_samples, batch_size):
+            batch_features = features[start : start + batch_size].to(device)
+            final_probs, _ = hierarchical_node_probabilities(
+                batch_features,
+                hierarchy,
+                density_payload,
+                score_type=inference_cfg.get("score_type", "gaussian_loglik"),
+                temperature=inference_cfg.get("temperature", 1.0),
+                kappa=inference_cfg.get("kappa", 20.0),
+                alpha=inference_cfg.get("alpha", 1.0),
+                beta=inference_cfg.get("beta", 1.0),
+                include_debug=False,
+            )
+            batch_preds = predict_from_probabilities(
+                final_probs,
+                hierarchy,
+                mode=inference_cfg.get("prediction_mode", "argmax"),
+            )
+            preds.append(batch_preds.cpu())
+
+    preds = torch.cat(preds, dim=0)
+    metrics = evaluate_predictions(preds, split_artifact["node_targets"], hierarchy)
+    metrics.update(
+        {
+            "num_samples": n_samples,
+            "prediction_mode": inference_cfg.get("prediction_mode", "argmax"),
+            "score_type": inference_cfg.get("score_type", "gaussian_loglik"),
+            "temperature": inference_cfg.get("temperature", 1.0),
+            "kappa": inference_cfg.get("kappa", 20.0),
+            "alpha": inference_cfg.get("alpha", 1.0),
+            "beta": inference_cfg.get("beta", 1.0),
+            "collapsed_ood": inference_cfg.get("collapse_ood_to_parent", True),
+            "feature_source": feature_meta,
+        }
+    )
+    return metrics
 
 
 def write_tuning_outputs(
@@ -228,6 +282,8 @@ def main():
     parser.add_argument("--num_betas", type=int, default=5)
     parser.add_argument("--topk", type=int, default=5)
     parser.add_argument("--device", default="cpu", help="Device for tensor inference, e.g. cpu, cuda, cuda:0.")
+    parser.add_argument("--eval_batch_size", type=int, default=0, help="Batch size for evaluation. Use 0 to evaluate each split at once.")
+    parser.add_argument("--save_every", type=int, default=0, help="Write partial tuning results every N grid combinations. Use 0 to save only at the end.")
     parser.add_argument("--num_shards", type=int, default=1, help="Split the hyperparameter grid into this many shards.")
     parser.add_argument("--shard_index", type=int, default=0, help="Zero-based shard index to run.")
     args = parser.parse_args()
@@ -282,10 +338,9 @@ def main():
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but torch.cuda.is_available() is false")
     density_payload = move_tensors_to_device(density_payload, device)
-    val_artifact = move_tensors_to_device(val_artifact, device)
-    ood_artifact = move_tensors_to_device(ood_artifact, device)
-    val_features = val_features.to(device)
-    ood_features = ood_features.to(device)
+    if args.eval_batch_size <= 0:
+        val_features = val_features.to(device)
+        ood_features = ood_features.to(device)
 
     rows: list[dict[str, Any]] = []
 
@@ -301,7 +356,7 @@ def main():
     )
     progress = tqdm(combinations, desc="Hyperparameter tuning", total=len(combinations))
 
-    for temperature_vector, alpha_vector, beta_vector in progress:
+    for combo_idx, (temperature_vector, alpha_vector, beta_vector) in enumerate(progress, start=1):
         progress.set_postfix(
             tau="[" + ",".join(f"{tau:.3g}" for tau in temperature_vector) + "]",
             alpha="[" + ",".join(f"{a:.2g}" for a in alpha_vector) + "]",
@@ -313,23 +368,25 @@ def main():
             list(alpha_vector),
             list(beta_vector),
         )
-        val_metrics = evaluate_split(
+        val_metrics = evaluate_split_for_tuning(
             val_artifact,
             val_features,
             hierarchy,
             density_payload,
             inference_cfg,
             val_feature_meta,
-            include_debug=False,
+            device,
+            args.eval_batch_size,
         )
-        ood_metrics = evaluate_split(
+        ood_metrics = evaluate_split_for_tuning(
             ood_artifact,
             ood_features,
             hierarchy,
             density_payload,
             inference_cfg,
             ood_feature_meta,
-            include_debug=False,
+            device,
+            args.eval_batch_size,
         )
 
         for split_name, metrics in [("val", val_metrics), ("ood", ood_metrics)]:
@@ -358,6 +415,27 @@ def main():
                     value = value.item()
                 row[metric] = value
             rows.append(row)
+
+        if args.save_every > 0 and combo_idx % args.save_every == 0:
+            partial_csv = output_dir / "tuning_results_partial.csv"
+            pd.DataFrame(rows).to_csv(partial_csv, index=False)
+            status_txt = output_dir / "progress_status.txt"
+            status_txt.write_text(
+                "\n".join(
+                    [
+                        f"completed_combinations={combo_idx}",
+                        f"shard_combinations={len(combinations)}",
+                        f"total_combinations={total_combinations}",
+                        f"num_shards={args.num_shards}",
+                        f"shard_index={args.shard_index}",
+                        f"current_temperature={format_temperature_vector(temperature_vector)}",
+                        f"current_alpha={format_depth_vector(alpha_vector)}",
+                        f"current_beta={format_depth_vector(beta_vector)}",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
 
     tuning_df = pd.DataFrame(rows)
     write_tuning_outputs(
