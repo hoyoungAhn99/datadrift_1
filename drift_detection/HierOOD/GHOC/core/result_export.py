@@ -52,8 +52,6 @@ def export_result_to_csv(result_path: str | Path, output_dir: str | Path) -> lis
             "score_type": _to_csv_value(metrics.get("score_type")),
             "temperature": _to_csv_value(metrics.get("temperature")),
             "kappa": _to_csv_value(metrics.get("kappa")),
-            "alpha": _to_csv_value(metrics.get("alpha")),
-            "beta": _to_csv_value(metrics.get("beta")),
             "collapsed_ood": _to_csv_value(metrics.get("collapsed_ood")),
         }
         summary_rows.append(row)

@@ -12,8 +12,6 @@ KEY_COLUMNS = [
     "score_type",
     "covariance_type",
     "temperature_vector",
-    "alpha_vector",
-    "beta_vector",
     "kappa",
 ]
 
@@ -72,7 +70,7 @@ def main():
         "val_balanced_acc",
         "val_avg_hdist",
         "val_balanced_hdist",
-    ] + [col for col in val_df.columns if col.startswith("tau_depth_") or col.startswith("alpha_depth_") or col.startswith("beta_depth_")]
+    ] + [col for col in val_df.columns if col.startswith("tau_depth_")]
     keep_ood_cols = KEY_COLUMNS + [
         "ood_acc",
         "ood_balanced_acc",
@@ -107,8 +105,6 @@ def main():
     if not picked.empty:
         preview_cols = [
             "temperature_vector",
-            "alpha_vector",
-            "beta_vector",
             "ood_acc",
             "val_acc",
             "ood_balanced_acc",

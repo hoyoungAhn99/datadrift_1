@@ -90,8 +90,6 @@ inference:
   score_type: gaussian_loglik           # choices: gaussian_loglik, raw_gaussian, mahalanobis, vmf
   temperature: [1.0, 3.0, 10.0, 10.0, 10.0, 10.0] # one entry per non-root depth
   kappa: 20.0                           # choices: any positive float, used by vmf
-  alpha: [10.0, 5.0, 1.0, 1.0, 0.1, 0.1] # one entry per non-root depth
-  beta: [0.1, 1.0, 5.0, 5.0, 10.0, 10.0] # one entry per non-root depth
   prediction_mode: argmax               # choices: argmax, min_hdist
   collapse_ood_to_parent: true          # choices: true, false
 

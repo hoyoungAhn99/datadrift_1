@@ -89,8 +89,6 @@ density:
 inference:
   score_type: raw_gaussian              # choices: gaussian_loglik, raw_gaussian, mahalanobis
   temperature: 1.0                      # choices: any positive float
-  alpha: 1.0                            # choices: any float
-  beta: 1.0                             # choices: any float
   prediction_mode: argmax               # choices: argmax, min_hdist
   collapse_ood_to_parent: true          # choices: true, false
 
