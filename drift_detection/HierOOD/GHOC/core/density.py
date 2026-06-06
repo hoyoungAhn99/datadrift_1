@@ -149,6 +149,163 @@ def score_nodes(
     return scores
 
 
+def gaussian_logpdf(
+    features: torch.Tensor,
+    means: torch.Tensor,
+    variances: torch.Tensor | None = None,
+    covariance_matrices: torch.Tensor | None = None,
+    shared_covariance: torch.Tensor | None = None,
+    covariance_type: str = "diag",
+    node_indices: list[int] | torch.Tensor | None = None,
+) -> torch.Tensor:
+    selected = _select_gaussian_params(
+        means,
+        variances,
+        covariance_matrices,
+        shared_covariance,
+        node_indices,
+    )
+    selected_means, selected_variances, selected_covariances, selected_shared = selected
+    diff = features[:, None, :] - selected_means[None, :, :]
+    maha, log_det = _gaussian_terms(
+        diff,
+        variances=selected_variances,
+        covariance_matrices=selected_covariances,
+        shared_covariance=selected_shared,
+        covariance_type=covariance_type.lower(),
+    )
+    const = selected_means.shape[-1] * math.log(2.0 * math.pi)
+    return -0.5 * (maha + log_det[None, :] + const)
+
+
+def gaussian_bump(
+    features: torch.Tensor,
+    means: torch.Tensor,
+    variances: torch.Tensor | None = None,
+    covariance_matrices: torch.Tensor | None = None,
+    shared_covariance: torch.Tensor | None = None,
+    covariance_type: str = "diag",
+    node_indices: list[int] | torch.Tensor | None = None,
+) -> torch.Tensor:
+    selected = _select_gaussian_params(
+        means,
+        variances,
+        covariance_matrices,
+        shared_covariance,
+        node_indices,
+    )
+    selected_means, selected_variances, selected_covariances, selected_shared = selected
+    diff = features[:, None, :] - selected_means[None, :, :]
+    maha, _ = _gaussian_terms(
+        diff,
+        variances=selected_variances,
+        covariance_matrices=selected_covariances,
+        shared_covariance=selected_shared,
+        covariance_type=covariance_type.lower(),
+    )
+    return torch.exp(-0.5 * maha).clamp(max=1.0)
+
+
+def gaussian_bump_integrals(
+    parent_idx: int,
+    child_indices: list[int],
+    means: torch.Tensor,
+    variances: torch.Tensor | None = None,
+    covariance_matrices: torch.Tensor | None = None,
+    shared_covariance: torch.Tensor | None = None,
+    covariance_type: str = "diag",
+) -> torch.Tensor:
+    if not child_indices:
+        return torch.empty((0,), dtype=means.dtype, device=means.device)
+
+    covariance_type = covariance_type.lower()
+    parent_mean = means[parent_idx]
+    child_means = means[child_indices]
+
+    if covariance_type == "diag":
+        if variances is None:
+            raise ValueError("variances are required for diagonal bump integrals")
+        parent_var = variances[parent_idx]
+        child_var = variances[child_indices]
+        total_var = parent_var.unsqueeze(0) + child_var
+        delta = parent_mean.unsqueeze(0) - child_means
+        log_r = (
+            0.5 * torch.log(child_var).sum(dim=-1)
+            - 0.5 * torch.log(total_var).sum(dim=-1)
+            - 0.5 * (delta.pow(2) / total_var).sum(dim=-1)
+        )
+        return torch.exp(log_r).clamp(min=0.0, max=1.0)
+
+    parent_cov = _node_covariance(parent_idx, covariance_matrices, shared_covariance, covariance_type)
+    child_cov = _node_covariances(child_indices, covariance_matrices, shared_covariance, covariance_type)
+    total_cov = child_cov + parent_cov.unsqueeze(0)
+    delta = parent_mean.unsqueeze(0) - child_means
+
+    sign_child, logdet_child = torch.linalg.slogdet(child_cov)
+    sign_total, logdet_total = torch.linalg.slogdet(total_cov)
+    if not torch.all(sign_child > 0) or not torch.all(sign_total > 0):
+        raise ValueError("covariance matrices must be positive definite for bump integrals")
+    inv_total = torch.linalg.inv(total_cov)
+    maha = torch.einsum("nd,nde,ne->n", delta, inv_total, delta)
+    log_r = 0.5 * logdet_child - 0.5 * logdet_total - 0.5 * maha
+    return torch.exp(log_r).clamp(min=0.0, max=1.0)
+
+
+def _select_gaussian_params(
+    means: torch.Tensor,
+    variances: torch.Tensor | None,
+    covariance_matrices: torch.Tensor | None,
+    shared_covariance: torch.Tensor | None,
+    node_indices: list[int] | torch.Tensor | None,
+):
+    if node_indices is None:
+        return means, variances, covariance_matrices, shared_covariance
+    return (
+        means[node_indices],
+        variances[node_indices] if variances is not None else None,
+        covariance_matrices[node_indices] if covariance_matrices is not None else None,
+        shared_covariance[node_indices]
+        if shared_covariance is not None and shared_covariance.dim() == 3
+        else shared_covariance,
+    )
+
+
+def _node_covariance(
+    node_idx: int,
+    covariance_matrices: torch.Tensor | None,
+    shared_covariance: torch.Tensor | None,
+    covariance_type: str,
+) -> torch.Tensor:
+    if covariance_type == "full":
+        if covariance_matrices is None:
+            raise ValueError("covariance_matrices are required for full covariance")
+        return covariance_matrices[node_idx]
+    if covariance_type == "shared_full":
+        if shared_covariance is None:
+            raise ValueError("shared_covariance is required for shared_full covariance")
+        return shared_covariance[node_idx] if shared_covariance.dim() == 3 else shared_covariance
+    raise ValueError(f"Unsupported full covariance type: {covariance_type}")
+
+
+def _node_covariances(
+    node_indices: list[int],
+    covariance_matrices: torch.Tensor | None,
+    shared_covariance: torch.Tensor | None,
+    covariance_type: str,
+) -> torch.Tensor:
+    if covariance_type == "full":
+        if covariance_matrices is None:
+            raise ValueError("covariance_matrices are required for full covariance")
+        return covariance_matrices[node_indices]
+    if covariance_type == "shared_full":
+        if shared_covariance is None:
+            raise ValueError("shared_covariance is required for shared_full covariance")
+        if shared_covariance.dim() == 3:
+            return shared_covariance[node_indices]
+        return shared_covariance.unsqueeze(0).expand(len(node_indices), -1, -1)
+    raise ValueError(f"Unsupported full covariance type: {covariance_type}")
+
+
 def _fit_diag_variance(node_features: torch.Tensor, eps: float) -> torch.Tensor:
     feat_dim = node_features.shape[1]
     if node_features.shape[0] <= 1:

@@ -40,6 +40,7 @@ def export_result_to_csv(result_path: str | Path, output_dir: str | Path) -> lis
     summary_rows = []
     class_rows = []
     for split, metrics in result["results"].items():
+        cgm_cfg = metrics.get("cgm", {}) or {}
         row = {
             "experiment_name": result.get("experiment_name"),
             "dataset": result.get("dataset"),
@@ -52,6 +53,10 @@ def export_result_to_csv(result_path: str | Path, output_dir: str | Path) -> lis
             "score_type": _to_csv_value(metrics.get("score_type")),
             "temperature": _to_csv_value(metrics.get("temperature")),
             "kappa": _to_csv_value(metrics.get("kappa")),
+            "cgm_enabled": _to_csv_value(cgm_cfg.get("enabled", False)),
+            "cgm_mask_type": _to_csv_value(cgm_cfg.get("mask_type")),
+            "cgm_lambda": _to_csv_value(cgm_cfg.get("lambda")),
+            "cgm_child_weight": _to_csv_value(cgm_cfg.get("child_weight")),
             "collapsed_ood": _to_csv_value(metrics.get("collapsed_ood")),
         }
         summary_rows.append(row)

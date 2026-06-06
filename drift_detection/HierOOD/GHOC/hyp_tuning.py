@@ -122,6 +122,7 @@ def evaluate_split_for_tuning(
                 kappa=inference_cfg.get("kappa", 20.0),
                 include_debug=False,
                 node_scores=batch_scores,
+                cgm_cfg=inference_cfg.get("cgm", {}),
             )
             batch_preds = predict_from_probabilities(
                 final_probs,
@@ -139,6 +140,7 @@ def evaluate_split_for_tuning(
             "score_type": inference_cfg.get("score_type", "gaussian_loglik"),
             "temperature": inference_cfg.get("temperature", 1.0),
             "kappa": inference_cfg.get("kappa", 20.0),
+            "cgm": inference_cfg.get("cgm", {"enabled": False}),
             "collapsed_ood": inference_cfg.get("collapse_ood_to_parent", True),
             "feature_source": feature_meta,
         }
@@ -231,6 +233,10 @@ def write_tuning_outputs(
                     "temperature_vector": row["temperature_vector"],
                     "score_type": row["score_type"],
                     "covariance_type": row["covariance_type"],
+                    "cgm_enabled": row.get("cgm_enabled", False),
+                    "cgm_mask_type": row.get("cgm_mask_type"),
+                    "cgm_lambda": row.get("cgm_lambda"),
+                    "cgm_child_weight": row.get("cgm_child_weight"),
                     f"{target_split}_{metric}": row[f"{target_split}_{metric}"],
                 }
             )
@@ -257,6 +263,7 @@ def write_tuning_outputs(
                     "method": (
                         f"{config['experiment']['name']}"
                         f"_tau{row['temperature_vector']}"
+                        f"_cgm{row.get('cgm_enabled', False)}"
                     ),
                     "split": row["split"],
                     "acc": row["acc"],
@@ -341,17 +348,19 @@ def main():
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but torch.cuda.is_available() is false")
     density_payload = move_tensors_to_device(density_payload, device)
+    base_inference_cfg = {**config["inference"], "cgm": config.get("cgm", {"enabled": False})}
+    cgm_enabled = bool(base_inference_cfg["cgm"].get("enabled", False))
     if args.eval_batch_size <= 0:
         val_features = val_features.to(device)
         ood_features = ood_features.to(device)
     val_node_scores = None
     ood_node_scores = None
-    if not args.no_cache_node_scores:
+    if not args.no_cache_node_scores and not cgm_enabled:
         cache_device = torch.device("cpu") if args.cache_node_scores_on_cpu else device
         val_node_scores = precompute_node_scores(
             val_features,
             density_payload,
-            config["inference"],
+            base_inference_cfg,
             device,
             args.eval_batch_size,
             cache_device,
@@ -359,7 +368,7 @@ def main():
         ood_node_scores = precompute_node_scores(
             ood_features,
             density_payload,
-            config["inference"],
+            base_inference_cfg,
             device,
             args.eval_batch_size,
             cache_device,
@@ -367,7 +376,10 @@ def main():
 
     rows: list[dict[str, Any]] = []
 
-    tau_vectors = list(itertools.product(taus, repeat=len(tuned_depths)))
+    if cgm_enabled:
+        tau_vectors = [tuple(1.0 for _ in tuned_depths)]
+    else:
+        tau_vectors = list(itertools.product(taus, repeat=len(tuned_depths)))
     combinations = tau_vectors
     total_combinations = len(combinations)
     combinations = combinations[args.shard_index::args.num_shards]
@@ -382,7 +394,7 @@ def main():
             tau="[" + ",".join(f"{tau:.3g}" for tau in temperature_vector) + "]",
         )
         inference_cfg = build_inference_cfg(
-            config["inference"],
+            base_inference_cfg,
             list(temperature_vector),
         )
         val_metrics = evaluate_split_for_tuning(
@@ -417,6 +429,10 @@ def main():
                 "covariance_type": density_payload.get("covariance_type", density_payload.get("config", {}).get("covariance_type")),
                 "temperature_vector": format_temperature_vector(temperature_vector),
                 "kappa": float(inference_cfg.get("kappa", 20.0)),
+                "cgm_enabled": bool(inference_cfg.get("cgm", {}).get("enabled", False)),
+                "cgm_mask_type": inference_cfg.get("cgm", {}).get("mask_type"),
+                "cgm_lambda": inference_cfg.get("cgm", {}).get("lambda"),
+                "cgm_child_weight": inference_cfg.get("cgm", {}).get("child_weight"),
                 "num_shards": args.num_shards,
                 "shard_index": args.shard_index,
             }

@@ -13,6 +13,10 @@ KEY_COLUMNS = [
     "covariance_type",
     "temperature_vector",
     "kappa",
+    "cgm_enabled",
+    "cgm_mask_type",
+    "cgm_lambda",
+    "cgm_child_weight",
 ]
 
 

@@ -93,6 +93,14 @@ inference:
   prediction_mode: argmax               # choices: argmax, min_hdist
   collapse_ood_to_parent: true          # choices: true, false
 
+cgm:
+  enabled: false                        # choices: true, false
+  mask_type: sum                        # choices: sum
+  lambda: 0.9                           # choices: float in [0, 1)
+  child_weight: uniform                 # choices: uniform, count
+  normalize_ood_pdf: true               # choices: true, false
+  eps: 1.0e-12                          # choices: any positive float
+
 logging:
   use_tensorboard: true                 # choices: true, false
   save_train_metrics: true              # choices: true, false
