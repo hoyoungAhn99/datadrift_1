@@ -10,6 +10,7 @@ from core.config import load_merged_config, save_config
 from core.eval import evaluate_predictions
 from core.feature_io import load_artifact, save_artifact
 from core.hierarchy_inference import hierarchical_node_probabilities, predict_from_probabilities
+from libs.utils.hierarchy_utils import get_hdist_matrix
 from feature_generation.utils.io import resolve_feature_tensor
 from libs.hierarchy import Hierarchy
 from libs.utils.dataset_util import get_id_classes
@@ -38,6 +39,7 @@ def evaluate_split(
     eval_batch_size: int,
     include_debug: bool = False,
     save_probabilities: bool = False,
+    hdist_mat: torch.Tensor | None = None,
 ):
     preds = []
     probabilities = []
@@ -57,11 +59,13 @@ def evaluate_split(
                 kappa=inference_cfg.get("kappa", 20.0),
                 include_debug=include_debug,
                 cgm_cfg=inference_cfg.get("cgm", {}),
+                ood_scale=inference_cfg.get("ood_scale", 1.0),
             )
             batch_preds = predict_from_probabilities(
                 final_probs,
                 hierarchy,
                 mode=inference_cfg.get("prediction_mode", "argmax"),
+                hdist_mat=hdist_mat,
             )
             preds.append(batch_preds.cpu())
             if save_probabilities:
@@ -78,6 +82,7 @@ def evaluate_split(
             "score_type": inference_cfg.get("score_type", "gaussian_loglik"),
             "temperature": inference_cfg.get("temperature", 1.0),
             "kappa": inference_cfg.get("kappa", 20.0),
+            "ood_scale": inference_cfg.get("ood_scale", 1.0),
             "cgm": inference_cfg.get("cgm", {"enabled": False}),
             "collapsed_ood": inference_cfg.get("collapse_ood_to_parent", True),
             "predictions": preds,
@@ -95,6 +100,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     parser.add_argument("--feature-gen-config")
+    parser.add_argument("--density-file", help="Density artifact path. Default: <experiment_dir>/node_density.pt")
+    parser.add_argument("--output", help="Result artifact path. Default: <experiment_dir>/hinference_density.result")
     parser.add_argument("--device", default=None, help="Inference device. Default: config experiment.device, falling back to cpu.")
     parser.add_argument("--eval-batch-size", type=int, default=None, help="Batch size for density inference. Default: dataloader.eval_batch_size.")
     parser.add_argument("--include-debug", action="store_true", help="Store debug tensors. This can be very memory intensive.")
@@ -109,7 +116,8 @@ def main():
     id_classes = get_id_classes(dataset_cfg["id_split"])
     hierarchy = Hierarchy(id_classes, dataset_cfg["hierarchy"])
 
-    density_payload = load_artifact(experiment_dir / "node_density.pt")
+    density_path = Path(args.density_file) if args.density_file else experiment_dir / "node_density.pt"
+    density_payload = load_artifact(density_path)
     val_artifact = load_artifact(experiment_dir / "features_val.pt")
     ood_artifact = load_artifact(experiment_dir / "features_ood.pt")
     val_features, val_feature_meta = resolve_feature_tensor(config, experiment_dir, "val")
@@ -122,6 +130,10 @@ def main():
     if eval_batch_size is None:
         eval_batch_size = int(config.get("dataloader", {}).get("eval_batch_size", 0))
     density_payload = move_tensors_to_device(density_payload, device)
+    prediction_mode = config["inference"].get("prediction_mode", "argmax")
+    hdist_mat = None
+    if prediction_mode == "min_hdist":
+        hdist_mat = get_hdist_matrix(hierarchy, range(len(hierarchy.id_node_list)))
 
     results = {
         "val": evaluate_split(
@@ -135,6 +147,7 @@ def main():
             eval_batch_size,
             include_debug=args.include_debug,
             save_probabilities=args.save_probabilities,
+            hdist_mat=hdist_mat,
         ),
         "ood": evaluate_split(
             ood_artifact,
@@ -147,6 +160,7 @@ def main():
             eval_batch_size,
             include_debug=args.include_debug,
             save_probabilities=args.save_probabilities,
+            hdist_mat=hdist_mat,
         ),
     }
 
@@ -171,6 +185,7 @@ def main():
                 eval_batch_size,
                 include_debug=args.include_debug,
                 save_probabilities=args.save_probabilities,
+                hdist_mat=hdist_mat,
             )
             farood_features[farood_name] = str(artifact_path)
 
@@ -183,13 +198,14 @@ def main():
             "train_features": str(experiment_dir / "features_train.pt"),
             "val_features": str(experiment_dir / "features_val.pt"),
             "ood_features": str(experiment_dir / "features_ood.pt"),
-            "density_file": str(experiment_dir / "node_density.pt"),
+            "density_file": str(density_path),
             "feature_generator": str(experiment_dir / "feature_generator.pt"),
             "farood_features": farood_features,
         },
         "results": results,
     }
-    save_artifact(result_payload, experiment_dir / "hinference_density.result")
+    output_path = Path(args.output) if args.output else experiment_dir / "hinference_density.result"
+    save_artifact(result_payload, output_path)
 
 
 if __name__ == "__main__":

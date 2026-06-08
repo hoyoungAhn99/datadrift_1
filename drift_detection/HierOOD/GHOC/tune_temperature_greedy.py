@@ -97,6 +97,7 @@ def evaluate_from_scores(split_artifact, node_scores, hierarchy, density_payload
                 include_debug=False,
                 node_scores=batch_scores,
                 cgm_cfg={"enabled": False},
+                ood_scale=inference_cfg.get("ood_scale", 1.0),
             )
             batch_preds = predict_from_probabilities(
                 final_probs,

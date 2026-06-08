@@ -123,6 +123,7 @@ def evaluate_split_for_tuning(
                 include_debug=False,
                 node_scores=batch_scores,
                 cgm_cfg=inference_cfg.get("cgm", {}),
+                ood_scale=inference_cfg.get("ood_scale", 1.0),
             )
             batch_preds = predict_from_probabilities(
                 final_probs,
@@ -140,6 +141,7 @@ def evaluate_split_for_tuning(
             "score_type": inference_cfg.get("score_type", "gaussian_loglik"),
             "temperature": inference_cfg.get("temperature", 1.0),
             "kappa": inference_cfg.get("kappa", 20.0),
+            "ood_scale": inference_cfg.get("ood_scale", 1.0),
             "cgm": inference_cfg.get("cgm", {"enabled": False}),
             "collapsed_ood": inference_cfg.get("collapse_ood_to_parent", True),
             "feature_source": feature_meta,

@@ -95,6 +95,7 @@ inference:
   score_type: gaussian_loglik           # choices: gaussian_loglik, raw_gaussian, mahalanobis, vmf
   temperature: [1.0, 1.0, 1.0]         # choices: positive float or list[float] with one entry per non-root depth
   kappa: 20.0                           # choices: any positive float, used by vmf
+  ood_scale: 1.0                        # choices: any positive float, scales legacy OOD mass
   prediction_mode: argmax               # choices: argmax, min_hdist
   collapse_ood_to_parent: true          # choices: true, false
 
@@ -103,6 +104,9 @@ cgm:
   mask_type: sum                        # choices: sum
   lambda: 0.9                           # choices: float in [0, 1)
   child_weight: uniform                 # choices: uniform, count
+  ood_prior: 1.0                        # choices: any positive float
+  child_log_scale: 1.0                  # choices: any positive float
+  ood_log_scale: 1.0                    # choices: any positive float
   normalize_ood_pdf: true               # choices: true, false
   eps: 1.0e-12                          # choices: any positive float
 

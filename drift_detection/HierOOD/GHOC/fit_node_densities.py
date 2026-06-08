@@ -15,6 +15,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     parser.add_argument("--feature-gen-config")
+    parser.add_argument("--output", help="Density artifact path. Default: <experiment_dir>/node_density.pt")
     args = parser.parse_args()
 
     config = load_merged_config(args.config, args.feature_gen_config)
@@ -35,10 +36,12 @@ def main():
         train_artifact["class_names"],
         covariance_type=density_cfg.get("covariance_type", "diag"),
         eps=density_cfg["eps"],
+        covariance_shrinkage=density_cfg.get("covariance_shrinkage", 0.0),
     )
     density["config"] = density_cfg
     density["feature_source"] = feature_meta
-    save_artifact(density, experiment_dir / "node_density.pt")
+    output_path = Path(args.output) if args.output else experiment_dir / "node_density.pt"
+    save_artifact(density, output_path)
 
 
 if __name__ == "__main__":
