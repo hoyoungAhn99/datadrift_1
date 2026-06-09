@@ -60,8 +60,19 @@ def ms_loss_level(sim_mat, labels, alpha=2.0, beta=50.0, lam=0.5, mining_margin=
 
 
 def HiMS_min_loss(
-    features, path_labels, alpha=2.0, beta=50.0, lam=0.5, mining_margin=0.1
+    features,
+    path_labels,
+    alpha=2.0,
+    beta=50.0,
+    lam=0.5,
+    mining_margin=0.1,
+    minimum_mode="batch",
 ):
+    if minimum_mode not in {"batch", "sample"}:
+        raise ValueError(
+            f"Unsupported minimum_mode: {minimum_mode}. Expected 'batch' or 'sample'."
+        )
+
     sim_mat = torch.matmul(features, features.t())
     
     sim_mat = torch.clamp(sim_mat, min=-1.0 + 1e-6, max=1.0 - 1e-6)
@@ -98,7 +109,7 @@ def HiMS_min_loss(
         else:
             cur_loss = torch.min(base_loss_l, cur_min)
 
-        cur_min = torch.min(cur_loss)
+        cur_min = torch.min(cur_loss) if minimum_mode == "batch" else cur_loss
 
         k_l = torch.exp(torch.tensor(1.0 / (l + 1.0), device=device))
         level_loss = cur_loss # / set_size_base_l
