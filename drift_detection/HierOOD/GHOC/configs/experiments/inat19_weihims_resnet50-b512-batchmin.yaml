@@ -61,12 +61,12 @@ loss:
   minimum_mode: batch
 
 training:
-  epochs: 13
+  epochs: 200
   grad_clip_norm: null
   amp: false
   checkpoint_metric: val_loss
   checkpoint_mode: min
-  resume_from: C:\HOYOUNG\datadrift_1\drift_detection\HierOOD\GM-ProHOC\outputs\inat19-weihims-resnet50\checkpoint_backbone.pt
+  resume_from: null
 
 validation:
   enable_depth_eval: true
