@@ -63,7 +63,14 @@ loss:
 training:
   epochs: 200
   grad_clip_norm: null
-  amp: false
+  amp: true
+  amp_initial_scale: 4096.0 # lower than the PyTorch default to avoid WeiHiMS FP16 gradient overflow
+  gradient_cache:
+    enabled: true       # true keeps pair mining over the full logical batch
+    chunk_size: 32      # physical backbone batch; reduce this if CUDA OOM occurs
+  batch_norm:
+    mode: chunk         # choices: chunk, frozen, standard
+    freeze_affine: false # false keeps BN gamma/beta trainable
   checkpoint_metric: val_loss
   checkpoint_mode: min
   resume_from: null

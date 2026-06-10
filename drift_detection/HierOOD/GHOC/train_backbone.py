@@ -18,6 +18,12 @@ from core.hierarchy_labels import build_leaf_path_matrix, targets_to_path_labels
 from core.metric_losses import build_metric_loss
 from core.model_factory import backbone_summary, build_backbone, maybe_wrap_dataparallel, unwrap_model
 from core.hierarchy_inference import build_depth_maps
+from core.gradient_cache import (
+    GradientCacheConfig,
+    autocast_context,
+    configure_batch_norm,
+    gradient_cache_step,
+)
 from libs.hierarchy import Hierarchy
 from libs.utils.dataset_util import gen_datasets, get_id_classes
 
@@ -103,7 +109,7 @@ def load_model_weights(model, checkpoint):
         target_model.load_state_dict(stripped)
 
 
-def load_resume_checkpoint(model, optimizer, scheduler, config, device):
+def load_resume_checkpoint(model, optimizer, scheduler, scaler, config, device):
     resume_from = config["training"].get("resume_from")
     if not resume_from:
         return 0, float("inf"), None
@@ -120,6 +126,8 @@ def load_resume_checkpoint(model, optimizer, scheduler, config, device):
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         if scheduler is not None and "scheduler_state_dict" in checkpoint:
             scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        if scaler is not None and checkpoint.get("scaler_state_dict") is not None:
+            scaler.load_state_dict(checkpoint["scaler_state_dict"])
         start_epoch = int(checkpoint.get("epoch", -1)) + 1
         best_val_loss = float(checkpoint.get("best_val_loss", best_val_loss))
         history = checkpoint.get("history")
@@ -137,6 +145,7 @@ def save_training_checkpoint(
     model,
     optimizer,
     scheduler,
+    scaler,
     epoch,
     best_val_loss,
     history,
@@ -148,6 +157,7 @@ def save_training_checkpoint(
         "model_state_dict": unwrap_model(model).state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
+        "scaler_state_dict": scaler.state_dict() if scaler is not None else None,
         "best_val_loss": best_val_loss,
         "history": history,
         "config": config,
@@ -156,30 +166,47 @@ def save_training_checkpoint(
     torch.save(payload, path)
 
 
-def evaluate_loss(model, loader, loss_fn, leaf_path_matrix, device, desc="Val loss"):
+def evaluate_loss(
+    model,
+    loader,
+    loss_fn,
+    leaf_path_matrix,
+    device,
+    amp_enabled=False,
+    batch_norm_mode="standard",
+    batch_norm_freeze_affine=False,
+    desc="Val loss",
+):
     model.eval()
+    configure_batch_norm(
+        model,
+        mode="frozen" if batch_norm_mode == "frozen" else "standard",
+        freeze_affine=batch_norm_freeze_affine,
+    )
     total_loss = 0.0
     steps = 0
     with torch.no_grad():
         for inputs, targets in tqdm(loader, desc=desc):
             inputs = inputs.to(device)
             targets = targets.to(device)
-            features = model(inputs)
+            with autocast_context(inputs.device.type, amp_enabled):
+                features = model(inputs)
             path_labels = targets_to_path_labels(targets, leaf_path_matrix, device=device)
-            loss = loss_fn(features, path_labels)
+            loss = loss_fn(features.float(), path_labels)
             total_loss += float(loss.item())
             steps += 1
     return total_loss / max(steps, 1)
 
 
-def collect_features_and_targets(model, loader, device, desc):
+def collect_features_and_targets(model, loader, device, desc, amp_enabled=False):
     model.eval()
     features = []
     targets = []
     with torch.no_grad():
         for inputs, batch_targets in tqdm(loader, desc=desc):
             inputs = inputs.to(device)
-            feats = model(inputs)
+            with autocast_context(inputs.device.type, amp_enabled):
+                feats = model(inputs)
             features.append(feats.detach().cpu())
             targets.append(batch_targets.long().cpu())
     return torch.cat(features, dim=0), torch.cat(targets, dim=0)
@@ -198,12 +225,21 @@ def compute_depthwise_accuracy(
     temperature,
     kappa,
     device,
+    amp_enabled=False,
 ):
     train_features, train_targets = collect_features_and_targets(
-        model, train_loader, device, desc="Depth eval train features"
+        model,
+        train_loader,
+        device,
+        desc="Depth eval train features",
+        amp_enabled=amp_enabled,
     )
     val_features, val_targets = collect_features_and_targets(
-        model, val_loader, device, desc="Depth eval val features"
+        model,
+        val_loader,
+        device,
+        desc="Depth eval val features",
+        amp_enabled=amp_enabled,
     )
 
     density = fit_node_distributions(
@@ -353,12 +389,50 @@ def main():
     optimizer = build_optimizer(model, config)
     scheduler = build_scheduler(optimizer, config)
 
+    training_cfg = config["training"]
+    amp_requested = bool(training_cfg.get("amp", False))
+    amp_enabled = amp_requested and str(device).startswith("cuda")
+    if amp_requested and not amp_enabled:
+        print("AMP requested but CUDA is not active; continuing without AMP.")
+    amp_initial_scale = float(training_cfg.get("amp_initial_scale", 65536.0))
+    scaler = torch.amp.GradScaler(
+        "cuda",
+        enabled=amp_enabled,
+        init_scale=amp_initial_scale,
+    )
+
+    grad_cache_cfg = training_cfg.get("gradient_cache", {})
+    grad_cache_enabled = bool(grad_cache_cfg.get("enabled", False))
+    batch_norm_cfg = training_cfg.get("batch_norm", {})
+    batch_norm_mode = batch_norm_cfg.get(
+        "mode", "chunk" if grad_cache_enabled else "standard"
+    )
+    batch_norm_freeze_affine = bool(batch_norm_cfg.get("freeze_affine", False))
+    configure_batch_norm(
+        model,
+        mode=batch_norm_mode,
+        freeze_affine=batch_norm_freeze_affine,
+    )
+    gradient_cache_config = None
+    if grad_cache_enabled:
+        gradient_cache_config = GradientCacheConfig(
+            chunk_size=int(grad_cache_cfg.get("chunk_size", 32)),
+            batch_norm_mode=batch_norm_mode,
+        )
+        print(
+            "Gradient Cache enabled: "
+            f"logical_batch={config['dataloader']['batch_size']}, "
+            f"chunk_size={gradient_cache_config.chunk_size}, "
+            f"batch_norm={batch_norm_mode}, amp={amp_enabled}"
+        )
+
     epochs = config["training"]["epochs"]
     history = {"train_loss": [], "val_loss": []}
     start_epoch, best_val_loss, resume_history = load_resume_checkpoint(
         model,
         optimizer,
         scheduler,
+        scaler,
         config,
         device,
     )
@@ -370,19 +444,47 @@ def main():
 
     for epoch in range(start_epoch, epochs):
         model.train()
+        configure_batch_norm(
+            model,
+            mode=batch_norm_mode,
+            freeze_affine=batch_norm_freeze_affine,
+        )
         running_loss = 0.0
         steps = 0
         for inputs, targets in tqdm(train_loader, desc=f"Train {epoch+1}/{epochs}"):
             inputs = inputs.to(device)
             targets = targets.to(device)
-            features = model(inputs)
             path_labels = targets_to_path_labels(targets, leaf_path_matrix, device=device)
-            loss = loss_fn(features, path_labels)
-            optimizer.zero_grad()
-            loss.backward()
+            optimizer.zero_grad(set_to_none=True)
+
+            if grad_cache_enabled:
+                loss = gradient_cache_step(
+                    model,
+                    inputs,
+                    path_labels,
+                    loss_fn,
+                    gradient_cache_config,
+                    amp_enabled=amp_enabled,
+                    scaler=scaler,
+                )
+            else:
+                with autocast_context(inputs.device.type, amp_enabled):
+                    features = model(inputs)
+                loss = loss_fn(features.float(), path_labels)
+                if amp_enabled:
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+
+            if amp_enabled:
+                scaler.unscale_(optimizer)
             if config["training"].get("grad_clip_norm"):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), config["training"]["grad_clip_norm"])
-            optimizer.step()
+            if amp_enabled:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
             running_loss += float(loss.item())
             steps += 1
 
@@ -393,6 +495,9 @@ def main():
             loss_fn,
             leaf_path_matrix,
             device,
+            amp_enabled=amp_enabled,
+            batch_norm_mode=batch_norm_mode,
+            batch_norm_freeze_affine=batch_norm_freeze_affine,
             desc=f"Val loss {epoch+1}/{epochs}",
         )
         history["train_loss"].append(train_loss)
@@ -413,6 +518,7 @@ def main():
                 config["inference"].get("temperature", 1.0),
                 config["inference"].get("kappa", 20.0),
                 device,
+                amp_enabled=amp_enabled,
             )
             history.setdefault("depth_eval", []).append({"epoch": epoch, **depth_eval_summary})
 
@@ -446,6 +552,7 @@ def main():
                 model,
                 optimizer,
                 scheduler,
+                scaler,
                 epoch,
                 best_val_loss,
                 history,
@@ -458,6 +565,7 @@ def main():
             model,
             optimizer,
             scheduler,
+            scaler,
             epoch,
             best_val_loss,
             history,
