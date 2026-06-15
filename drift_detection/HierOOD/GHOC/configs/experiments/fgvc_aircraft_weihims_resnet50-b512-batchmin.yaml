@@ -1,5 +1,5 @@
 experiment:
-  name: fgvc-aircraft-weihims-resnet50-b128-gradcache-c32
+  name: fgvc-aircraft-weihims-resnet50-b512-samplemin-c32
   seed: 42
   device: cuda
   output_root: ./outputs
@@ -23,7 +23,7 @@ hierarchy:
   save_path_metadata: true
 
 dataloader:
-  batch_size: 128
+  batch_size: 512
   eval_batch_size: 64
   num_workers: 8
   shuffle_train: true
@@ -58,7 +58,7 @@ loss:
   mining_margin: 0.1
   dist_scale: 2.0
   dist_pow: 1.0
-  minimum_mode: batch
+  minimum_mode: sample
 
 training:
   epochs: 200
@@ -66,7 +66,7 @@ training:
   amp: false
   gradient_cache:
     enabled: true       # true keeps pair mining over the full logical batch
-    chunk_size: 32      # splits the logical batch into four cached backbone passes
+    chunk_size: 128      # splits the logical batch into four cached backbone passes
   batch_norm:
     mode: chunk         # choices: chunk, frozen, standard
     freeze_affine: false # false keeps BN gamma/beta trainable
