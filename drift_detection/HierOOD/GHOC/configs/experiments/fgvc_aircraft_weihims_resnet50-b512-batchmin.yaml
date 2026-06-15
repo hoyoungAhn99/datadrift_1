@@ -39,7 +39,7 @@ backbone:
 
 optimizer:
   name: adamw
-  lr: 0.00001
+  lr: 0.0001
   weight_decay: 0.0001
   momentum: 0.9
   nesterov: false
@@ -66,7 +66,7 @@ training:
   amp: false
   gradient_cache:
     enabled: true       # true keeps pair mining over the full logical batch
-    chunk_size: 64      # FP32 physical backbone batch; reduce to 32 if CUDA OOM occurs
+    chunk_size: 128     # two GPUs process about 64 samples each, matching the baseline BN batch
   batch_norm:
     mode: chunk         # choices: chunk, frozen, standard
     freeze_affine: false # false keeps BN gamma/beta trainable
