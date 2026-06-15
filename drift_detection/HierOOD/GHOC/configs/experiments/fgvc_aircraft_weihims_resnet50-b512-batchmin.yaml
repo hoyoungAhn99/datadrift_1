@@ -1,5 +1,5 @@
 experiment:
-  name: fgvc-aircraft-weihims-resnet50-b512-samplemin-c32
+  name: fgvc-aircraft-weihims-resnet50-b512-samplemin-c128
   seed: 42
   device: cuda
   output_root: ./outputs
