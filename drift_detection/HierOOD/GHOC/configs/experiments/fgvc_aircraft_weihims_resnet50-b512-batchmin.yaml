@@ -1,5 +1,5 @@
 experiment:
-  name: fgvc-aircraft-weihims-resnet50-b512-batchmin
+  name: fgvc-aircraft-weihims-resnet50-b128-gradcache
   seed: 42
   device: cuda
   output_root: ./outputs
@@ -23,7 +23,7 @@ hierarchy:
   save_path_metadata: true
 
 dataloader:
-  batch_size: 512
+  batch_size: 128
   eval_batch_size: 64
   num_workers: 8
   shuffle_train: true
@@ -66,7 +66,7 @@ training:
   amp: false
   gradient_cache:
     enabled: true       # true keeps pair mining over the full logical batch
-    chunk_size: 128     # two GPUs process about 64 samples each, matching the baseline BN batch
+    chunk_size: 128     # one cached chunk; verifies GradCache against the batch-128 baseline
   batch_norm:
     mode: chunk         # choices: chunk, frozen, standard
     freeze_affine: false # false keeps BN gamma/beta trainable
