@@ -3,6 +3,7 @@ import os
 
 import matplotlib.pyplot as plt
 import pandas as pd
+from matplotlib.ticker import FixedLocator
 
 
 def ensure_dir(path):
@@ -104,6 +105,7 @@ def plot_t1_metric_by_depth(df, metric_name, output_path, temperature=1.0):
     ax.set_title(f"{y_label} by Depth at T={temperature:g}")
     ax.set_xlabel("Local parent depth")
     ax.set_ylabel(y_label)
+    ax.xaxis.set_major_locator(FixedLocator(sorted(group["depth"].unique())))
     ax.grid(True, alpha=0.3)
     ax.legend()
     fig.tight_layout()

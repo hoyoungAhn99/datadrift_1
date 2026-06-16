@@ -1,5 +1,5 @@
 experiment:
-  name: inat19-weihims-resnet50-b512-batchmin
+  name: inat19-weihims-resnet50-b512-samplemin-c32
   seed: 42
   device: cuda
   output_root: ./outputs
@@ -58,16 +58,15 @@ loss:
   mining_margin: 0.1
   dist_scale: 2.0
   dist_pow: 1.0
-  minimum_mode: batch
+  minimum_mode: sample
 
 training:
   epochs: 200
   grad_clip_norm: null
-  amp: true
-  amp_initial_scale: 4096.0 # lower than the PyTorch default to avoid WeiHiMS FP16 gradient overflow
+  amp: false
   gradient_cache:
     enabled: true       # true keeps pair mining over the full logical batch
-    chunk_size: 128      # physical backbone batch; reduce this if CUDA OOM occurs
+    chunk_size: 32      # splits the logical batch into cached backbone passes
   batch_norm:
     mode: chunk         # choices: chunk, frozen, standard
     freeze_affine: false # false keeps BN gamma/beta trainable
