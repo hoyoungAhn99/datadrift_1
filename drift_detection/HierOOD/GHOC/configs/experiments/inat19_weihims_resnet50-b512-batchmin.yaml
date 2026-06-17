@@ -1,5 +1,5 @@
 experiment:
-  name: inat19-weihims-resnet50-b512-samplemin-c32
+  name: inat19-weihims-resnet50-b512-samplemin-c128
   seed: 42
   device: cuda
   output_root: ./outputs
@@ -66,7 +66,7 @@ training:
   amp: false
   gradient_cache:
     enabled: true       # true keeps pair mining over the full logical batch
-    chunk_size: 32      # splits the logical batch into cached backbone passes
+    chunk_size: 128     # physical backbone batch; reduce if CUDA OOM occurs
   batch_norm:
     mode: chunk         # choices: chunk, frozen, standard
     freeze_affine: false # false keeps BN gamma/beta trainable
@@ -76,7 +76,7 @@ training:
 
 validation:
   enable_depth_eval: true
-  depth_eval_every: 5
+  depth_eval_every: 1
 
 feature_extraction:
   include_train: true
