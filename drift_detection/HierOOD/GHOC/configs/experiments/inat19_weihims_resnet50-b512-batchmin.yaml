@@ -72,7 +72,7 @@ training:
     freeze_affine: false # false keeps BN gamma/beta trainable
   checkpoint_metric: val_loss
   checkpoint_mode: min
-  resume_from: null
+  resume_from: "C:/HOYOUNG/datadrift_1/drift_detection/HierOOD/GHOC/outputs/inat19-weihims-resnet50-b512-samplemin-c128"
 
 validation:
   enable_depth_eval: true
