@@ -226,6 +226,7 @@ def compute_depthwise_accuracy(
     kappa,
     device,
     amp_enabled=False,
+    score_batch_size=None,
 ):
     train_features, train_targets = collect_features_and_targets(
         model,
@@ -250,16 +251,37 @@ def compute_depthwise_accuracy(
         covariance_type=covariance_type,
         eps=density_eps,
     )
-    node_scores = score_nodes(
-        val_features.float(),
-        density["means"].float(),
-        density.get("variances").float() if density.get("variances") is not None else None,
-        covariance_matrices=density.get("covariance_matrices").float() if density.get("covariance_matrices") is not None else None,
-        shared_covariance=density.get("shared_covariance").float() if density.get("shared_covariance") is not None else None,
-        mean_directions=density.get("mean_directions", None).float() if density.get("mean_directions", None) is not None else None,
-        covariance_type=density.get("covariance_type", covariance_type),
-        score_type=score_type,
-        kappa=kappa,
+    score_batch_size = int(score_batch_size or val_features.shape[0])
+    if score_batch_size <= 0:
+        raise ValueError("validation.score_batch_size must be a positive integer.")
+
+    score_kwargs = {
+        "means": density["means"].float(),
+        "variances": density.get("variances").float()
+        if density.get("variances") is not None
+        else None,
+        "covariance_matrices": density.get("covariance_matrices").float()
+        if density.get("covariance_matrices") is not None
+        else None,
+        "shared_covariance": density.get("shared_covariance").float()
+        if density.get("shared_covariance") is not None
+        else None,
+        "mean_directions": density.get("mean_directions", None).float()
+        if density.get("mean_directions", None) is not None
+        else None,
+        "covariance_type": density.get("covariance_type", covariance_type),
+        "score_type": score_type,
+        "kappa": kappa,
+    }
+    node_scores = torch.cat(
+        [
+            score_nodes(feature_chunk.float(), **score_kwargs).cpu()
+            for feature_chunk in tqdm(
+                val_features.split(score_batch_size, dim=0),
+                desc="Depth eval node scoring",
+            )
+        ],
+        dim=0,
     )
     nodes_by_depth = build_depth_maps(hierarchy)
     val_class_names = [train_classes[int(idx)] for idx in val_targets.long().tolist()]
@@ -519,6 +541,13 @@ def main():
                 config["inference"].get("kappa", 20.0),
                 device,
                 amp_enabled=amp_enabled,
+                score_batch_size=validation_cfg.get(
+                    "score_batch_size",
+                    config["dataloader"].get(
+                        "eval_batch_size",
+                        config["dataloader"]["batch_size"],
+                    ),
+                ),
             )
             history.setdefault("depth_eval", []).append({"epoch": epoch, **depth_eval_summary})
 
