@@ -1,0 +1,8 @@
+*.ckpt
+/lightning_logs
+/txt
+/results
+*.pt
+/checkpoints_step1
+/__pycache__
+\.vscode
