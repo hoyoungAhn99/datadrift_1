@@ -11,11 +11,20 @@ import glob
 import pandas as pd
 import h5py
 
+<<<<<<< HEAD:drift_detection/noise_lev_est.py
+GAUS_DATA_PATH = Path("drift_detection/gaus_data.mat")
+IMG_DIR = Path("D:/Datasets/tid2008/reference_images")
+OUT_DIR = Path("D:/Results/Drift")
+NUM_IMAGES = 25
+ADD_NOISE_SIGMA = 25.0
+PATCH_M1 = 7
+=======
 GAUS_DATA_PATH = Path("gaus_data.mat")
 IMG_DIR = Path("D:/Datasets/tid2013/reference_images")
 NUM_IMAGES = 25
 ADD_NOISE_SIGMA = [5.0, 10.0, 15.0, 20.0, 25.0, 30.0]
 PATCH_M1 = 8
+>>>>>>> e1f6f4cfa6cc8c27f1e80998d2b0c11527c2fe54:drift_detection/NLE/NLE.py
 DELTA = 0.8
 MAX_ITERS = 3
 DECIM = 0
@@ -254,6 +263,21 @@ def main():
     paths = sorted(paths)[:NUM_IMAGES]
     if len(paths) < NUM_IMAGES:
         raise RuntimeError(f"Found {len(paths)} images, need {NUM_IMAGES}")
+<<<<<<< HEAD:drift_detection/noise_lev_est.py
+    true_sigma = ADD_NOISE_SIGMA
+    est_sigmas = []
+    for p in paths:
+        clean = np.array(Image.open(p).convert("RGB"), dtype=np.uint8)
+        noisy = add_gaussian_noise_float(clean, true_sigma)
+
+        Image.fromarray(noisy.astype(np.uint8)).save(f"{OUT_DIR}/{p[-7:-4]}_noisy_{int(ADD_NOISE_SIGMA)}.png")
+        nlevel, th, num = noise_lev_est(noisy, show=False, w=PATCH_M1, delta=DELTA, decim=DECIM, conf=1 - 1e-6, itr=MAX_ITERS)
+        est_sigma = nlevel.mean()
+        est_sigmas.append(est_sigma)
+        print(f"{os.path.basename(p):20s}  σ̂={est_sigma:6.3f}; bias={np.abs(est_sigma - true_sigma):6.3f}")
+    est_sigmas = np.array(est_sigmas, dtype=np.float64)
+    print(f"\nMean σ̂ over {len(paths)} images: {est_sigmas.mean():.4f}; bias={np.abs(est_sigmas.mean() - true_sigma):.4f}")
+=======
 
     image_names = [os.path.basename(p) for p in paths]
     results_df = pd.DataFrame(index=ADD_NOISE_SIGMA, columns=image_names, dtype=np.float64)
@@ -281,6 +305,7 @@ def main():
     results_df.index.name = "Added_Noise_Level"
     results_df.to_csv("noise_estimation_results.csv")
     print("\nResults saved to noise_estimation_results.csv")
+>>>>>>> e1f6f4cfa6cc8c27f1e80998d2b0c11527c2fe54:drift_detection/NLE/NLE.py
 
 if __name__ == "__main__":
     main()
