@@ -338,6 +338,60 @@ def main():
         atol=1e-6,
     )
 
+    positive_residual_probs, positive_residual_debug = hierarchical_node_probabilities(
+        features,
+        hierarchy,
+        density,
+        score_type="gaussian_loglik",
+        temperature=1.0,
+        cgm_cfg={
+            "enabled": True,
+            "strict_pdf": True,
+            "ood_density": "positive_density_residual",
+            "child_weight": "uniform",
+            "candidate_prior": "uniform",
+            "normalize_ood_pdf": True,
+            "local_mode": "density_softmax",
+            "eps": 1e-12,
+        },
+    )
+    assert torch.isfinite(positive_residual_probs).all()
+    assert torch.allclose(
+        positive_residual_probs.sum(dim=1),
+        torch.ones(3),
+        atol=1e-6,
+    )
+    positive_residual_parent = positive_residual_debug["local_info"]["parent"]
+    assert positive_residual_parent["candidate_prior_mode"] == "induced_residual"
+    assert positive_residual_parent["ood_prior"] == "induced_residual_mass"
+
+    binary_probs, binary_debug = hierarchical_node_probabilities(
+        features,
+        hierarchy,
+        density,
+        score_type="gaussian_loglik",
+        temperature=1.0,
+        cgm_cfg={
+            "enabled": True,
+            "strict_pdf": True,
+            "ood_density": "random_effects_parent",
+            "between_cov_estimator": "empirical_child_means",
+            "between_cov_scale": 1.0,
+            "mask_type": "sum",
+            "lambda": 0.0,
+            "child_weight": "uniform",
+            "candidate_prior": "uniform",
+            "normalize_ood_pdf": True,
+            "local_mode": "binary_model_selection",
+            "eps": 1e-12,
+        },
+    )
+    assert torch.isfinite(binary_probs).all()
+    assert torch.allclose(binary_probs.sum(dim=1), torch.ones(3), atol=1e-6)
+    binary_parent = binary_debug["local_info"]["parent"]
+    assert binary_parent["candidate_prior_mode"] == "binary_symmetric"
+    assert binary_parent["ood_prior"] == "binary_symmetric"
+
     vmf_probs, vmf_debug = hierarchical_node_probabilities(
         features,
         hierarchy,

@@ -41,6 +41,13 @@ def export_result_to_csv(result_path: str | Path, output_dir: str | Path) -> lis
     class_rows = []
     for split, metrics in result["results"].items():
         cgm_cfg = metrics.get("cgm", {}) or {}
+        cgm_local_mode = cgm_cfg.get("local_mode", "density_softmax")
+        if cgm_cfg.get("ood_density") == "positive_density_residual":
+            cgm_ood_prior = "induced_residual_mass"
+        elif cgm_local_mode == "binary_model_selection":
+            cgm_ood_prior = "not_used_binary_symmetric"
+        else:
+            cgm_ood_prior = cgm_cfg.get("ood_prior")
         row = {
             "experiment_name": result.get("experiment_name"),
             "dataset": result.get("dataset"),
@@ -59,6 +66,9 @@ def export_result_to_csv(result_path: str | Path, output_dir: str | Path) -> lis
             "cgm_complement_reduce": _to_csv_value(cgm_cfg.get("complement_reduce")),
             "cgm_complement_weight": _to_csv_value(cgm_cfg.get("complement_weight")),
             "cgm_mask_type": _to_csv_value(cgm_cfg.get("mask_type")),
+            "cgm_membership_type": _to_csv_value(cgm_cfg.get("membership_type")),
+            "cgm_membership_probability": _to_csv_value(cgm_cfg.get("membership_probability")),
+            "cgm_membership_correction": _to_csv_value(cgm_cfg.get("membership_correction")),
             "cgm_ood_base_cov_scale": _to_csv_value(cgm_cfg.get("ood_base_cov_scale", 1.0)),
             "cgm_mask_cov_scale": _to_csv_value(cgm_cfg.get("mask_cov_scale", 1.0)),
             "cgm_between_cov_scale": _to_csv_value(cgm_cfg.get("between_cov_scale")),
@@ -70,11 +80,11 @@ def export_result_to_csv(result_path: str | Path, output_dir: str | Path) -> lis
             "cgm_random_effects_weight": _to_csv_value(cgm_cfg.get("random_effects_weight")),
             "cgm_parent_covariance_scales": _to_csv_value(cgm_cfg.get("parent_covariance_scales")),
             "cgm_parent_scale_weights": _to_csv_value(cgm_cfg.get("parent_scale_weights")),
-            "cgm_local_mode": _to_csv_value(cgm_cfg.get("local_mode", "density_softmax")),
+            "cgm_local_mode": _to_csv_value(cgm_local_mode),
             "cgm_lambda": _to_csv_value(cgm_cfg.get("lambda")),
             "cgm_child_weight": _to_csv_value(cgm_cfg.get("child_weight")),
             "cgm_candidate_prior": _to_csv_value(cgm_cfg.get("candidate_prior", "uniform")),
-            "cgm_ood_prior": _to_csv_value(cgm_cfg.get("ood_prior")),
+            "cgm_ood_prior": _to_csv_value(cgm_ood_prior),
             "cgm_child_log_scale": _to_csv_value(cgm_cfg.get("child_log_scale")),
             "cgm_ood_log_scale": _to_csv_value(cgm_cfg.get("ood_log_scale")),
             "cgm_gate_log_scale": _to_csv_value(cgm_cfg.get("gate_log_scale")),

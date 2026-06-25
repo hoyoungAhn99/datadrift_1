@@ -13,6 +13,7 @@ runtime:
 dataset:
   name: fgvc-aircraft
   datadir: D:/HY_Data/HierOOD/fgvc-aircraft
+  image_fallback_dir: D:/Datasets/FGVC-Aircraft/fgvc-aircraft-2013b/data/images
   hierarchy: ./hierarchies/fgvc-aircraft.json
   id_split: ./data/fgvc-aircraft-id-labels.csv
   extraood: null

@@ -10,6 +10,8 @@ from core.density import (
     gaussian_bump,
     gaussian_bump_integrals,
     gaussian_bump_integrals_from_covariance,
+    gaussian_chi2_ellipsoid_membership,
+    gaussian_chi2_survival_membership,
     gaussian_covariance_matrices,
     gaussian_logpdf,
     gaussian_logpdf_from_covariance,
@@ -122,9 +124,13 @@ def _validate_cgm_cfg(cgm_cfg: dict[str, Any], score_type: str, temperature):
         "hybrid_mixture",
         "multiscale_parent_mask",
         "child_mixture_mask",
+        "child_tail_mixture",
         "random_effects_parent",
         "random_effects_mixture",
         "random_complement_mixture",
+        "poe_random_effects_parent",
+        "positive_density_residual",
+        "softset_complement",
         "vmf_parent_mask",
     }:
         raise ValueError(f"Unsupported CGM ood_density: {ood_density}")
@@ -134,21 +140,51 @@ def _validate_cgm_cfg(cgm_cfg: dict[str, Any], score_type: str, temperature):
     mask_type = cgm_cfg.get("mask_type", "sum").lower()
     if mask_type not in {"sum", "product", "max", "residual_sigmoid"}:
         raise ValueError(f"Unsupported CGM mask_type: {mask_type}")
+    membership_type = cgm_cfg.get("membership_type", "peak_bump").lower()
+    if membership_type not in {"peak_bump", "chi2_survival", "chi2_ellipsoid"}:
+        raise ValueError(f"Unsupported CGM membership_type: {membership_type}")
+    membership_probability = float(cgm_cfg.get("membership_probability", 0.95))
+    if membership_probability <= 0.0 or membership_probability >= 1.0:
+        raise ValueError("CGM membership_probability must satisfy 0 < value < 1")
+    membership_correction = cgm_cfg.get("membership_correction", "none").lower()
+    if membership_correction not in {"none", "sidak"}:
+        raise ValueError(f"Unsupported CGM membership_correction: {membership_correction}")
     if ood_density in {
         "multiscale_parent_mask",
         "child_mixture_mask",
         "random_effects_parent",
         "random_effects_mixture",
         "random_complement_mixture",
+        "poe_random_effects_parent",
     }:
-        if mask_type != "sum" and not (
-            ood_density == "random_effects_parent" and mask_type == "product"
-        ):
+        product_mask_allowed = (
+            ood_density in {"random_effects_parent", "poe_random_effects_parent"}
+            and mask_type == "product"
+        )
+        if mask_type != "sum" and not product_mask_allowed:
             raise ValueError(f"{ood_density} requires mask_type: sum")
         if not bool(cgm_cfg.get("normalize_ood_pdf", True)):
             raise ValueError(f"{ood_density} requires normalize_ood_pdf: true")
+    if ood_density == "softset_complement":
+        if mask_type != "product":
+            raise ValueError("softset_complement requires mask_type: product")
+        if not bool(cgm_cfg.get("normalize_ood_pdf", True)):
+            raise ValueError("softset_complement requires normalize_ood_pdf: true")
+    if ood_density == "child_tail_mixture":
+        if mask_type != "product" or membership_type != "chi2_ellipsoid":
+            raise ValueError(
+                "child_tail_mixture requires mask_type: product and membership_type: chi2_ellipsoid"
+            )
+        if not bool(cgm_cfg.get("normalize_ood_pdf", True)):
+            raise ValueError("child_tail_mixture requires normalize_ood_pdf: true")
     local_mode = cgm_cfg.get("local_mode", "density_softmax").lower()
-    if local_mode not in {"density_softmax", "depth_gate", "blend"}:
+    if local_mode not in {
+        "density_softmax",
+        "depth_gate",
+        "blend",
+        "binary_model_selection",
+        "density_joint",
+    }:
         raise ValueError(f"Unsupported CGM local_mode: {local_mode}")
     lam = float(cgm_cfg.get("lambda", 0.9))
     if lam < 0.0 or lam >= 1.0:
@@ -164,6 +200,18 @@ def _validate_cgm_cfg(cgm_cfg: dict[str, Any], score_type: str, temperature):
         "mixed_balanced_terminal",
     }:
         raise ValueError(f"Unsupported CGM candidate_prior: {candidate_prior}")
+    if ood_density == "positive_density_residual" and (
+        candidate_prior != "uniform" or child_weight != "uniform"
+    ):
+        raise ValueError(
+            "positive_density_residual requires uniform child weights and no external candidate prior"
+        )
+    if local_mode == "binary_model_selection" and (
+        candidate_prior != "uniform" or child_weight != "uniform"
+    ):
+        raise ValueError(
+            "binary_model_selection requires uniform child weights and no external candidate prior"
+        )
     between_cov_estimator = cgm_cfg.get("between_cov_estimator", "parent_residual").lower()
     if between_cov_estimator not in {
         "parent_residual",
@@ -184,9 +232,13 @@ def _validate_cgm_cfg(cgm_cfg: dict[str, Any], score_type: str, temperature):
             "parent_mask",
             "multiscale_parent_mask",
             "child_mixture_mask",
+            "child_tail_mixture",
             "random_effects_parent",
             "random_effects_mixture",
             "random_complement_mixture",
+            "poe_random_effects_parent",
+            "positive_density_residual",
+            "softset_complement",
             "vmf_parent_mask",
         }:
             raise ValueError(
@@ -194,14 +246,28 @@ def _validate_cgm_cfg(cgm_cfg: dict[str, Any], score_type: str, temperature):
             )
         if ood_density == "random_complement_mixture" and complement_reduce != "mean":
             raise ValueError("strict random_complement_mixture requires complement_reduce: mean")
-        if mask_type != "sum" and not (
-            ood_density == "random_effects_parent" and mask_type == "product"
-        ):
+        product_mask_allowed = (
+            ood_density
+            in {
+                "random_effects_parent",
+                "poe_random_effects_parent",
+                "softset_complement",
+                "child_tail_mixture",
+            }
+            and mask_type == "product"
+        )
+        if mask_type != "sum" and not product_mask_allowed:
             raise ValueError("strict_pdf CGM requires a normalized sum or product mask")
         if not bool(cgm_cfg.get("normalize_ood_pdf", True)):
             raise ValueError("strict_pdf CGM requires normalize_ood_pdf: true")
-        if local_mode != "density_softmax":
-            raise ValueError("strict_pdf CGM requires local_mode: density_softmax")
+        if local_mode not in {
+            "density_softmax",
+            "binary_model_selection",
+            "density_joint",
+        }:
+            raise ValueError(
+                "strict_pdf CGM requires density_softmax, binary_model_selection, or density_joint"
+            )
     if density_family == "gaussian" and score_type.lower() != "gaussian_loglik":
         raise ValueError("CGM inference requires inference.score_type: gaussian_loglik")
     if density_family == "vmf" and ood_density != "vmf_parent_mask":
@@ -297,6 +363,8 @@ def _product_mask_log_normalizer(
     lam: float,
     num_samples: int,
     eps: float,
+    membership_type: str = "peak_bump",
+    membership_probability: float = 0.95,
 ) -> torch.Tensor:
     cache = density_payload.setdefault("_cgm_product_mask_normalizer_cache", {})
     cache_key = (
@@ -305,6 +373,8 @@ def _product_mask_log_normalizer(
         float(mask_cov_scale),
         float(lam),
         int(num_samples),
+        membership_type,
+        float(membership_probability),
         tuple(base_covariance.shape),
         float(base_covariance.diagonal().sum().item()),
     )
@@ -324,7 +394,16 @@ def _product_mask_log_normalizer(
     standard_normal = math.sqrt(2.0) * torch.erfinv(2.0 * uniforms - 1.0)
     cholesky = torch.linalg.cholesky(base_covariance)
     samples = base_mean.unsqueeze(0) + standard_normal @ cholesky.transpose(0, 1)
-    sample_bumps = gaussian_bump(
+    if membership_type == "chi2_survival":
+        membership_fn = gaussian_chi2_survival_membership
+        membership_kwargs = {}
+    elif membership_type == "chi2_ellipsoid":
+        membership_fn = gaussian_chi2_ellipsoid_membership
+        membership_kwargs = {"probability_mass": membership_probability}
+    else:
+        membership_fn = gaussian_bump
+        membership_kwargs = {}
+    sample_bumps = membership_fn(
         samples,
         density_payload["means"],
         density_payload.get("variances"),
@@ -336,7 +415,16 @@ def _product_mask_log_normalizer(
         ),
         node_indices=child_indices,
         covariance_scale=mask_cov_scale,
+        **membership_kwargs,
     )
+    safe_max = 1.0 - max(eps, torch.finfo(sample_bumps.dtype).eps)
+    sample_bumps = torch.nan_to_num(
+        sample_bumps,
+        nan=0.0,
+        posinf=safe_max,
+        neginf=0.0,
+    )
+    sample_bumps = sample_bumps.clamp(min=0.0, max=safe_max)
     sample_log_mask = torch.log1p(-lam * sample_bumps).sum(dim=1)
     log_normalizer = torch.logsumexp(sample_log_mask, dim=0) - math.log(num_samples)
     cache[cache_key] = log_normalizer
@@ -769,6 +857,12 @@ def _cgm_local_probabilities_for_node(
         raise ValueError("CGM child_log_scale and ood_log_scale must be positive")
     mask_type = cgm_cfg.get("mask_type", "sum").lower()
     ood_density = cgm_cfg.get("ood_density", "parent_mask").lower()
+    membership_type = cgm_cfg.get(
+        "membership_type",
+        "chi2_survival" if ood_density == "softset_complement" else "peak_bump",
+    ).lower()
+    membership_probability = float(cgm_cfg.get("membership_probability", 0.95))
+    membership_correction = cgm_cfg.get("membership_correction", "none").lower()
     complement_reduce = cgm_cfg.get("complement_reduce", "sum").lower()
     local_mode = cgm_cfg.get("local_mode", "density_softmax").lower()
     child_weight_mode = cgm_cfg.get("child_weight", "uniform").lower()
@@ -830,6 +924,11 @@ def _cgm_local_probabilities_for_node(
 
     parent_idx = hierarchy.id_node_list.index(parent_name)
     child_indices = [hierarchy.id_node_list.index(child) for child in children]
+    local_membership_probability = membership_probability
+    if membership_correction == "sidak":
+        local_membership_probability = membership_probability ** (
+            1.0 / max(len(child_indices), 1)
+        )
     child_depth = len(hierarchy.node_ancestors[children[0]])
     max_depth = max(len(hierarchy.node_ancestors[name]) for name in hierarchy.id_node_list)
     ood_prior = _resolve_cgm_ood_prior(raw_ood_prior, child_depth, max_depth)
@@ -856,6 +955,7 @@ def _cgm_local_probabilities_for_node(
         "random_effects_parent",
         "random_effects_mixture",
         "random_complement_mixture",
+        "poe_random_effects_parent",
     }:
         ood_base_logpdf = parent_logpdf
     elif abs(ood_base_cov_scale - 1.0) <= 1e-12:
@@ -871,7 +971,16 @@ def _cgm_local_probabilities_for_node(
             node_indices=[parent_idx],
             covariance_scale=ood_base_cov_scale,
         ).squeeze(1)
-    child_bumps = gaussian_bump(
+    if membership_type == "chi2_survival":
+        membership_fn = gaussian_chi2_survival_membership
+        membership_kwargs = {}
+    elif membership_type == "chi2_ellipsoid":
+        membership_fn = gaussian_chi2_ellipsoid_membership
+        membership_kwargs = {"probability_mass": local_membership_probability}
+    else:
+        membership_fn = gaussian_bump
+        membership_kwargs = {}
+    child_bumps = membership_fn(
         features,
         means,
         variances,
@@ -880,7 +989,9 @@ def _cgm_local_probabilities_for_node(
         covariance_type=covariance_type,
         node_indices=child_indices,
         covariance_scale=mask_cov_scale,
+        **membership_kwargs,
     )
+    mask_lam = 1.0 if ood_density == "softset_complement" else lam
     child_weights = _cgm_child_weights(
         child_indices,
         density_payload,
@@ -888,10 +999,161 @@ def _cgm_local_probabilities_for_node(
         dtype=features.dtype,
         device=features.device,
     )
+    if ood_density == "child_tail_mixture":
+        log_child_weights = torch.log(child_weights.clamp_min(eps))
+        safe_max = 1.0 - max(eps, torch.finfo(child_bumps.dtype).eps)
+        tail_masks = 1.0 - torch.nan_to_num(
+            child_bumps,
+            nan=0.0,
+            posinf=safe_max,
+            neginf=0.0,
+        ).clamp(min=0.0, max=safe_max)
+        component_tail_logits = (
+            child_logpdf
+            + log_child_weights.unsqueeze(0)
+            + torch.log(tail_masks.clamp_min(eps))
+        )
+        tail_joint_logpdf = torch.logsumexp(component_tail_logits, dim=1)
+        normalizer = torch.tensor(
+            1.0 - local_membership_probability,
+            dtype=features.dtype,
+            device=features.device,
+        ).clamp_min(eps)
+        ood_logpdf = tail_joint_logpdf - torch.log(normalizer)
+        child_logits = child_logpdf + log_child_weights.unsqueeze(0)
+        if local_mode == "density_joint":
+            density_ood_logit = tail_joint_logpdf
+        else:
+            density_ood_logit = ood_logpdf
+        density_logits = torch.cat([child_logits, density_ood_logit.unsqueeze(1)], dim=1)
+        density_probs = torch.softmax(density_logits, dim=1)
+        empty_vector = torch.empty((0,), dtype=features.dtype, device=features.device)
+        empty_matrix = torch.empty((0, 0), dtype=features.dtype, device=features.device)
+        return {
+            "child_indices": child_indices,
+            "child_probs": density_probs[:, :-1],
+            "ood_prob": density_probs[:, -1],
+            "child_logpdf": child_logpdf,
+            "parent_logpdf": parent_logpdf,
+            "ood_base_logpdf": tail_joint_logpdf,
+            "ood_base_cov_scale": 1.0,
+            "mask_cov_scale": mask_cov_scale,
+            "between_cov_scale": 0.0,
+            "between_cov_estimator": "child_tail_mixture",
+            "between_cov_shrinkage_strength": 0.0,
+            "product_mask_samples": 0,
+            "random_effects_weight": 0.0,
+            "ood_base_mean": means[parent_idx],
+            "random_effects_covariance": empty_matrix,
+            "child_mixture_logpdf": torch.logsumexp(child_logits, dim=1),
+            "child_bumps": child_bumps,
+            "child_weights": child_weights,
+            "mask_driver": tail_masks.sum(dim=1),
+            "mask": tail_masks,
+            "log_mask": torch.log(tail_masks.clamp_min(eps)),
+            "bump_integrals": empty_vector,
+            "normalizer": normalizer,
+            "ood_prior": "induced_child_tail_mass",
+            "candidate_prior_mode": "child_tail_mixture",
+            "child_candidate_priors": child_weights,
+            "ood_candidate_prior": normalizer,
+            "ood_density": ood_density,
+            "complement_reduce": "mixture_tail",
+            "complement_weight": 0.0,
+            "complement_indices": [],
+            "parent_covariance_scales": [],
+            "parent_scale_weights": empty_vector,
+            "parent_scale_normalizers": empty_vector,
+            "local_mode": local_mode,
+            "child_log_scale": 1.0,
+            "ood_log_scale": 1.0,
+            "gate_log_scale": gate_log_scale,
+            "gate_bias": gate_bias,
+            "blend_weight": blend_weight,
+            "child_logits": child_logits,
+            "ood_logit": density_ood_logit,
+            "ood_logpdf": ood_logpdf,
+        }
+    if ood_density == "positive_density_residual":
+        log_child_weights = torch.log(child_weights.clamp_min(eps))
+        child_logits = child_logpdf + log_child_weights.unsqueeze(0)
+        child_mixture_logpdf = torch.logsumexp(child_logits, dim=1)
+
+        residual_support = parent_logpdf > child_mixture_logpdf
+        log_ratio = child_mixture_logpdf - parent_logpdf
+        safe_log_ratio = log_ratio.clamp(max=-torch.finfo(features.dtype).eps)
+        positive_log_residual = parent_logpdf + torch.log(-torch.expm1(safe_log_ratio))
+        ood_logpdf = torch.where(
+            residual_support,
+            positive_log_residual,
+            torch.full_like(positive_log_residual, -torch.inf),
+        )
+        density_logits = torch.cat([child_logits, ood_logpdf.unsqueeze(1)], dim=1)
+        density_probs = torch.softmax(density_logits, dim=1)
+
+        mixture_to_parent_ratio = torch.exp(log_ratio.clamp(max=0.0))
+        mask = torch.where(
+            residual_support,
+            1.0 - mixture_to_parent_ratio,
+            torch.zeros_like(mixture_to_parent_ratio),
+        )
+        log_mask = torch.where(
+            residual_support,
+            torch.log(mask.clamp_min(eps)),
+            torch.full_like(mask, -torch.inf),
+        )
+        empty_vector = torch.empty((0,), dtype=features.dtype, device=features.device)
+        empty_matrix = torch.empty((0, 0), dtype=features.dtype, device=features.device)
+        return {
+            "child_indices": child_indices,
+            "child_probs": density_probs[:, :-1],
+            "ood_prob": density_probs[:, -1],
+            "child_logpdf": child_logpdf,
+            "parent_logpdf": parent_logpdf,
+            "ood_base_logpdf": parent_logpdf,
+            "ood_base_cov_scale": 1.0,
+            "mask_cov_scale": 1.0,
+            "between_cov_scale": 0.0,
+            "between_cov_estimator": "none",
+            "between_cov_shrinkage_strength": 0.0,
+            "product_mask_samples": 0,
+            "random_effects_weight": 0.0,
+            "ood_base_mean": means[parent_idx],
+            "random_effects_covariance": empty_matrix,
+            "child_mixture_logpdf": child_mixture_logpdf,
+            "child_bumps": child_bumps,
+            "child_weights": child_weights,
+            "mask_driver": mixture_to_parent_ratio,
+            "mask": mask,
+            "log_mask": log_mask,
+            "bump_integrals": empty_vector,
+            "normalizer": torch.tensor(float("nan"), dtype=features.dtype, device=features.device),
+            "ood_prior": "induced_residual_mass",
+            "candidate_prior_mode": "induced_residual",
+            "child_candidate_priors": child_weights,
+            "ood_candidate_prior": torch.tensor(float("nan"), dtype=features.dtype, device=features.device),
+            "ood_density": ood_density,
+            "complement_reduce": "sum",
+            "complement_weight": 0.0,
+            "complement_indices": [],
+            "parent_covariance_scales": [],
+            "parent_scale_weights": empty_vector,
+            "parent_scale_normalizers": empty_vector,
+            "local_mode": "density_softmax",
+            "child_log_scale": 1.0,
+            "ood_log_scale": 1.0,
+            "gate_log_scale": 1.0,
+            "gate_bias": 0.0,
+            "blend_weight": 0.0,
+            "child_logits": child_logits,
+            "ood_logit": ood_logpdf,
+            "ood_logpdf": ood_logpdf,
+        }
     if ood_density in {
         "random_effects_parent",
         "random_effects_mixture",
         "random_complement_mixture",
+        "poe_random_effects_parent",
     }:
         parent_covariance = gaussian_covariance_matrices(
             variances,
@@ -969,23 +1231,48 @@ def _cgm_local_probabilities_for_node(
             ood_base_mean,
             random_effects_covariance,
         )
+        if ood_density == "poe_random_effects_parent":
+            parent_precision = torch.linalg.inv(parent_covariance + eps * eye)
+            random_precision = torch.linalg.inv(random_effects_covariance)
+            poe_precision = 0.5 * (parent_precision + random_precision)
+            random_natural = random_precision @ ood_base_mean
+            parent_natural = parent_precision @ means[parent_idx]
+            poe_covariance = torch.linalg.inv(poe_precision + eps * eye)
+            poe_mean = poe_covariance @ (0.5 * (parent_natural + random_natural))
+            random_effects_covariance = 0.5 * (
+                poe_covariance + poe_covariance.transpose(0, 1)
+            ) + eps * eye
+            ood_base_mean = poe_mean
+            ood_base_logpdf = gaussian_logpdf_from_covariance(
+                features,
+                ood_base_mean,
+                random_effects_covariance,
+            )
     if mask_type == "sum":
         mask_driver = (child_bumps * child_weights.unsqueeze(0)).sum(dim=1)
-        mask = 1.0 - lam * mask_driver
+        mask = 1.0 - mask_lam * mask_driver
         log_mask = torch.log(mask.clamp_min(eps))
     elif mask_type == "product":
-        mask_driver = child_bumps.sum(dim=1)
-        log_mask = torch.log1p(-lam * child_bumps).sum(dim=1)
+        safe_max = 1.0 - max(eps, torch.finfo(child_bumps.dtype).eps)
+        child_bumps = torch.nan_to_num(
+            child_bumps,
+            nan=0.0,
+            posinf=safe_max,
+            neginf=0.0,
+        )
+        safe_child_bumps = child_bumps.clamp(min=0.0, max=safe_max)
+        mask_driver = safe_child_bumps.sum(dim=1)
+        log_mask = torch.log1p(-mask_lam * safe_child_bumps).sum(dim=1)
         mask = torch.exp(log_mask)
     elif mask_type == "max":
         mask_driver = child_bumps.max(dim=1).values
-        mask = 1.0 - lam * mask_driver
+        mask = 1.0 - mask_lam * mask_driver
         log_mask = torch.log(mask.clamp_min(eps))
     elif mask_type == "residual_sigmoid":
         log_child_weights = torch.log(child_weights.clamp_min(eps))
         child_mixture_logpdf = torch.logsumexp(child_logpdf + log_child_weights.unsqueeze(0), dim=1)
         mask_driver = torch.sigmoid(child_mixture_logpdf - parent_logpdf)
-        mask = 1.0 - lam * mask_driver
+        mask = 1.0 - mask_lam * mask_driver
         log_mask = torch.log(mask.clamp_min(eps))
     else:
         raise ValueError(f"Unsupported CGM mask_type: {mask_type}")
@@ -1022,16 +1309,31 @@ def _cgm_local_probabilities_for_node(
             dtype=features.dtype,
             device=features.device,
         )
+        if random_effects_covariance.numel() == 0:
+            normalizer_base_covariance = (
+                gaussian_covariance_matrices(
+                    variances,
+                    covariance_matrices,
+                    shared_covariance,
+                    covariance_type,
+                    [parent_idx],
+                )[0]
+                * ood_base_cov_scale
+            )
+        else:
+            normalizer_base_covariance = random_effects_covariance
         log_normalizer = _product_mask_log_normalizer(
             parent_idx,
             ood_base_mean,
-            random_effects_covariance,
+            normalizer_base_covariance,
             child_indices,
             density_payload,
             mask_cov_scale,
-            lam,
+            mask_lam,
             product_mask_samples,
             eps,
+            membership_type,
+            local_membership_probability,
         )
         normalizer = torch.exp(log_normalizer)
     else:
@@ -1039,7 +1341,7 @@ def _cgm_local_probabilities_for_node(
         normalizer = torch.ones((), dtype=features.dtype, device=features.device)
         log_normalizer = torch.zeros((), dtype=features.dtype, device=features.device)
 
-    if candidate_prior_mode in {
+    if local_mode == "binary_model_selection" or candidate_prior_mode in {
         "hierarchy_leaf_count",
         "balanced_terminal",
         "mixed_balanced_terminal",
@@ -1052,7 +1354,12 @@ def _cgm_local_probabilities_for_node(
     parent_mask_logpdf = ood_base_logpdf + log_mask - log_normalizer
     complement_indices: list[int] = []
     parent_scale_normalizers = torch.empty((0,), dtype=features.dtype, device=features.device)
-    if ood_density in {"parent_mask", "random_effects_parent"}:
+    if ood_density in {
+        "parent_mask",
+        "random_effects_parent",
+        "poe_random_effects_parent",
+        "softset_complement",
+    }:
         ood_logpdf = parent_mask_logpdf + log_ood_prior
     elif ood_density == "random_effects_mixture":
         standard_bump_integrals = gaussian_bump_integrals(
@@ -1220,6 +1527,108 @@ def _cgm_local_probabilities_for_node(
         raise ValueError(f"Unsupported CGM ood_density: {ood_density}")
     log_child_weights = torch.log(child_weights.clamp_min(eps))
     child_mixture_logpdf = torch.logsumexp(child_logpdf + log_child_weights.unsqueeze(0), dim=1)
+    if local_mode == "binary_model_selection":
+        hypothesis_logits = torch.stack([child_mixture_logpdf, ood_logpdf], dim=1)
+        hypothesis_probs = torch.softmax(hypothesis_logits, dim=1)
+        conditional_child_logits = child_logpdf + log_child_weights.unsqueeze(0)
+        conditional_child_probs = torch.softmax(conditional_child_logits, dim=1)
+        child_probs = hypothesis_probs[:, :1] * conditional_child_probs
+        ood_prob = hypothesis_probs[:, 1]
+        return {
+            "child_indices": child_indices,
+            "child_probs": child_probs,
+            "ood_prob": ood_prob,
+            "child_logpdf": child_logpdf,
+            "parent_logpdf": parent_logpdf,
+            "ood_base_logpdf": ood_base_logpdf,
+            "ood_base_cov_scale": ood_base_cov_scale,
+            "mask_cov_scale": mask_cov_scale,
+            "between_cov_scale": between_cov_scale,
+            "between_cov_estimator": between_cov_estimator,
+            "between_cov_shrinkage_strength": between_cov_shrinkage_strength,
+            "product_mask_samples": product_mask_samples,
+            "random_effects_weight": random_effects_weight,
+            "ood_base_mean": ood_base_mean,
+            "random_effects_covariance": random_effects_covariance,
+            "child_mixture_logpdf": child_mixture_logpdf,
+            "child_bumps": child_bumps,
+            "child_weights": child_weights,
+            "mask_driver": mask_driver,
+            "mask": mask,
+            "log_mask": log_mask,
+            "bump_integrals": bump_integrals,
+            "normalizer": normalizer,
+            "ood_prior": "binary_symmetric",
+            "candidate_prior_mode": "binary_symmetric",
+            "child_candidate_priors": child_weights,
+            "ood_candidate_prior": torch.tensor(0.5, dtype=features.dtype, device=features.device),
+            "ood_density": ood_density,
+            "complement_reduce": complement_reduce,
+            "complement_weight": complement_weight,
+            "complement_indices": complement_indices,
+            "parent_covariance_scales": parent_covariance_scales,
+            "parent_scale_weights": parent_scale_weights,
+            "parent_scale_normalizers": parent_scale_normalizers,
+            "local_mode": local_mode,
+            "child_log_scale": 1.0,
+            "ood_log_scale": 1.0,
+            "gate_log_scale": 1.0,
+            "gate_bias": 0.0,
+            "blend_weight": 0.0,
+            "child_logits": conditional_child_logits,
+            "ood_logit": ood_logpdf,
+            "ood_logpdf": ood_logpdf,
+        }
+    if local_mode == "density_joint":
+        child_logits = child_logpdf + log_child_weights.unsqueeze(0)
+        density_ood_logit = parent_mask_logpdf + log_normalizer
+        density_logits = torch.cat([child_logits, density_ood_logit.unsqueeze(1)], dim=1)
+        density_probs = torch.softmax(density_logits, dim=1)
+        return {
+            "child_indices": child_indices,
+            "child_probs": density_probs[:, :-1],
+            "ood_prob": density_probs[:, -1],
+            "child_logpdf": child_logpdf,
+            "parent_logpdf": parent_logpdf,
+            "ood_base_logpdf": ood_base_logpdf,
+            "ood_base_cov_scale": ood_base_cov_scale,
+            "mask_cov_scale": mask_cov_scale,
+            "between_cov_scale": between_cov_scale,
+            "between_cov_estimator": between_cov_estimator,
+            "between_cov_shrinkage_strength": between_cov_shrinkage_strength,
+            "product_mask_samples": product_mask_samples,
+            "random_effects_weight": random_effects_weight,
+            "ood_base_mean": ood_base_mean,
+            "random_effects_covariance": random_effects_covariance,
+            "child_mixture_logpdf": child_mixture_logpdf,
+            "child_bumps": child_bumps,
+            "child_weights": child_weights,
+            "mask_driver": mask_driver,
+            "mask": mask,
+            "log_mask": log_mask,
+            "bump_integrals": bump_integrals,
+            "normalizer": normalizer,
+            "ood_prior": "induced_joint_mass",
+            "candidate_prior_mode": "density_joint",
+            "child_candidate_priors": child_weights,
+            "ood_candidate_prior": normalizer,
+            "ood_density": ood_density,
+            "complement_reduce": complement_reduce,
+            "complement_weight": complement_weight,
+            "complement_indices": complement_indices,
+            "parent_covariance_scales": parent_covariance_scales,
+            "parent_scale_weights": parent_scale_weights,
+            "parent_scale_normalizers": parent_scale_normalizers,
+            "local_mode": local_mode,
+            "child_log_scale": 1.0,
+            "ood_log_scale": 1.0,
+            "gate_log_scale": gate_log_scale,
+            "gate_bias": gate_bias,
+            "blend_weight": blend_weight,
+            "child_logits": child_logits,
+            "ood_logit": density_ood_logit,
+            "ood_logpdf": parent_mask_logpdf,
+        }
     child_logits = child_log_scale * child_logpdf
     density_ood_logit = ood_log_scale * ood_logpdf
     if candidate_prior_mode in {

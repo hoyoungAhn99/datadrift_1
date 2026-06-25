@@ -1,5 +1,6 @@
 from .fisher_mask import FisherMaskFeatureGenerator
 from .identity import IdentityFeatureGenerator
+from .lda_projection import LDAProjectionFeatureGenerator
 from .pca_projection import PCAFeatureGenerator
 from .umap_projection import UMAPFeatureGenerator
 from .variance_mask import VarianceMaskFeatureGenerator

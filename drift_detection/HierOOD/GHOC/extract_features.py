@@ -5,6 +5,7 @@ from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader
+from PIL import Image
 from tqdm import tqdm
 
 from core.config import load_config, save_config
@@ -48,6 +49,43 @@ def collect_features(model, loader, device):
     return torch.cat(feats, dim=0), torch.cat(targets, dim=0)
 
 
+def filter_unreadable_images(dataset, split_name: str, fallback_dir: str | None = None):
+    fallback_root = Path(fallback_dir) if fallback_dir else None
+    kept = []
+    removed = []
+    replaced = 0
+    for sample in dataset.samples:
+        path, target = sample
+        candidate_path = Path(path)
+        if fallback_root is not None and (
+            not candidate_path.exists() or candidate_path.stat().st_size <= 0
+        ):
+            fallback_path = fallback_root / candidate_path.name
+            if fallback_path.exists():
+                candidate_path = fallback_path
+                replaced += 1
+        try:
+            if candidate_path.stat().st_size <= 0:
+                raise OSError("empty image file")
+            with Image.open(candidate_path) as image:
+                image.verify()
+            kept.append((str(candidate_path), target))
+        except Exception as exc:
+            removed.append((path, type(exc).__name__, str(exc)))
+
+    if replaced:
+        print(f"Using fallback image paths for {replaced} {split_name} images.")
+    if removed:
+        print(f"Skipping {len(removed)} unreadable {split_name} images.")
+        for path, err_type, message in removed[:10]:
+            print(f"  {err_type}: {path} ({message})")
+    if replaced or removed:
+        dataset.samples = kept
+        dataset.imgs = kept
+        dataset.targets = [target for _, target in kept]
+    return dataset
+
+
 def split_payload(split_name, features, targets, class_names, node_targets, config, extra=None):
     payload = {
         "features": features,
@@ -82,9 +120,24 @@ def main():
         hierarchy.ood_train_classes,
         **transform_kwargs,
     )
+    fallback_dir = dataset_cfg.get("image_fallback_dir")
+    train_ds = filter_unreadable_images(train_ds, "train", fallback_dir=fallback_dir)
+    val_ds = filter_unreadable_images(val_ds, "val", fallback_dir=fallback_dir)
+    ood_ds = filter_unreadable_images(ood_ds, "ood", fallback_dir=fallback_dir)
 
+    checkpoint_path = experiment_dir / "checkpoint_backbone.pt"
+    if checkpoint_path.exists() and config["backbone"].get("type", "").lower() == "resnet50":
+        # The checkpoint immediately overwrites the randomly initialized backbone.
+        # Avoid downloading torchvision pretrained weights during extraction.
+        config = {
+            **config,
+            "backbone": {
+                **config["backbone"],
+                "weights": None,
+            },
+        }
     model = build_backbone(config).to(device)
-    load_backbone_checkpoint(model, experiment_dir / "checkpoint_backbone.pt", map_location=device)
+    load_backbone_checkpoint(model, checkpoint_path, map_location=device)
     model = maybe_wrap_dataparallel(model, config)
     model.eval()
 

@@ -4,6 +4,7 @@ from typing import Any
 
 from feature_generation.posthoc.fisher_mask import FisherMaskFeatureGenerator
 from feature_generation.posthoc.identity import IdentityFeatureGenerator
+from feature_generation.posthoc.lda_projection import LDAProjectionFeatureGenerator
 from feature_generation.posthoc.pca_projection import PCAFeatureGenerator
 from feature_generation.posthoc.umap_projection import UMAPFeatureGenerator
 from feature_generation.posthoc.variance_mask import VarianceMaskFeatureGenerator
@@ -18,6 +19,8 @@ def build_feature_generator(config: dict[str, Any], hierarchy_info) -> object:
         return IdentityFeatureGenerator(num_depths=num_depths)
     if fg_type == "pca_projection":
         return PCAFeatureGenerator(num_depths=num_depths, config=fg_cfg)
+    if fg_type == "lda_projection":
+        return LDAProjectionFeatureGenerator(num_depths=num_depths, config=fg_cfg)
     if fg_type == "umap_projection":
         return UMAPFeatureGenerator(num_depths=num_depths, config=fg_cfg)
     if fg_type == "variance_mask":

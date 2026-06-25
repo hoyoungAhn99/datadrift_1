@@ -363,6 +363,112 @@ def gaussian_bump(
     return torch.exp(-0.5 * maha).clamp(max=1.0)
 
 
+def gaussian_chi2_survival_membership(
+    features: torch.Tensor,
+    means: torch.Tensor,
+    variances: torch.Tensor | None = None,
+    covariance_matrices: torch.Tensor | None = None,
+    shared_covariance: torch.Tensor | None = None,
+    covariance_type: str = "diag",
+    node_indices: list[int] | torch.Tensor | None = None,
+    covariance_scale: float = 1.0,
+) -> torch.Tensor:
+    covariance_scale = float(covariance_scale)
+    if covariance_scale <= 0.0:
+        raise ValueError("covariance_scale must be positive")
+    selected = _select_gaussian_params(
+        means,
+        variances,
+        covariance_matrices,
+        shared_covariance,
+        node_indices,
+    )
+    selected_means, selected_variances, selected_covariances, selected_shared = selected
+    if selected_variances is not None:
+        selected_variances = selected_variances * covariance_scale
+    if selected_covariances is not None:
+        selected_covariances = selected_covariances * covariance_scale
+    if selected_shared is not None:
+        selected_shared = selected_shared * covariance_scale
+    diff = features[:, None, :] - selected_means[None, :, :]
+    maha, _ = _gaussian_terms(
+        diff,
+        variances=selected_variances,
+        covariance_matrices=selected_covariances,
+        shared_covariance=selected_shared,
+        covariance_type=covariance_type.lower(),
+    )
+    dimension = torch.tensor(
+        float(selected_means.shape[-1]),
+        dtype=features.dtype,
+        device=features.device,
+    )
+    # Wilson-Hilferty normal approximation to the chi-square survival function.
+    # It gives a dimension-calibrated soft indicator of Gaussian typicality.
+    z = (
+        (maha.clamp_min(0.0) / dimension).clamp_min(1e-12).pow(1.0 / 3.0)
+        - (1.0 - 2.0 / (9.0 * dimension))
+    ) / torch.sqrt(2.0 / (9.0 * dimension))
+    survival = 0.5 * torch.erfc(z / math.sqrt(2.0))
+    return survival.clamp(min=0.0, max=1.0)
+
+
+def gaussian_chi2_ellipsoid_membership(
+    features: torch.Tensor,
+    means: torch.Tensor,
+    variances: torch.Tensor | None = None,
+    covariance_matrices: torch.Tensor | None = None,
+    shared_covariance: torch.Tensor | None = None,
+    covariance_type: str = "diag",
+    node_indices: list[int] | torch.Tensor | None = None,
+    covariance_scale: float = 1.0,
+    probability_mass: float = 0.95,
+) -> torch.Tensor:
+    probability_mass = float(probability_mass)
+    if probability_mass <= 0.0 or probability_mass >= 1.0:
+        raise ValueError("probability_mass must satisfy 0 < value < 1")
+    covariance_scale = float(covariance_scale)
+    if covariance_scale <= 0.0:
+        raise ValueError("covariance_scale must be positive")
+    selected = _select_gaussian_params(
+        means,
+        variances,
+        covariance_matrices,
+        shared_covariance,
+        node_indices,
+    )
+    selected_means, selected_variances, selected_covariances, selected_shared = selected
+    if selected_variances is not None:
+        selected_variances = selected_variances * covariance_scale
+    if selected_covariances is not None:
+        selected_covariances = selected_covariances * covariance_scale
+    if selected_shared is not None:
+        selected_shared = selected_shared * covariance_scale
+    diff = features[:, None, :] - selected_means[None, :, :]
+    maha, _ = _gaussian_terms(
+        diff,
+        variances=selected_variances,
+        covariance_matrices=selected_covariances,
+        shared_covariance=selected_shared,
+        covariance_type=covariance_type.lower(),
+    )
+    dimension = torch.tensor(
+        float(selected_means.shape[-1]),
+        dtype=features.dtype,
+        device=features.device,
+    )
+    q = torch.tensor(
+        probability_mass,
+        dtype=features.dtype,
+        device=features.device,
+    )
+    z = math.sqrt(2.0) * torch.erfinv(2.0 * q - 1.0)
+    threshold = dimension * (
+        1.0 - 2.0 / (9.0 * dimension) + z * torch.sqrt(2.0 / (9.0 * dimension))
+    ).pow(3.0)
+    return (maha <= threshold).to(features.dtype)
+
+
 def gaussian_bump_integrals(
     parent_idx: int,
     child_indices: list[int],
@@ -464,6 +570,40 @@ def gaussian_logpdf_from_covariance(
     maha = torch.sum(diff * solution, dim=1)
     const = mean.numel() * math.log(2.0 * math.pi)
     return -0.5 * (maha + logdet + const)
+
+
+def multivariate_student_t_logpdf_from_covariance(
+    features: torch.Tensor,
+    mean: torch.Tensor,
+    scale_matrix: torch.Tensor,
+    degrees_of_freedom: float,
+) -> torch.Tensor:
+    degrees_of_freedom = float(degrees_of_freedom)
+    if degrees_of_freedom <= 0.0:
+        raise ValueError("degrees_of_freedom must be positive")
+    dimension = features.shape[1]
+    centered = features - mean.unsqueeze(0)
+    chol = torch.linalg.cholesky(scale_matrix)
+    solved = torch.linalg.solve_triangular(
+        chol,
+        centered.transpose(0, 1),
+        upper=False,
+    )
+    mahalanobis = solved.square().sum(dim=0)
+    log_determinant = 2.0 * torch.log(torch.diagonal(chol)).sum()
+    nu = torch.tensor(
+        degrees_of_freedom,
+        dtype=features.dtype,
+        device=features.device,
+    )
+    log_normalizer = (
+        torch.lgamma((nu + dimension) / 2.0)
+        - torch.lgamma(nu / 2.0)
+        - 0.5 * (dimension * torch.log(nu * math.pi) + log_determinant)
+    )
+    return log_normalizer - 0.5 * (nu + dimension) * torch.log1p(
+        mahalanobis / nu
+    )
 
 
 def gaussian_bump_integrals_from_covariance(
