@@ -35,7 +35,7 @@ backbone:
   feat_dim: 256
   normalize: true
   freeze_backbone: false
-  weights: IMAGENET1K_V1
+  weights: null
 
 optimizer:
   name: adamw

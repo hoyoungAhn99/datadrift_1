@@ -4,7 +4,11 @@ import argparse
 from pathlib import Path
 
 from core.config import load_merged_config, save_config
-from core.density import fit_node_distributions
+from core.density import (
+    fit_depth_masked_node_distributions,
+    fit_depth_reweighted_node_distributions,
+    fit_node_distributions,
+)
 from core.feature_io import load_artifact, save_artifact
 from feature_generation.utils.io import resolve_feature_tensor
 from libs.hierarchy import Hierarchy
@@ -29,15 +33,41 @@ def main():
 
     density_cfg = config["density"]
     train_features, feature_meta = resolve_feature_tensor(config, experiment_dir, "train")
-    density = fit_node_distributions(
-        train_features,
-        train_artifact["targets"].long(),
-        hierarchy,
-        train_artifact["class_names"],
-        covariance_type=density_cfg.get("covariance_type", "diag"),
-        eps=density_cfg["eps"],
-        covariance_shrinkage=density_cfg.get("covariance_shrinkage", 0.0),
-    )
+    feature_mask_type = density_cfg.get("feature_mask_type", "none")
+    if str(feature_mask_type).lower() == "depth_fisher":
+        density = fit_depth_masked_node_distributions(
+            train_features,
+            train_artifact["targets"].long(),
+            hierarchy,
+            train_artifact["class_names"],
+            mask_dim=int(density_cfg.get("feature_mask_dim", 64)),
+            covariance_type=density_cfg.get("covariance_type", "diag"),
+            eps=density_cfg["eps"],
+            covariance_shrinkage=density_cfg.get("covariance_shrinkage", 0.0),
+        )
+    elif str(feature_mask_type).lower() == "depth_fisher_reweight":
+        density = fit_depth_reweighted_node_distributions(
+            train_features,
+            train_artifact["targets"].long(),
+            hierarchy,
+            train_artifact["class_names"],
+            gamma=float(density_cfg.get("feature_weight_gamma", 0.25)),
+            min_weight=float(density_cfg.get("feature_weight_min", 0.5)),
+            max_weight=float(density_cfg.get("feature_weight_max", 2.0)),
+            covariance_type=density_cfg.get("covariance_type", "diag"),
+            eps=density_cfg["eps"],
+            covariance_shrinkage=density_cfg.get("covariance_shrinkage", 0.0),
+        )
+    else:
+        density = fit_node_distributions(
+            train_features,
+            train_artifact["targets"].long(),
+            hierarchy,
+            train_artifact["class_names"],
+            covariance_type=density_cfg.get("covariance_type", "diag"),
+            eps=density_cfg["eps"],
+            covariance_shrinkage=density_cfg.get("covariance_shrinkage", 0.0),
+        )
     density["config"] = density_cfg
     density["feature_source"] = feature_meta
     output_path = Path(args.output) if args.output else experiment_dir / "node_density.pt"
