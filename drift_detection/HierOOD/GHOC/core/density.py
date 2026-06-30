@@ -112,6 +112,375 @@ def fit_node_distributions(
     }
 
 
+def fit_depth_masked_node_distributions(
+    features: torch.Tensor,
+    leaf_targets: torch.Tensor,
+    hierarchy,
+    leaf_class_names: list[str],
+    mask_dim: int = 64,
+    covariance_type: str = "shared_full",
+    eps: float = 1e-6,
+    covariance_shrinkage: float = 0.0,
+):
+    covariance_type = covariance_type.lower()
+    if covariance_type not in {"diag", "full", "shared_full", "depth_isotropic"}:
+        raise ValueError(f"Unsupported masked covariance_type: {covariance_type}")
+    mask_dim = int(mask_dim)
+    if mask_dim <= 0 or mask_dim > features.shape[1]:
+        raise ValueError("mask_dim must satisfy 0 < mask_dim <= feature dimension")
+    covariance_shrinkage = float(covariance_shrinkage)
+    if covariance_shrinkage < 0.0 or covariance_shrinkage > 1.0:
+        raise ValueError("covariance_shrinkage must satisfy 0 <= value <= 1")
+
+    mask = build_leaf_to_ancestor_mask(hierarchy, leaf_class_names)
+    n_nodes = mask.shape[1]
+    full_dim = features.shape[1]
+    depth_to_nodes: dict[int, list[int]] = {}
+    for node_idx, node_name in enumerate(hierarchy.id_node_list):
+        depth = len(hierarchy.node_ancestors[node_name])
+        depth_to_nodes.setdefault(depth, []).append(node_idx)
+
+    full_node_features_by_idx: list[torch.Tensor] = []
+    counts = torch.zeros((n_nodes,), dtype=torch.long)
+    for node_idx in range(n_nodes):
+        member_leaf_mask = mask[:, node_idx]
+        member_leaf_indices = torch.nonzero(member_leaf_mask, as_tuple=False).squeeze(1)
+        sample_mask = torch.isin(leaf_targets, member_leaf_indices)
+        node_features = features[sample_mask]
+        full_node_features_by_idx.append(node_features)
+        counts[node_idx] = node_features.shape[0]
+
+    depth_feature_masks: dict[int, torch.Tensor] = {}
+    for depth, node_indices in depth_to_nodes.items():
+        valid = [idx for idx in node_indices if full_node_features_by_idx[idx].shape[0] > 0]
+        if len(valid) < 2:
+            score = features.var(dim=0, unbiased=False)
+        else:
+            node_means = torch.stack(
+                [full_node_features_by_idx[idx].mean(dim=0) for idx in valid],
+                dim=0,
+            )
+            between = node_means.var(dim=0, unbiased=False)
+            within_values = []
+            for idx in valid:
+                node_features = full_node_features_by_idx[idx]
+                within_values.append(node_features.var(dim=0, unbiased=False))
+            within = torch.stack(within_values, dim=0).mean(dim=0)
+            score = between / (within + eps)
+        topk = torch.topk(score, k=mask_dim, largest=True).indices.sort().values
+        depth_feature_masks[int(depth)] = topk.long()
+
+    means = torch.zeros((n_nodes, mask_dim), dtype=features.dtype)
+    mean_directions = torch.zeros((n_nodes, mask_dim), dtype=features.dtype)
+    variances = torch.zeros((n_nodes, mask_dim), dtype=features.dtype)
+    covariance_matrices = None
+    shared_covariance = None
+    masked_node_features_by_idx: list[torch.Tensor] = []
+    if covariance_type in {"full", "shared_full"}:
+        covariance_matrices = torch.zeros((n_nodes, mask_dim, mask_dim), dtype=features.dtype)
+
+    for node_idx, node_name in enumerate(hierarchy.id_node_list):
+        depth = len(hierarchy.node_ancestors[node_name])
+        dims = depth_feature_masks[int(depth)]
+        node_features = full_node_features_by_idx[node_idx][:, dims]
+        masked_node_features_by_idx.append(node_features)
+        if node_features.shape[0] == 0:
+            variances[node_idx] = torch.full((mask_dim,), eps, dtype=features.dtype)
+            if covariance_matrices is not None:
+                covariance_matrices[node_idx] = torch.eye(mask_dim, dtype=features.dtype) * eps
+            continue
+        means[node_idx] = node_features.mean(dim=0)
+        mean_directions[node_idx] = torch.nn.functional.normalize(
+            means[node_idx].unsqueeze(0),
+            dim=-1,
+            eps=eps,
+        ).squeeze(0)
+        variances[node_idx] = _fit_diag_variance(node_features, eps)
+        if covariance_matrices is not None:
+            covariance_matrices[node_idx] = _fit_full_covariance(
+                node_features,
+                means[node_idx],
+                eps,
+                covariance_shrinkage,
+            )
+
+    if covariance_type == "shared_full":
+        shared_covariance = _fit_depth_shared_full_covariance(
+            masked_node_features_by_idx,
+            means,
+            hierarchy,
+            mask_dim,
+            features.dtype,
+            features.device,
+            eps,
+            covariance_shrinkage,
+        )
+        covariance_matrices = None
+    if covariance_type == "depth_isotropic":
+        variances = _fit_depth_shared_isotropic_variances(
+            masked_node_features_by_idx,
+            means,
+            hierarchy,
+            mask_dim,
+            features.dtype,
+            features.device,
+            eps,
+        )
+        covariance_type = "diag"
+
+    return {
+        "node_names": hierarchy.id_node_list,
+        "node_to_index": {name: idx for idx, name in enumerate(hierarchy.id_node_list)},
+        "feature_dim": mask_dim,
+        "original_feature_dim": full_dim,
+        "density_feature_mask_type": "depth_fisher",
+        "depth_feature_masks": depth_feature_masks,
+        "covariance_type": covariance_type,
+        "covariance_shrinkage": covariance_shrinkage,
+        "means": means,
+        "mean_directions": mean_directions,
+        "variances": variances,
+        "covariance_matrices": covariance_matrices,
+        "shared_covariance": shared_covariance,
+        "counts": counts,
+        "leaf_to_ancestor_mask": mask,
+    }
+
+
+def fit_depth_reweighted_node_distributions(
+    features: torch.Tensor,
+    leaf_targets: torch.Tensor,
+    hierarchy,
+    leaf_class_names: list[str],
+    gamma: float = 0.25,
+    min_weight: float = 0.5,
+    max_weight: float = 2.0,
+    covariance_type: str = "shared_full",
+    eps: float = 1e-6,
+    covariance_shrinkage: float = 0.0,
+):
+    covariance_type = covariance_type.lower()
+    if covariance_type not in {"diag", "full", "shared_full", "depth_isotropic"}:
+        raise ValueError(f"Unsupported reweighted covariance_type: {covariance_type}")
+    gamma = float(gamma)
+    min_weight = float(min_weight)
+    max_weight = float(max_weight)
+    if gamma < 0.0:
+        raise ValueError("feature_weight_gamma must be nonnegative")
+    if min_weight <= 0.0 or max_weight < min_weight:
+        raise ValueError("feature weight clipping bounds are invalid")
+    covariance_shrinkage = float(covariance_shrinkage)
+    if covariance_shrinkage < 0.0 or covariance_shrinkage > 1.0:
+        raise ValueError("covariance_shrinkage must satisfy 0 <= value <= 1")
+
+    mask = build_leaf_to_ancestor_mask(hierarchy, leaf_class_names)
+    n_nodes = mask.shape[1]
+    feat_dim = features.shape[1]
+    depth_to_nodes: dict[int, list[int]] = {}
+    for node_idx, node_name in enumerate(hierarchy.id_node_list):
+        depth = len(hierarchy.node_ancestors[node_name])
+        depth_to_nodes.setdefault(depth, []).append(node_idx)
+
+    full_node_features_by_idx: list[torch.Tensor] = []
+    counts = torch.zeros((n_nodes,), dtype=torch.long)
+    for node_idx in range(n_nodes):
+        member_leaf_mask = mask[:, node_idx]
+        member_leaf_indices = torch.nonzero(member_leaf_mask, as_tuple=False).squeeze(1)
+        sample_mask = torch.isin(leaf_targets, member_leaf_indices)
+        node_features = features[sample_mask]
+        full_node_features_by_idx.append(node_features)
+        counts[node_idx] = node_features.shape[0]
+
+    depth_feature_weights: dict[int, torch.Tensor] = {}
+    for depth, node_indices in depth_to_nodes.items():
+        valid = [idx for idx in node_indices if full_node_features_by_idx[idx].shape[0] > 0]
+        if len(valid) < 2 or gamma == 0.0:
+            weights = torch.ones((feat_dim,), dtype=features.dtype, device=features.device)
+        else:
+            node_means = torch.stack(
+                [full_node_features_by_idx[idx].mean(dim=0) for idx in valid],
+                dim=0,
+            )
+            between = node_means.var(dim=0, unbiased=False)
+            within_values = []
+            for idx in valid:
+                node_features = full_node_features_by_idx[idx]
+                within_values.append(node_features.var(dim=0, unbiased=False))
+            within = torch.stack(within_values, dim=0).mean(dim=0)
+            fisher = between / (within + eps)
+            normalized = (fisher + eps) / (fisher.mean() + eps)
+            weights = normalized.pow(gamma).clamp(min=min_weight, max=max_weight)
+            weights = weights / torch.sqrt(weights.square().mean().clamp_min(eps))
+        depth_feature_weights[int(depth)] = weights.to(dtype=features.dtype)
+
+    means = torch.zeros((n_nodes, feat_dim), dtype=features.dtype)
+    mean_directions = torch.zeros((n_nodes, feat_dim), dtype=features.dtype)
+    variances = torch.zeros((n_nodes, feat_dim), dtype=features.dtype)
+    covariance_matrices = None
+    shared_covariance = None
+    weighted_node_features_by_idx: list[torch.Tensor] = []
+    if covariance_type in {"full", "shared_full"}:
+        covariance_matrices = torch.zeros((n_nodes, feat_dim, feat_dim), dtype=features.dtype)
+
+    for node_idx, node_name in enumerate(hierarchy.id_node_list):
+        depth = len(hierarchy.node_ancestors[node_name])
+        weights = depth_feature_weights[int(depth)]
+        node_features = full_node_features_by_idx[node_idx] * weights.unsqueeze(0)
+        weighted_node_features_by_idx.append(node_features)
+        if node_features.shape[0] == 0:
+            variances[node_idx] = torch.full((feat_dim,), eps, dtype=features.dtype)
+            if covariance_matrices is not None:
+                covariance_matrices[node_idx] = torch.eye(feat_dim, dtype=features.dtype) * eps
+            continue
+        means[node_idx] = node_features.mean(dim=0)
+        mean_directions[node_idx] = torch.nn.functional.normalize(
+            means[node_idx].unsqueeze(0),
+            dim=-1,
+            eps=eps,
+        ).squeeze(0)
+        variances[node_idx] = _fit_diag_variance(node_features, eps)
+        if covariance_matrices is not None:
+            covariance_matrices[node_idx] = _fit_full_covariance(
+                node_features,
+                means[node_idx],
+                eps,
+                covariance_shrinkage,
+            )
+
+    if covariance_type == "shared_full":
+        shared_covariance = _fit_depth_shared_full_covariance(
+            weighted_node_features_by_idx,
+            means,
+            hierarchy,
+            feat_dim,
+            features.dtype,
+            features.device,
+            eps,
+            covariance_shrinkage,
+        )
+        covariance_matrices = None
+    if covariance_type == "depth_isotropic":
+        variances = _fit_depth_shared_isotropic_variances(
+            weighted_node_features_by_idx,
+            means,
+            hierarchy,
+            feat_dim,
+            features.dtype,
+            features.device,
+            eps,
+        )
+        covariance_type = "diag"
+
+    return {
+        "node_names": hierarchy.id_node_list,
+        "node_to_index": {name: idx for idx, name in enumerate(hierarchy.id_node_list)},
+        "feature_dim": feat_dim,
+        "original_feature_dim": feat_dim,
+        "density_feature_mask_type": "depth_fisher_reweight",
+        "depth_feature_weights": depth_feature_weights,
+        "feature_weight_gamma": gamma,
+        "feature_weight_min": min_weight,
+        "feature_weight_max": max_weight,
+        "covariance_type": covariance_type,
+        "covariance_shrinkage": covariance_shrinkage,
+        "means": means,
+        "mean_directions": mean_directions,
+        "variances": variances,
+        "covariance_matrices": covariance_matrices,
+        "shared_covariance": shared_covariance,
+        "counts": counts,
+        "leaf_to_ancestor_mask": mask,
+    }
+
+
+def masked_gaussian_logpdf(
+    features: torch.Tensor,
+    density_payload: dict[str, Any],
+    hierarchy,
+) -> torch.Tensor:
+    depth_feature_masks = density_payload.get("depth_feature_masks")
+    if not depth_feature_masks:
+        raise ValueError("masked_gaussian_logpdf requires depth_feature_masks")
+    means = density_payload["means"]
+    variances = density_payload.get("variances")
+    covariance_matrices = density_payload.get("covariance_matrices")
+    shared_covariance = density_payload.get("shared_covariance")
+    covariance_type = density_payload.get(
+        "covariance_type",
+        density_payload.get("config", {}).get("covariance_type", "diag"),
+    )
+    scores = torch.empty(
+        (features.shape[0], len(hierarchy.id_node_list)),
+        dtype=features.dtype,
+        device=features.device,
+    )
+    depth_to_nodes: dict[int, list[int]] = {}
+    for node_idx, node_name in enumerate(hierarchy.id_node_list):
+        depth = len(hierarchy.node_ancestors[node_name])
+        depth_to_nodes.setdefault(depth, []).append(node_idx)
+    for depth, node_indices in depth_to_nodes.items():
+        dims = depth_feature_masks[int(depth)]
+        if not torch.is_tensor(dims):
+            dims = torch.tensor(dims, dtype=torch.long, device=features.device)
+        else:
+            dims = dims.to(device=features.device, dtype=torch.long)
+        selected_features = features[:, dims]
+        scores[:, node_indices] = gaussian_logpdf(
+            selected_features,
+            means,
+            variances,
+            covariance_matrices=covariance_matrices,
+            shared_covariance=shared_covariance,
+            covariance_type=covariance_type,
+            node_indices=node_indices,
+        )
+    return scores
+
+
+def reweighted_gaussian_logpdf(
+    features: torch.Tensor,
+    density_payload: dict[str, Any],
+    hierarchy,
+) -> torch.Tensor:
+    depth_feature_weights = density_payload.get("depth_feature_weights")
+    if not depth_feature_weights:
+        raise ValueError("reweighted_gaussian_logpdf requires depth_feature_weights")
+    means = density_payload["means"]
+    variances = density_payload.get("variances")
+    covariance_matrices = density_payload.get("covariance_matrices")
+    shared_covariance = density_payload.get("shared_covariance")
+    covariance_type = density_payload.get(
+        "covariance_type",
+        density_payload.get("config", {}).get("covariance_type", "diag"),
+    )
+    scores = torch.empty(
+        (features.shape[0], len(hierarchy.id_node_list)),
+        dtype=features.dtype,
+        device=features.device,
+    )
+    depth_to_nodes: dict[int, list[int]] = {}
+    for node_idx, node_name in enumerate(hierarchy.id_node_list):
+        depth = len(hierarchy.node_ancestors[node_name])
+        depth_to_nodes.setdefault(depth, []).append(node_idx)
+    for depth, node_indices in depth_to_nodes.items():
+        weights = depth_feature_weights[int(depth)]
+        if not torch.is_tensor(weights):
+            weights = torch.tensor(weights, dtype=features.dtype, device=features.device)
+        else:
+            weights = weights.to(device=features.device, dtype=features.dtype)
+        selected_features = features * weights.unsqueeze(0)
+        scores[:, node_indices] = gaussian_logpdf(
+            selected_features,
+            means,
+            variances,
+            covariance_matrices=covariance_matrices,
+            shared_covariance=shared_covariance,
+            covariance_type=covariance_type,
+            node_indices=node_indices,
+        )
+    return scores
+
+
 def fit_diagonal_gaussians(
     features: torch.Tensor,
     leaf_targets: torch.Tensor,

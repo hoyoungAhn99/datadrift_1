@@ -15,6 +15,8 @@ from core.density import (
     gaussian_covariance_matrices,
     gaussian_logpdf,
     gaussian_logpdf_from_covariance,
+    masked_gaussian_logpdf,
+    reweighted_gaussian_logpdf,
     estimate_vmf_kappas,
     score_nodes,
     vmf_bump,
@@ -1006,8 +1008,29 @@ def _cgm_local_probabilities_for_node(
     else:
         membership_fn = gaussian_bump
         membership_kwargs = {}
+    membership_features = features
+    if density_payload.get("density_feature_mask_type") == "depth_fisher":
+        depth_masks = density_payload.get("depth_feature_masks", {})
+        mask_dims = depth_masks.get(int(child_depth))
+        if mask_dims is None:
+            raise ValueError(f"Missing depth feature mask for child depth {child_depth}")
+        if not torch.is_tensor(mask_dims):
+            mask_dims = torch.tensor(mask_dims, dtype=torch.long, device=features.device)
+        else:
+            mask_dims = mask_dims.to(device=features.device, dtype=torch.long)
+        membership_features = features[:, mask_dims]
+    elif density_payload.get("density_feature_mask_type") == "depth_fisher_reweight":
+        depth_weights = density_payload.get("depth_feature_weights", {})
+        weights = depth_weights.get(int(child_depth))
+        if weights is None:
+            raise ValueError(f"Missing depth feature weights for child depth {child_depth}")
+        if not torch.is_tensor(weights):
+            weights = torch.tensor(weights, dtype=features.dtype, device=features.device)
+        else:
+            weights = weights.to(device=features.device, dtype=features.dtype)
+        membership_features = features * weights.unsqueeze(0)
     child_bumps = membership_fn(
-        features,
+        membership_features,
         means,
         variances,
         covariance_matrices=covariance_matrices,
@@ -1985,6 +2008,10 @@ def hierarchical_node_probabilities(
                 directions,
                 _vmf_kappas(density_payload, kappa_scale),
             )
+        elif density_payload.get("density_feature_mask_type") == "depth_fisher":
+            node_scores = masked_gaussian_logpdf(features, density_payload, hierarchy)
+        elif density_payload.get("density_feature_mask_type") == "depth_fisher_reweight":
+            node_scores = reweighted_gaussian_logpdf(features, density_payload, hierarchy)
         else:
             node_scores = gaussian_logpdf(
                 features,
@@ -1997,17 +2024,22 @@ def hierarchical_node_probabilities(
     elif node_scores is None:
         if features is None:
             raise ValueError("features are required when node_scores are not provided")
-        node_scores = score_nodes(
-            features,
-            density_payload["means"],
-            density_payload.get("variances"),
-            covariance_matrices=density_payload.get("covariance_matrices"),
-            shared_covariance=density_payload.get("shared_covariance"),
-            mean_directions=density_payload.get("mean_directions"),
-            covariance_type=density_payload.get("covariance_type", density_payload.get("config", {}).get("covariance_type", "diag")),
-            score_type=score_type,
-            kappa=kappa,
-        )
+        if density_payload.get("density_feature_mask_type") == "depth_fisher":
+            node_scores = masked_gaussian_logpdf(features, density_payload, hierarchy)
+        elif density_payload.get("density_feature_mask_type") == "depth_fisher_reweight":
+            node_scores = reweighted_gaussian_logpdf(features, density_payload, hierarchy)
+        else:
+            node_scores = score_nodes(
+                features,
+                density_payload["means"],
+                density_payload.get("variances"),
+                covariance_matrices=density_payload.get("covariance_matrices"),
+                shared_covariance=density_payload.get("shared_covariance"),
+                mean_directions=density_payload.get("mean_directions"),
+                covariance_type=density_payload.get("covariance_type", density_payload.get("config", {}).get("covariance_type", "diag")),
+                score_type=score_type,
+                kappa=kappa,
+            )
     nodes_by_depth = build_depth_maps(hierarchy)
     depth_probs = compute_depth_probs(node_scores, nodes_by_depth, temperature=temperature)
 
