@@ -125,6 +125,12 @@ def _validate_cgm_cfg(cgm_cfg: dict[str, Any], score_type: str, temperature):
         "multiscale_parent_mask",
         "child_mixture_mask",
         "child_tail_mixture",
+        "empirical_child_tail_mixture",
+        "soft_child_tail_mixture",
+        "posterior_entropy_mixture",
+        "posterior_residual_mixture",
+        "conformal_maxprob_stop",
+        "conformal_logpdf_stop",
         "random_effects_parent",
         "random_effects_mixture",
         "random_complement_mixture",
@@ -177,6 +183,18 @@ def _validate_cgm_cfg(cgm_cfg: dict[str, Any], score_type: str, temperature):
             )
         if not bool(cgm_cfg.get("normalize_ood_pdf", True)):
             raise ValueError("child_tail_mixture requires normalize_ood_pdf: true")
+    if ood_density == "empirical_child_tail_mixture":
+        if mask_type != "product":
+            raise ValueError("empirical_child_tail_mixture requires mask_type: product")
+        if not bool(cgm_cfg.get("normalize_ood_pdf", True)):
+            raise ValueError("empirical_child_tail_mixture requires normalize_ood_pdf: true")
+    if ood_density == "soft_child_tail_mixture":
+        if mask_type != "product" or membership_type != "chi2_survival":
+            raise ValueError(
+                "soft_child_tail_mixture requires mask_type: product and membership_type: chi2_survival"
+            )
+        if not bool(cgm_cfg.get("normalize_ood_pdf", True)):
+            raise ValueError("soft_child_tail_mixture requires normalize_ood_pdf: true")
     local_mode = cgm_cfg.get("local_mode", "density_softmax").lower()
     if local_mode not in {
         "density_softmax",
@@ -233,6 +251,12 @@ def _validate_cgm_cfg(cgm_cfg: dict[str, Any], score_type: str, temperature):
             "multiscale_parent_mask",
             "child_mixture_mask",
             "child_tail_mixture",
+            "empirical_child_tail_mixture",
+            "soft_child_tail_mixture",
+            "posterior_entropy_mixture",
+            "posterior_residual_mixture",
+            "conformal_maxprob_stop",
+            "conformal_logpdf_stop",
             "random_effects_parent",
             "random_effects_mixture",
             "random_complement_mixture",
@@ -253,6 +277,8 @@ def _validate_cgm_cfg(cgm_cfg: dict[str, Any], score_type: str, temperature):
                 "poe_random_effects_parent",
                 "softset_complement",
                 "child_tail_mixture",
+                "empirical_child_tail_mixture",
+                "soft_child_tail_mixture",
             }
             and mask_type == "product"
         )
@@ -999,26 +1025,208 @@ def _cgm_local_probabilities_for_node(
         dtype=features.dtype,
         device=features.device,
     )
-    if ood_density == "child_tail_mixture":
+    if ood_density in {"conformal_maxprob_stop", "conformal_logpdf_stop"}:
+        calibration_key = (
+            "conformal_posterior_stop"
+            if ood_density == "conformal_maxprob_stop"
+            else "conformal_logpdf_stop"
+        )
+        calibration_root = density_payload.get("cgm_calibration", {})
+        calibration = calibration_root.get(calibration_key, {})
+        if not calibration and ood_density == "conformal_maxprob_stop":
+            calibration = calibration_root.get("conformal_maxprob_stop", {})
+        thresholds = calibration.get("thresholds")
+        if thresholds is None:
+            raise ValueError(
+                f"{ood_density} requires density_payload['cgm_calibration']['{calibration_key}']"
+            )
+        threshold = float(thresholds.get(parent_name, 1.0))
         log_child_weights = torch.log(child_weights.clamp_min(eps))
-        safe_max = 1.0 - max(eps, torch.finfo(child_bumps.dtype).eps)
-        tail_masks = 1.0 - torch.nan_to_num(
-            child_bumps,
-            nan=0.0,
-            posinf=safe_max,
-            neginf=0.0,
-        ).clamp(min=0.0, max=safe_max)
+        child_logits = child_logpdf + log_child_weights.unsqueeze(0)
+        child_posteriors = torch.softmax(child_logits, dim=1)
+        confidence = child_posteriors.max(dim=1).values
+        if ood_density == "conformal_maxprob_stop":
+            nonconformity = 1.0 - confidence
+        else:
+            nonconformity = -child_logpdf.max(dim=1).values
+        stop = (nonconformity > threshold).to(features.dtype)
+        child_probs = child_posteriors * (1.0 - stop).unsqueeze(1)
+        empty_vector = torch.empty((0,), dtype=features.dtype, device=features.device)
+        empty_matrix = torch.empty((0, 0), dtype=features.dtype, device=features.device)
+        return {
+            "child_indices": child_indices,
+            "child_probs": child_probs,
+            "ood_prob": stop,
+            "child_logpdf": child_logpdf,
+            "parent_logpdf": parent_logpdf,
+            "ood_base_logpdf": parent_logpdf,
+            "ood_base_cov_scale": 1.0,
+            "mask_cov_scale": mask_cov_scale,
+            "between_cov_scale": 0.0,
+            "between_cov_estimator": ood_density,
+            "between_cov_shrinkage_strength": 0.0,
+            "product_mask_samples": 0,
+            "random_effects_weight": 0.0,
+            "ood_base_mean": means[parent_idx],
+            "random_effects_covariance": empty_matrix,
+            "child_mixture_logpdf": torch.logsumexp(child_logits, dim=1),
+            "child_bumps": child_posteriors,
+            "child_weights": child_weights,
+            "mask_driver": nonconformity,
+            "mask": stop.unsqueeze(1).expand_as(child_logpdf),
+            "log_mask": torch.log(stop.clamp_min(eps)).unsqueeze(1).expand_as(child_logpdf),
+            "bump_integrals": empty_vector,
+            "normalizer": torch.tensor(threshold, dtype=features.dtype, device=features.device),
+            "ood_prior": "id_conformal_coverage",
+            "candidate_prior_mode": ood_density,
+            "child_candidate_priors": child_weights,
+            "ood_candidate_prior": torch.tensor(1.0, dtype=features.dtype, device=features.device),
+            "ood_density": ood_density,
+            "complement_reduce": ood_density,
+            "complement_weight": 0.0,
+            "complement_indices": [],
+            "parent_covariance_scales": [],
+            "parent_scale_weights": empty_vector,
+            "parent_scale_normalizers": empty_vector,
+            "local_mode": local_mode,
+            "child_log_scale": 1.0,
+            "ood_log_scale": 1.0,
+            "gate_log_scale": gate_log_scale,
+            "gate_bias": gate_bias,
+            "blend_weight": blend_weight,
+            "child_logits": child_logits,
+            "ood_logit": torch.log(stop.clamp_min(eps)),
+            "ood_logpdf": torch.log(stop.clamp_min(eps)),
+        }
+    if ood_density in {"posterior_entropy_mixture", "posterior_residual_mixture"}:
+        log_child_weights = torch.log(child_weights.clamp_min(eps))
+        child_logits = child_logpdf + log_child_weights.unsqueeze(0)
+        child_mixture_logpdf = torch.logsumexp(child_logits, dim=1)
+        child_posteriors = torch.softmax(child_logits, dim=1)
+        if ood_density == "posterior_entropy_mixture":
+            entropy = -torch.sum(
+                child_posteriors * torch.log(child_posteriors.clamp_min(eps)),
+                dim=1,
+            )
+            if len(child_indices) > 1:
+                ambiguity = entropy / math.log(float(len(child_indices)))
+            else:
+                ambiguity = torch.zeros_like(entropy)
+            estimator_name = "posterior_entropy_mixture"
+        else:
+            ambiguity = 1.0 - child_posteriors.max(dim=1).values
+            estimator_name = "posterior_residual_mixture"
+        density_ood_logit = child_mixture_logpdf + torch.log(ambiguity.clamp_min(eps))
+        density_logits = torch.cat([child_logits, density_ood_logit.unsqueeze(1)], dim=1)
+        density_probs = torch.softmax(density_logits, dim=1)
+        empty_vector = torch.empty((0,), dtype=features.dtype, device=features.device)
+        empty_matrix = torch.empty((0, 0), dtype=features.dtype, device=features.device)
+        return {
+            "child_indices": child_indices,
+            "child_probs": density_probs[:, :-1],
+            "ood_prob": density_probs[:, -1],
+            "child_logpdf": child_logpdf,
+            "parent_logpdf": parent_logpdf,
+            "ood_base_logpdf": child_mixture_logpdf,
+            "ood_base_cov_scale": 1.0,
+            "mask_cov_scale": mask_cov_scale,
+            "between_cov_scale": 0.0,
+            "between_cov_estimator": estimator_name,
+            "between_cov_shrinkage_strength": 0.0,
+            "product_mask_samples": 0,
+            "random_effects_weight": 0.0,
+            "ood_base_mean": means[parent_idx],
+            "random_effects_covariance": empty_matrix,
+            "child_mixture_logpdf": child_mixture_logpdf,
+            "child_bumps": child_posteriors,
+            "child_weights": child_weights,
+            "mask_driver": ambiguity,
+            "mask": ambiguity.unsqueeze(1).expand_as(child_logpdf),
+            "log_mask": torch.log(ambiguity.clamp_min(eps)).unsqueeze(1).expand_as(child_logpdf),
+            "bump_integrals": empty_vector,
+            "normalizer": torch.tensor(1.0, dtype=features.dtype, device=features.device),
+            "ood_prior": estimator_name,
+            "candidate_prior_mode": ood_density,
+            "child_candidate_priors": child_weights,
+            "ood_candidate_prior": torch.tensor(1.0, dtype=features.dtype, device=features.device),
+            "ood_density": ood_density,
+            "complement_reduce": estimator_name,
+            "complement_weight": 0.0,
+            "complement_indices": [],
+            "parent_covariance_scales": [],
+            "parent_scale_weights": empty_vector,
+            "parent_scale_normalizers": empty_vector,
+            "local_mode": local_mode,
+            "child_log_scale": 1.0,
+            "ood_log_scale": 1.0,
+            "gate_log_scale": gate_log_scale,
+            "gate_bias": gate_bias,
+            "blend_weight": blend_weight,
+            "child_logits": child_logits,
+            "ood_logit": density_ood_logit,
+            "ood_logpdf": density_ood_logit,
+        }
+    if ood_density in {
+        "child_tail_mixture",
+        "empirical_child_tail_mixture",
+        "soft_child_tail_mixture",
+    }:
+        log_child_weights = torch.log(child_weights.clamp_min(eps))
+        if ood_density == "empirical_child_tail_mixture":
+            calibration = (
+                density_payload.get("cgm_calibration", {})
+                .get("conformal_logpdf_stop", {})
+            )
+            node_thresholds = calibration.get("node_thresholds")
+            if node_thresholds is None:
+                raise ValueError(
+                    "empirical_child_tail_mixture requires conformal_logpdf_stop node_thresholds"
+                )
+            threshold_values = torch.tensor(
+                [
+                    float(node_thresholds.get(hierarchy.id_node_list[idx], float("inf")))
+                    for idx in child_indices
+                ],
+                dtype=features.dtype,
+                device=features.device,
+            )
+            tail_masks = (-child_logpdf > threshold_values.unsqueeze(0)).to(features.dtype)
+            child_bumps = 1.0 - tail_masks
+        else:
+            safe_max = 1.0 - max(eps, torch.finfo(child_bumps.dtype).eps)
+            tail_masks = 1.0 - torch.nan_to_num(
+                child_bumps,
+                nan=0.0,
+                posinf=safe_max,
+                neginf=0.0,
+            ).clamp(min=0.0, max=safe_max)
         component_tail_logits = (
             child_logpdf
             + log_child_weights.unsqueeze(0)
             + torch.log(tail_masks.clamp_min(eps))
         )
         tail_joint_logpdf = torch.logsumexp(component_tail_logits, dim=1)
-        normalizer = torch.tensor(
-            1.0 - local_membership_probability,
-            dtype=features.dtype,
-            device=features.device,
-        ).clamp_min(eps)
+        if ood_density == "soft_child_tail_mixture":
+            normalizer = torch.tensor(0.5, dtype=features.dtype, device=features.device)
+            correction_name = "chi2_cdf_tail"
+        elif ood_density == "empirical_child_tail_mixture":
+            normalizer = torch.tensor(
+                1.0 - float(
+                    density_payload.get("cgm_calibration", {})
+                    .get("conformal_logpdf_stop", {})
+                    .get("coverage", local_membership_probability)
+                ),
+                dtype=features.dtype,
+                device=features.device,
+            ).clamp_min(eps)
+            correction_name = "empirical_logpdf_tail"
+        else:
+            normalizer = torch.tensor(
+                1.0 - local_membership_probability,
+                dtype=features.dtype,
+                device=features.device,
+            ).clamp_min(eps)
+            correction_name = "hard_ellipsoid_tail"
         ood_logpdf = tail_joint_logpdf - torch.log(normalizer)
         child_logits = child_logpdf + log_child_weights.unsqueeze(0)
         if local_mode == "density_joint":
@@ -1039,7 +1247,7 @@ def _cgm_local_probabilities_for_node(
             "ood_base_cov_scale": 1.0,
             "mask_cov_scale": mask_cov_scale,
             "between_cov_scale": 0.0,
-            "between_cov_estimator": "child_tail_mixture",
+            "between_cov_estimator": correction_name,
             "between_cov_shrinkage_strength": 0.0,
             "product_mask_samples": 0,
             "random_effects_weight": 0.0,
@@ -1054,7 +1262,7 @@ def _cgm_local_probabilities_for_node(
             "bump_integrals": empty_vector,
             "normalizer": normalizer,
             "ood_prior": "induced_child_tail_mass",
-            "candidate_prior_mode": "child_tail_mixture",
+            "candidate_prior_mode": ood_density,
             "child_candidate_priors": child_weights,
             "ood_candidate_prior": normalizer,
             "ood_density": ood_density,

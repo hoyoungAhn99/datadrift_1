@@ -403,7 +403,7 @@ def main(args):
 
     betas = [float(x) for x in args.betas]
 
-    score_module = importlib.import_module("lib.utils.score_util")
+    score_module = importlib.import_module("libs.utils.score_util")
 
     for method in args.uncertainty_methods:
         print(f"Evaluating {method}")
@@ -419,8 +419,7 @@ def main(args):
             name = f"{method}_minhdist_beta{beta}"
             allres[name] = res
 
-    hierarchy_name = (args.hierarchy).split("/")[-1]
-    hierarchy_name = hierarchy_name.split(".")[0]
+    hierarchy_name = os.path.splitext(os.path.basename(os.path.normpath(args.hierarchy)))[0]
 
     torch.save(allres,
                os.path.join(os.path.dirname(args.basedir),
