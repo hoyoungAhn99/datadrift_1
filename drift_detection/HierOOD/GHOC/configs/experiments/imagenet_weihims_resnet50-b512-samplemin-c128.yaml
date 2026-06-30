@@ -12,7 +12,7 @@ runtime:
 
 dataset:
   name: imagenet
-  datadir: D:/HY_Data/HierOOD/FullDataset/imagenet
+  datadir: D:/HY_Data/HierOOD/imagenet
   hierarchy: ./hierarchies/simple-hier-imagenet.json
   id_split: ./data/simple-tiered-imagenet-id-labels.csv
   extraood: null
