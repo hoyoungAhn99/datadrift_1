@@ -23,6 +23,9 @@ def get_results(preds, node_labels, hierarchy, dists_mats=None):
     from negzerohoc.prohoc_compat import hierarchy_metrics as hm
     from negzerohoc.prohoc_compat.utils.hierarchy_utils import get_avg_hdist
 
+    if dists_mats is not None:
+        dists_mats = tuple(x.long() for x in dists_mats)
+
     hmet = hm.HierarchicalPredAccuracy(hierarchy, track_hdist=True)
     hmet.update_state(preds.long(), node_labels.long(), dists_mats=dists_mats)
     hd = hmet.result_hierarchy_distances()
@@ -44,7 +47,7 @@ def make_distance_mats(hierarchy, device="cpu"):
         range(len(hierarchy.id_node_list)),
         return_pair=True,
     )
-    return gt_dists_mat.to(device), pred_dists_mat.to(device)
+    return gt_dists_mat.long().to(device), pred_dists_mat.long().to(device)
 
 
 def evaluate_split(hierarchy, feature_payload, preds, dists_mats=None):
