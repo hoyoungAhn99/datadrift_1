@@ -1,0 +1,21 @@
+experiment:
+  name: simple-hier-imagenet-child-only
+  output_root: outputs
+
+runtime:
+  device: cuda
+
+dataset:
+  name: simple-hier-imagenet
+  hierarchy: hierarchies/simple-hier-imagenet.json
+  id_split: data/simple-tiered-imagenet-id-labels.csv
+
+clip:
+  model: openai/clip-vit-base-patch32
+  local_files_only: true
+
+inference:
+  mode: child_only
+  features_dir: outputs/features/simple-hier-imagenet/clip_openai_clip-vit-base-patch32
+  tau: 1.0
+  save_trace: false

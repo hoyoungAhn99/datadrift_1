@@ -31,7 +31,7 @@ def build_semantic_index(dataset_name: str, hierarchy, clip_backend, mode: str) 
         child_features = []
         prompts_by_candidate = {}
         for child in children:
-            path = node_path_names(hierarchy, child, include_self=True)
+            path = node_path_names(hierarchy, child, include_self=True, dataset_name=dataset_name)
             role = infer_node_role(dataset_name, child)
             prompts = build_positive_prompts(dataset_name, child, parent, path, role)
             prompts_by_candidate[child] = prompts
@@ -42,7 +42,7 @@ def build_semantic_index(dataset_name: str, hierarchy, clip_backend, mode: str) 
         candidate_names = list(children)
 
         if mode == "manual_unknown":
-            parent_path = node_path_names(hierarchy, parent, include_self=True)
+            parent_path = node_path_names(hierarchy, parent, include_self=True, dataset_name=dataset_name)
             prompts = build_unknown_prompts(dataset_name, parent, parent_path)
             unknown_name = f"__unknown__:{parent}"
             prompts_by_candidate[unknown_name] = prompts

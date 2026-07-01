@@ -18,6 +18,35 @@ def clean_node_name(node_name: str) -> str:
     return node_name.replace("_", " ").strip()
 
 
+def clean_description(description: str) -> str:
+    description = description.strip()
+    if ":" in description:
+        prefix, value = description.split(":", 1)
+        if prefix.lower() in {
+            "name",
+            "kingdom",
+            "phylum",
+            "class",
+            "order",
+            "family",
+            "genus",
+            "species",
+        }:
+            description = value.strip()
+    return description.replace("_", " ").strip()
+
+
+def display_node_name(hierarchy, dataset_name: str, node_name: str) -> str:
+    if dataset_name.lower() == "fgvc-aircraft":
+        return node_name
+    if node_name == "root":
+        return "root"
+    description = getattr(hierarchy, "node_description", {}).get(node_name)
+    if description:
+        return clean_description(description)
+    return clean_node_name(node_name)
+
+
 def infer_node_role(dataset_name: str, node_name: str, depth: int | None = None) -> str:
     dataset_name = dataset_name.lower()
     if dataset_name == "fgvc-aircraft":
@@ -89,6 +118,10 @@ def canonicalize_node_name(
 
     if dataset_name.lower() == "fgvc-aircraft":
         return _fgvc_canonical(node_name, path_names, node_role)
+
+    if path_names:
+        clean = clean_node_name(path_names[-1])
+        return clean if clean != "root" else "root"
 
     clean = clean_node_name(node_name)
     return clean if clean != "root" else "root"
@@ -165,17 +198,31 @@ def build_unknown_prompts(
                 f"a photo of a {parent_full} airplane not belonging to the listed models",
             ]
 
+    if parent_name == "root":
+        return [
+            "a photo of an unknown visual category",
+            "a photo of an object or organism outside the known categories",
+            "a photo that does not belong to the listed visual hierarchy categories",
+        ]
+
     return [
         f"a photo of another kind of {parent_full}",
-        f"a photo of a {parent_full} outside the listed child categories",
+        f"a photo of {parent_full} outside the listed child categories",
     ]
 
 
-def node_path_names(hierarchy, node_name: str, include_self: bool = True) -> list[str]:
+def node_path_names(
+    hierarchy,
+    node_name: str,
+    include_self: bool = True,
+    dataset_name: str | None = None,
+) -> list[str]:
     ancestor_indices = hierarchy.node_ancestors.get(node_name, [])
     names = [hierarchy.id_node_list[i] for i in ancestor_indices]
     if include_self:
         names.append(node_name)
+    if dataset_name is not None:
+        names = [display_node_name(hierarchy, dataset_name, name) for name in names]
     return names
 
 

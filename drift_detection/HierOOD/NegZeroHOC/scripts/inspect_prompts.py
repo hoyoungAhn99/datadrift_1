@@ -52,7 +52,7 @@ def main():
         if node not in hierarchy.id_node_list:
             print(f"[skip] {node}: not in retained ID hierarchy")
             continue
-        path = node_path_names(hierarchy, node, include_self=True)
+        path = node_path_names(hierarchy, node, include_self=True, dataset_name=args.dataset)
         role = infer_node_role(args.dataset, node)
         canonical = canonicalize_node_name(args.dataset, node, path, role)
         parent = None
@@ -73,7 +73,7 @@ def main():
         if parent not in hierarchy.parent2children:
             print(f"[skip] {parent}: not an internal parent")
             continue
-        path = node_path_names(hierarchy, parent, include_self=True)
+        path = node_path_names(hierarchy, parent, include_self=True, dataset_name=args.dataset)
         canonical = canonicalize_node_name(args.dataset, parent, path, infer_node_role(args.dataset, parent))
         print(f"\nparent: {parent}")
         print(f"path: {' > '.join(path)}")
