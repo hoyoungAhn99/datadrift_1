@@ -1,0 +1,59 @@
+experiment:
+  name: imagenet-extract-clip-features
+  seed: 42
+
+dataset:
+  name: imagenet
+  datadir: D:/HY_Data/HierOOD/imagenet
+  hierarchy: ./hierarchies/simple-hier-imagenet.json
+  id_split: ./data/simple-tiered-imagenet-id-labels.csv
+  transform_preset: clip
+  mean: null
+  std: null
+  resize: null
+  cropsize: null
+  image_fallback_dir: null
+
+dataloader:
+  batch_size: 128
+  eval_batch_size: 128
+  num_workers: 8
+  shuffle_train: false
+  pin_memory: false
+  drop_last: false
+
+model:
+  backend: transformers
+  name: openai/clip-vit-base-patch32
+  device: cuda
+
+features:
+  mode: extract
+  dir: features/imagenet/clip-vit-base-patch32
+  train: features_train.pt
+  id_val: features_val.pt
+  ood_val: features_ood.pt
+  config: feature_config.yaml
+  require_model_match: true
+
+feature_extraction:
+  save_train: true
+  save_val: true
+  save_ood: true
+
+prompts:
+  node_text_overrides:
+    root: object
+  child_template: "a photo of {child}, a kind of {parent}"
+  unknown_templates:
+    - "a photo of a different {parent} outside the known categories"
+
+inference:
+  include_unknown: true
+  temperature: 1.0
+  prediction_mode: argmax
+  trace: false
+
+output:
+  dir: outputs/imagenet-manual-unknown-clip
+

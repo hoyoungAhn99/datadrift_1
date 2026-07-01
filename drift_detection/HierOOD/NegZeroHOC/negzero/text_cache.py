@@ -25,6 +25,7 @@ def _mean_normalized(embeddings: torch.Tensor) -> torch.Tensor:
 def build_text_cache(hierarchy, backend, prompt_cfg: dict, include_unknown: bool = True):
     child_template = prompt_cfg["child_template"]
     unknown_templates = prompt_cfg.get("unknown_templates", [])
+    text_overrides = prompt_cfg.get("node_text_overrides", {})
     if include_unknown and not unknown_templates:
         raise ValueError("prompts.unknown_templates must be non-empty when include_unknown is true")
 
@@ -33,7 +34,13 @@ def build_text_cache(hierarchy, backend, prompt_cfg: dict, include_unknown: bool
         if not children:
             continue
         child_prompts = [
-            format_child_prompt(child, parent, hierarchy, child_template)
+            format_child_prompt(
+                child,
+                parent,
+                hierarchy,
+                child_template,
+                overrides=text_overrides,
+            )
             for child in children
         ]
         child_embeddings = backend.encode_text(child_prompts)
@@ -42,7 +49,12 @@ def build_text_cache(hierarchy, backend, prompt_cfg: dict, include_unknown: bool
         unknown_position = -1
 
         if include_unknown:
-            unknown_prompts = format_unknown_prompts(parent, hierarchy, unknown_templates)
+            unknown_prompts = format_unknown_prompts(
+                parent,
+                hierarchy,
+                unknown_templates,
+                overrides=text_overrides,
+            )
             unknown_embeddings = backend.encode_text(unknown_prompts)
             unknown_embedding = _mean_normalized(unknown_embeddings).unsqueeze(0)
             unknown_position = len(children)
@@ -59,4 +71,3 @@ def build_text_cache(hierarchy, backend, prompt_cfg: dict, include_unknown: bool
             prompts=prompts,
         )
     return cache
-

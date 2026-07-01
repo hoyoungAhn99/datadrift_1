@@ -73,11 +73,16 @@ def main():
     data = build_data_bundle(config)
     backend = CLIPBackend.from_config(config["model"])
 
-    split_specs = [
-        ("train", data.train_loader, data.train_dataset, paths["train"]),
-        ("val", data.val_loader, data.val_dataset, paths["id"]),
-        ("ood", data.ood_loader, data.ood_dataset, paths["ood"]),
-    ]
+    extraction_cfg = config.get("feature_extraction", {})
+    split_specs = []
+    if extraction_cfg.get("save_train", True):
+        split_specs.append(("train", data.train_loader, data.train_dataset, paths["train"]))
+    if extraction_cfg.get("save_val", True):
+        split_specs.append(("val", data.val_loader, data.val_dataset, paths["id"]))
+    if extraction_cfg.get("save_ood", True):
+        split_specs.append(("ood", data.ood_loader, data.ood_dataset, paths["ood"]))
+    if not split_specs:
+        raise ValueError("No feature splits selected. Enable at least one save_* flag.")
     for split, loader, dataset, output_path in split_specs:
         features, targets = collect_features(backend, loader, desc=f"Extract {split}")
         save_feature_artifact(
@@ -89,4 +94,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -6,7 +6,9 @@ import re
 _PREFIX_RE = re.compile(r"^[a-z]-")
 
 
-def clean_node_text(name: str, hierarchy=None) -> str:
+def clean_node_text(name: str, hierarchy=None, overrides: dict[str, str] | None = None) -> str:
+    if overrides and name in overrides:
+        return overrides[name]
     raw = name
     if hierarchy is not None:
         raw = hierarchy.node_description.get(name, name)
@@ -19,21 +21,31 @@ def clean_node_text(name: str, hierarchy=None) -> str:
     return raw
 
 
-def format_child_prompt(child: str, parent: str, hierarchy, template: str) -> str:
+def format_child_prompt(
+    child: str,
+    parent: str,
+    hierarchy,
+    template: str,
+    overrides: dict[str, str] | None = None,
+) -> str:
     return template.format(
-        child=clean_node_text(child, hierarchy),
-        parent=clean_node_text(parent, hierarchy),
+        child=clean_node_text(child, hierarchy, overrides),
+        parent=clean_node_text(parent, hierarchy, overrides),
         child_name=child,
         parent_name=parent,
     )
 
 
-def format_unknown_prompts(parent: str, hierarchy, templates: list[str]) -> list[str]:
+def format_unknown_prompts(
+    parent: str,
+    hierarchy,
+    templates: list[str],
+    overrides: dict[str, str] | None = None,
+) -> list[str]:
     return [
         template.format(
-            parent=clean_node_text(parent, hierarchy),
+            parent=clean_node_text(parent, hierarchy, overrides),
             parent_name=parent,
         )
         for template in templates
     ]
-
