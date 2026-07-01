@@ -17,5 +17,6 @@ clip:
 inference:
   mode: child_only
   features_dir: outputs/features/inat19/clip_openai_clip-vit-base-patch32
+  batch_size: 1024
   tau: 1.0
   save_trace: false

@@ -16,6 +16,7 @@ from negzerohoc.prompts import (
     build_positive_prompts,
     build_unknown_prompts,
     canonicalize_node_name,
+    display_node_name,
     infer_node_role,
     node_path_names,
 )
@@ -43,6 +44,13 @@ def parse_args():
     return load_config(config_arg.config)
 
 
+def format_node_for_display(hierarchy, dataset_name: str, node_name: str) -> str:
+    display = display_node_name(hierarchy, dataset_name, node_name)
+    if display == node_name:
+        return node_name
+    return f"{display} ({node_name})"
+
+
 def main():
     args = parse_args()
     hierarchy, _ = build_hierarchy(REPO_ROOT, args.id_split, args.hierarchy)
@@ -58,7 +66,8 @@ def main():
         parent = None
         if node in hierarchy.child2parent:
             parent = hierarchy.child2parent[node]
-        print(f"\nnode: {node}")
+        print(f"\nnode_id: {node}")
+        print(f"display: {display_node_name(hierarchy, args.dataset, node)}")
         print(f"role: {role}")
         print(f"path: {' > '.join(path)}")
         print(f"canonical: {canonical}")
@@ -75,10 +84,15 @@ def main():
             continue
         path = node_path_names(hierarchy, parent, include_self=True, dataset_name=args.dataset)
         canonical = canonicalize_node_name(args.dataset, parent, path, infer_node_role(args.dataset, parent))
-        print(f"\nparent: {parent}")
+        children = [
+            format_node_for_display(hierarchy, args.dataset, child)
+            for child in hierarchy.parent2children[parent]
+        ]
+        print(f"\nparent_id: {parent}")
+        print(f"display: {display_node_name(hierarchy, args.dataset, parent)}")
         print(f"path: {' > '.join(path)}")
         print(f"canonical: {canonical}")
-        print(f"children: {', '.join(hierarchy.parent2children[parent])}")
+        print(f"children: {', '.join(children)}")
         for prompt in build_unknown_prompts(args.dataset, parent, path):
             print(f"- {prompt}")
 

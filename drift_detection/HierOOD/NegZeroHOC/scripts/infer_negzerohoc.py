@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import argparse
 from argparse import Namespace
+from collections import Counter
 import sys
 from pathlib import Path
 
 import torch
 import yaml
+
+try:
+    from tqdm.auto import tqdm
+except ImportError:  # pragma: no cover - tqdm is optional at runtime.
+    tqdm = None
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -42,6 +48,9 @@ def load_config(path):
     features_dir = inference_cfg.get("features_dir")
     if not features_dir:
         raise ValueError(f"Missing required config key: inference.features_dir in {path}")
+    batch_size = int(inference_cfg.get("batch_size", 1024))
+    if batch_size <= 0:
+        raise ValueError(f"inference.batch_size must be a positive integer in {path}")
 
     return Namespace(
         config=str(path),
@@ -55,6 +64,7 @@ def load_config(path):
         outdir=experiment_cfg.get("output_root", "outputs"),
         device=runtime_cfg.get("device", "cuda"),
         tau=inference_cfg.get("tau", 1.0),
+        batch_size=batch_size,
         local_files_only=clip_cfg.get("local_files_only", True),
         save_trace=inference_cfg.get("save_trace", False),
     )
@@ -65,6 +75,65 @@ def parse_args():
     parser.add_argument("--config", required=True, help="Path to a YAML config file.")
     config_arg = parser.parse_args()
     return load_config(config_arg.config)
+
+
+@torch.no_grad()
+def predict_payload_in_batches(
+    payload,
+    hierarchy,
+    semantic_index,
+    mode: str,
+    tau: float,
+    batch_size: int,
+    device: str,
+    split_name: str,
+    return_trace: bool,
+):
+    features = payload["features"]
+    num_features = int(features.shape[0])
+    preds = []
+    traces = [] if return_trace else None
+    stop_depth_counts = Counter()
+    stop_node_counts = Counter()
+
+    starts = range(0, num_features, batch_size)
+    if tqdm is not None:
+        total = (num_features + batch_size - 1) // batch_size
+        starts = tqdm(starts, total=total, desc=f"infer {split_name}", leave=False)
+
+    for start in starts:
+        end = min(start + batch_size, num_features)
+        batch_features = features[start:end].to(device, non_blocking=True)
+        pred_out = predict_features(
+            batch_features,
+            hierarchy,
+            semantic_index,
+            mode=mode,
+            tau=tau,
+            return_trace=return_trace,
+        )
+        preds.append(pred_out["preds"].cpu())
+
+        diagnostics = pred_out["diagnostics"]
+        stop_depth_counts.update({
+            int(depth): int(count)
+            for depth, count in diagnostics["stop_depth_counts"].items()
+        })
+        stop_node_counts.update({
+            str(node): int(count)
+            for node, count in diagnostics["stop_node_counts"].items()
+        })
+        if return_trace:
+            traces.extend(pred_out["traces"])
+
+    return {
+        "preds": torch.cat(preds) if preds else torch.empty(0, dtype=torch.long),
+        "traces": traces,
+        "diagnostics": {
+            "stop_depth_counts": dict(sorted(stop_depth_counts.items())),
+            "stop_node_counts": dict(stop_node_counts.most_common()),
+        },
+    }
 
 
 def main():
@@ -90,12 +159,15 @@ def main():
     }
 
     for split_name, payload in [("val", val_payload), ("ood", ood_payload)]:
-        pred_out = predict_features(
-            payload["features"].to(device),
+        pred_out = predict_payload_in_batches(
+            payload,
             hierarchy,
             semantic_index,
             mode=args.mode,
             tau=args.tau,
+            batch_size=args.batch_size,
+            device=device,
+            split_name=split_name,
             return_trace=args.save_trace,
         )
         preds = pred_out["preds"].cpu()
