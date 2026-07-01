@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import argparse
+from argparse import Namespace
 import sys
 from pathlib import Path
+
+import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from negzerohoc.config import namespace_from_config
 from negzerohoc.evaluation import build_hierarchy
 from negzerohoc.prompts import (
     build_positive_prompts,
@@ -19,20 +21,26 @@ from negzerohoc.prompts import (
 )
 
 
+def load_config(path):
+    with Path(path).open("r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    dataset_cfg = cfg.get("dataset", {})
+    inspect_cfg = cfg.get("prompt_inspection", {})
+    return Namespace(
+        config=str(path),
+        dataset=dataset_cfg.get("name", "fgvc-aircraft"),
+        hierarchy=dataset_cfg.get("hierarchy", "hierarchies/fgvc-aircraft.json"),
+        id_split=dataset_cfg.get("id_split", "data/fgvc-aircraft-id-labels.csv"),
+        nodes=inspect_cfg.get("nodes", ["m-Boeing", "f-Boeing_737", "v-737-300"]),
+        parents=inspect_cfg.get("parents", ["root", "m-Boeing", "f-Boeing_737"]),
+    )
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True, help="Path to a YAML config file.")
     config_arg = parser.parse_args()
-    return namespace_from_config(
-        config_arg.config,
-        defaults={
-            "dataset": "fgvc-aircraft",
-            "hierarchy": "hierarchies/fgvc-aircraft.json",
-            "id_split": "data/fgvc-aircraft-id-labels.csv",
-            "nodes": ["m-Boeing", "f-Boeing_737", "v-737-300"],
-            "parents": ["root", "m-Boeing", "f-Boeing_737"],
-        },
-    )
+    return load_config(config_arg.config)
 
 
 def main():

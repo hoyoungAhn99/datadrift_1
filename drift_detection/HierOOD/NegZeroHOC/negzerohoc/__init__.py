@@ -2,7 +2,6 @@
 
 __all__ = [
     "clip_backend",
-    "config",
     "evaluation",
     "feature_io",
     "inference",

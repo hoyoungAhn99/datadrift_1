@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+from argparse import Namespace
 import sys
 from pathlib import Path
 
 import torch
+import yaml
 from torch.utils.data import DataLoader, Dataset
 
 
@@ -12,9 +14,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from negzerohoc.clip_backend import ClipBackend, safe_model_name
-from negzerohoc.config import namespace_from_config
 from negzerohoc.evaluation import build_hierarchy
 from negzerohoc.feature_io import ensure_dir, save_feature_file, save_json
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
 
 
 class DatasetWithPaths(Dataset):
@@ -39,27 +45,42 @@ def collate_pil(batch):
     return list(images), torch.tensor(targets, dtype=torch.long), list(paths)
 
 
+def load_config(path):
+    with Path(path).open("r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    dataset_cfg = cfg.get("dataset", {})
+    runtime_cfg = cfg.get("runtime", {})
+    clip_cfg = cfg.get("clip", {})
+    dataloader_cfg = cfg.get("dataloader", {})
+    feature_cfg = cfg.get("feature_extraction", {})
+    experiment_cfg = cfg.get("experiment", {})
+
+    datadir = dataset_cfg.get("datadir")
+    if not datadir:
+        raise ValueError(f"Missing required config key: dataset.datadir in {path}")
+
+    return Namespace(
+        config=str(path),
+        experiment_name=experiment_cfg.get("name", "fgvc-aircraft-clip-features"),
+        dataset=dataset_cfg.get("name", "fgvc-aircraft"),
+        datadir=datadir,
+        hierarchy=dataset_cfg.get("hierarchy", "hierarchies/fgvc-aircraft.json"),
+        id_split=dataset_cfg.get("id_split", "data/fgvc-aircraft-id-labels.csv"),
+        clip_model=clip_cfg.get("model", "openai/clip-vit-base-patch32"),
+        outdir=experiment_cfg.get("output_root", "outputs"),
+        batch_size=dataloader_cfg.get("batch_size", 128),
+        num_workers=dataloader_cfg.get("num_workers", 4),
+        device=runtime_cfg.get("device", "cuda"),
+        local_files_only=clip_cfg.get("local_files_only", True),
+        skip_train=feature_cfg.get("skip_train", True),
+    )
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True, help="Path to a YAML config file.")
     config_arg = parser.parse_args()
-    return namespace_from_config(
-        config_arg.config,
-        defaults={
-            "dataset": "fgvc-aircraft",
-            "datadir": None,
-            "hierarchy": "hierarchies/fgvc-aircraft.json",
-            "id_split": "data/fgvc-aircraft-id-labels.csv",
-            "clip_model": "openai/clip-vit-base-patch32",
-            "outdir": "outputs",
-            "batch_size": 128,
-            "num_workers": 4,
-            "device": "cuda",
-            "local_files_only": True,
-            "skip_train": True,
-        },
-        required=("datadir",),
-    )
+    return load_config(config_arg.config)
 
 
 @torch.no_grad()
@@ -67,7 +88,11 @@ def encode_split(backend, split_name, dataset, loader, clip_model):
     feats = []
     targets = []
     paths = []
-    for images, batch_targets, batch_paths in loader:
+    iterator = loader
+    if tqdm is not None:
+        iterator = tqdm(loader, desc=f"Encoding {split_name}", unit="batch")
+
+    for images, batch_targets, batch_paths in iterator:
         batch_feats = backend.encode_images(images).cpu()
         feats.append(batch_feats)
         targets.append(batch_targets.cpu())
