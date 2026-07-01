@@ -1,5 +1,5 @@
 dataset: fgvc-aircraft
-datadir: C:/path/to/prohoc-data/fgvc-aircraft
+datadir: D:/HY_Data/HierOOD/fgvc-aircraft
 hierarchy: hierarchies/fgvc-aircraft.json
 id_split: data/fgvc-aircraft-id-labels.csv
 clip_model: openai/clip-vit-base-patch32
