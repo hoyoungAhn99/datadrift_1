@@ -7,12 +7,30 @@ runtime:
 
 dataset:
   name: fgvc-aircraft
+  datadir: D:/HY_Data/HierOOD/fgvc-aircraft
   hierarchy: hierarchies/fgvc-aircraft.json
   id_split: data/fgvc-aircraft-id-labels.csv
 
 clip:
   model: openai/clip-vit-base-patch32
   local_files_only: true
+
+dataloader:
+  batch_size: 128
+  num_workers: 4
+
+prompt_inspection:
+  nodes:
+    - m-Boeing
+    - f-Boeing_737
+    - v-737-300
+  parents:
+    - root
+    - m-Boeing
+    - f-Boeing_737
+
+feature_extraction:
+  skip_train: true
 
 inference:
   mode: manual_unknown
