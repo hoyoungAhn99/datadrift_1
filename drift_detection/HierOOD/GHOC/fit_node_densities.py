@@ -6,6 +6,7 @@ from pathlib import Path
 from core.config import load_merged_config, save_config
 from core.density import (
     fit_depth_masked_node_distributions,
+    fit_depth_fisher_precision_node_distributions,
     fit_depth_reweighted_node_distributions,
     fit_node_distributions,
 )
@@ -42,6 +43,18 @@ def main():
             train_artifact["class_names"],
             mask_dim=int(density_cfg.get("feature_mask_dim", 64)),
             covariance_type=density_cfg.get("covariance_type", "diag"),
+            eps=density_cfg["eps"],
+            covariance_shrinkage=density_cfg.get("covariance_shrinkage", 0.0),
+        )
+    elif str(density_cfg.get("covariance_type", "")).lower() == "fisher_precision_shared_full":
+        density = fit_depth_fisher_precision_node_distributions(
+            train_features,
+            train_artifact["targets"].long(),
+            hierarchy,
+            train_artifact["class_names"],
+            precision_strength=float(density_cfg.get("fisher_precision_strength", 0.25)),
+            min_weight=float(density_cfg.get("fisher_precision_min", 0.5)),
+            max_weight=float(density_cfg.get("fisher_precision_max", 2.0)),
             eps=density_cfg["eps"],
             covariance_shrinkage=density_cfg.get("covariance_shrinkage", 0.0),
         )

@@ -393,6 +393,128 @@ def fit_depth_reweighted_node_distributions(
     }
 
 
+def fit_depth_fisher_precision_node_distributions(
+    features: torch.Tensor,
+    leaf_targets: torch.Tensor,
+    hierarchy,
+    leaf_class_names: list[str],
+    precision_strength: float = 0.25,
+    min_weight: float = 0.5,
+    max_weight: float = 2.0,
+    eps: float = 1e-6,
+    covariance_shrinkage: float = 0.0,
+):
+    precision_strength = float(precision_strength)
+    min_weight = float(min_weight)
+    max_weight = float(max_weight)
+    if precision_strength < 0.0:
+        raise ValueError("fisher_precision_strength must be nonnegative")
+    if min_weight <= 0.0 or max_weight < min_weight:
+        raise ValueError("fisher precision clipping bounds are invalid")
+    covariance_shrinkage = float(covariance_shrinkage)
+    if covariance_shrinkage < 0.0 or covariance_shrinkage > 1.0:
+        raise ValueError("covariance_shrinkage must satisfy 0 <= value <= 1")
+
+    mask = build_leaf_to_ancestor_mask(hierarchy, leaf_class_names)
+    n_nodes = mask.shape[1]
+    feat_dim = features.shape[1]
+    means = torch.zeros((n_nodes, feat_dim), dtype=features.dtype)
+    mean_directions = torch.zeros((n_nodes, feat_dim), dtype=features.dtype)
+    variances = torch.zeros((n_nodes, feat_dim), dtype=features.dtype)
+    counts = torch.zeros((n_nodes,), dtype=torch.long)
+    node_features_by_idx: list[torch.Tensor] = []
+    depth_to_nodes: dict[int, list[int]] = {}
+    for node_idx, node_name in enumerate(hierarchy.id_node_list):
+        depth = len(hierarchy.node_ancestors[node_name])
+        depth_to_nodes.setdefault(depth, []).append(node_idx)
+
+    for node_idx in range(n_nodes):
+        member_leaf_mask = mask[:, node_idx]
+        member_leaf_indices = torch.nonzero(member_leaf_mask, as_tuple=False).squeeze(1)
+        sample_mask = torch.isin(leaf_targets, member_leaf_indices)
+        node_features = features[sample_mask]
+        node_features_by_idx.append(node_features)
+        counts[node_idx] = node_features.shape[0]
+        if node_features.shape[0] == 0:
+            variances[node_idx] = torch.full((feat_dim,), eps, dtype=features.dtype)
+            continue
+        means[node_idx] = node_features.mean(dim=0)
+        mean_directions[node_idx] = torch.nn.functional.normalize(
+            means[node_idx].unsqueeze(0),
+            dim=-1,
+            eps=eps,
+        ).squeeze(0)
+        variances[node_idx] = _fit_diag_variance(node_features, eps)
+
+    base_shared = _fit_depth_shared_full_covariance(
+        node_features_by_idx,
+        means,
+        hierarchy,
+        feat_dim,
+        features.dtype,
+        features.device,
+        eps,
+        covariance_shrinkage,
+    )
+    regularized_shared = torch.empty_like(base_shared)
+    fisher_precision_weights: dict[int, torch.Tensor] = {}
+    eye = torch.eye(feat_dim, dtype=features.dtype, device=features.device)
+
+    for depth, node_indices in depth_to_nodes.items():
+        valid = [idx for idx in node_indices if node_features_by_idx[idx].shape[0] > 0]
+        if len(valid) < 2:
+            fisher_weights = torch.ones((feat_dim,), dtype=features.dtype, device=features.device)
+        else:
+            node_means = torch.stack(
+                [node_features_by_idx[idx].mean(dim=0) for idx in valid],
+                dim=0,
+            )
+            between = node_means.var(dim=0, unbiased=False)
+            within = torch.stack(
+                [node_features_by_idx[idx].var(dim=0, unbiased=False) for idx in valid],
+                dim=0,
+            ).mean(dim=0)
+            fisher = between / (within + eps)
+            normalized = (fisher + eps) / (fisher.mean() + eps)
+            fisher_weights = normalized.clamp(min=min_weight, max=max_weight)
+            fisher_weights = fisher_weights / fisher_weights.mean().clamp_min(eps)
+        fisher_precision_weights[int(depth)] = fisher_weights
+
+        cov = base_shared[node_indices[0]]
+        precision = torch.linalg.inv(cov)
+        precision_scale = torch.diag(precision).mean().clamp_min(eps)
+        regularized_precision = (
+            precision
+            + precision_strength
+            * precision_scale
+            * torch.diag(fisher_weights)
+        )
+        regularized_cov = torch.linalg.inv(regularized_precision)
+        regularized_cov = 0.5 * (regularized_cov + regularized_cov.transpose(0, 1))
+        regularized_cov = regularized_cov + eye * eps
+        for node_idx in node_indices:
+            regularized_shared[node_idx] = regularized_cov
+
+    return {
+        "node_names": hierarchy.id_node_list,
+        "node_to_index": {name: idx for idx, name in enumerate(hierarchy.id_node_list)},
+        "feature_dim": feat_dim,
+        "covariance_type": "shared_full",
+        "covariance_shrinkage": covariance_shrinkage,
+        "fisher_precision_strength": precision_strength,
+        "fisher_precision_min": min_weight,
+        "fisher_precision_max": max_weight,
+        "fisher_precision_weights": fisher_precision_weights,
+        "means": means,
+        "mean_directions": mean_directions,
+        "variances": variances,
+        "covariance_matrices": None,
+        "shared_covariance": regularized_shared,
+        "counts": counts,
+        "leaf_to_ancestor_mask": mask,
+    }
+
+
 def masked_gaussian_logpdf(
     features: torch.Tensor,
     density_payload: dict[str, Any],
