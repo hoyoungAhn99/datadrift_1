@@ -10,21 +10,11 @@ from torch.utils.data import DataLoader
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
-sys.path.insert(0, str(REPO_ROOT / "ProHOC"))
-
-from libs.utils.dataset_util import SubsetImageFolder, get_id_classes
 
 from negzerohoc.clip_backend import ClipBackend, safe_model_name
 from negzerohoc.config import namespace_from_config
 from negzerohoc.evaluation import build_hierarchy
 from negzerohoc.feature_io import ensure_dir, save_feature_file, save_json
-
-
-class ImageFolderWithPaths(SubsetImageFolder):
-    def __getitem__(self, index):
-        image, target = super().__getitem__(index)
-        path, _ = self.samples[index]
-        return image, target, path
 
 
 def collate_pil(batch):
@@ -89,6 +79,14 @@ def make_loader(dataset, args):
 
 def main():
     args = parse_args()
+    from negzerohoc.prohoc_compat.utils.dataset_util import SubsetImageFolder, get_id_classes
+
+    class ImageFolderWithPaths(SubsetImageFolder):
+        def __getitem__(self, index):
+            image, target = super().__getitem__(index)
+            path, _ = self.samples[index]
+            return image, target, path
+
     hierarchy, _ = build_hierarchy(REPO_ROOT, args.id_split, args.hierarchy)
     id_classes = get_id_classes(args.id_split)
     ood_classes = hierarchy.ood_train_classes

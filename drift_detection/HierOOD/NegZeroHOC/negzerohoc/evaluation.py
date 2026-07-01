@@ -1,21 +1,14 @@
-from __future__ import annotations
-
-import sys
-from pathlib import Path
-
 import torch
 
 
-def add_prohoc_to_path(repo_root: str | Path) -> None:
-    prohoc_path = str(Path(repo_root) / "ProHOC")
-    if prohoc_path not in sys.path:
-        sys.path.insert(0, prohoc_path)
+def get_id_classes(id_classes_fn):
+    with open(id_classes_fn, "r", encoding="utf-8") as f:
+        lines = [line.strip() for line in f]
+    return sorted(lines)
 
 
 def build_hierarchy(repo_root, id_split, hierarchy_path):
-    add_prohoc_to_path(repo_root)
-    from libs.hierarchy import Hierarchy
-    from libs.utils.dataset_util import get_id_classes
+    from negzerohoc.prohoc_compat.hierarchy import Hierarchy
 
     id_classes = get_id_classes(str(id_split))
     return Hierarchy(id_classes, str(hierarchy_path)), id_classes
@@ -27,8 +20,8 @@ def node_labels_from_feature_targets(hierarchy, classes: list[str], targets: tor
 
 
 def get_results(preds, node_labels, hierarchy, dists_mats=None):
-    from libs import hierarchy_metrics as hm
-    from libs.utils.hierarchy_utils import get_avg_hdist
+    from negzerohoc.prohoc_compat import hierarchy_metrics as hm
+    from negzerohoc.prohoc_compat.utils.hierarchy_utils import get_avg_hdist
 
     hmet = hm.HierarchicalPredAccuracy(hierarchy, track_hdist=True)
     hmet.update_state(preds.long(), node_labels.long(), dists_mats=dists_mats)
@@ -44,7 +37,7 @@ def get_results(preds, node_labels, hierarchy, dists_mats=None):
 
 
 def make_distance_mats(hierarchy, device="cpu"):
-    from libs.utils.hierarchy_utils import get_hdist_matrix
+    from negzerohoc.prohoc_compat.utils.hierarchy_utils import get_hdist_matrix
 
     gt_dists_mat, pred_dists_mat = get_hdist_matrix(
         hierarchy,

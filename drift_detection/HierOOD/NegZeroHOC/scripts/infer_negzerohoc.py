@@ -9,7 +9,6 @@ import torch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
-sys.path.insert(0, str(REPO_ROOT / "ProHOC"))
 
 from negzerohoc.clip_backend import ClipBackend, safe_model_name
 from negzerohoc.config import namespace_from_config
