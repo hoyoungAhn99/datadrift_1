@@ -1,0 +1,11 @@
+dataset: fgvc-aircraft
+hierarchy: hierarchies/fgvc-aircraft.json
+id_split: data/fgvc-aircraft-id-labels.csv
+features_dir: outputs/features/fgvc-aircraft/clip_openai_clip-vit-base-patch32
+clip_model: openai/clip-vit-base-patch32
+mode: child_only
+outdir: outputs
+device: cuda
+tau: 1.0
+local_files_only: true
+save_trace: false

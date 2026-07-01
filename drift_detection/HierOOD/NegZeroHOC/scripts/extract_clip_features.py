@@ -15,6 +15,7 @@ sys.path.insert(0, str(REPO_ROOT / "ProHOC"))
 from libs.utils.dataset_util import SubsetImageFolder, get_id_classes
 
 from negzerohoc.clip_backend import ClipBackend, safe_model_name
+from negzerohoc.config import namespace_from_config
 from negzerohoc.evaluation import build_hierarchy
 from negzerohoc.feature_io import ensure_dir, save_feature_file, save_json
 
@@ -33,18 +34,25 @@ def collate_pil(batch):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", default="fgvc-aircraft")
-    parser.add_argument("--datadir", required=True)
-    parser.add_argument("--hierarchy", default="hierarchies/fgvc-aircraft.json")
-    parser.add_argument("--id_split", default="data/fgvc-aircraft-id-labels.csv")
-    parser.add_argument("--clip_model", default="openai/clip-vit-base-patch32")
-    parser.add_argument("--outdir", default="outputs")
-    parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--num_workers", type=int, default=4)
-    parser.add_argument("--device", default="cuda")
-    parser.add_argument("--local_files_only", action="store_true")
-    parser.add_argument("--skip_train", action="store_true")
-    return parser.parse_args()
+    parser.add_argument("--config", required=True, help="Path to a YAML config file.")
+    config_arg = parser.parse_args()
+    return namespace_from_config(
+        config_arg.config,
+        defaults={
+            "dataset": "fgvc-aircraft",
+            "datadir": None,
+            "hierarchy": "hierarchies/fgvc-aircraft.json",
+            "id_split": "data/fgvc-aircraft-id-labels.csv",
+            "clip_model": "openai/clip-vit-base-patch32",
+            "outdir": "outputs",
+            "batch_size": 128,
+            "num_workers": 4,
+            "device": "cuda",
+            "local_files_only": True,
+            "skip_train": True,
+        },
+        required=("datadir",),
+    )
 
 
 @torch.no_grad()
@@ -120,6 +128,7 @@ def main():
             "hierarchy": str(args.hierarchy),
             "id_split": str(args.id_split),
             "datadir": str(args.datadir),
+            "config": str(args.config),
             "num_id_classes": len(id_classes),
             "num_ood_classes": len(ood_classes),
         },

@@ -1,0 +1,11 @@
+dataset: fgvc-aircraft
+hierarchy: hierarchies/fgvc-aircraft.json
+id_split: data/fgvc-aircraft-id-labels.csv
+nodes:
+  - m-Boeing
+  - f-Boeing_737
+  - v-737-300
+parents:
+  - root
+  - m-Boeing
+  - f-Boeing_737

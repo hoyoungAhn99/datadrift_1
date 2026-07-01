@@ -12,6 +12,7 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "ProHOC"))
 
 from negzerohoc.clip_backend import ClipBackend, safe_model_name
+from negzerohoc.config import namespace_from_config
 from negzerohoc.evaluation import (
     build_hierarchy,
     evaluate_split,
@@ -25,18 +26,26 @@ from negzerohoc.semantic_index import build_semantic_index
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", default="fgvc-aircraft")
-    parser.add_argument("--hierarchy", default="hierarchies/fgvc-aircraft.json")
-    parser.add_argument("--id_split", default="data/fgvc-aircraft-id-labels.csv")
-    parser.add_argument("--features_dir", required=True)
-    parser.add_argument("--clip_model", default="openai/clip-vit-base-patch32")
-    parser.add_argument("--mode", choices=["child_only", "manual_unknown"], required=True)
-    parser.add_argument("--outdir", default="outputs")
-    parser.add_argument("--device", default="cuda")
-    parser.add_argument("--tau", type=float, default=1.0)
-    parser.add_argument("--local_files_only", action="store_true")
-    parser.add_argument("--save_trace", action="store_true")
-    return parser.parse_args()
+    parser.add_argument("--config", required=True, help="Path to a YAML config file.")
+    config_arg = parser.parse_args()
+    return namespace_from_config(
+        config_arg.config,
+        defaults={
+            "dataset": "fgvc-aircraft",
+            "hierarchy": "hierarchies/fgvc-aircraft.json",
+            "id_split": "data/fgvc-aircraft-id-labels.csv",
+            "features_dir": None,
+            "clip_model": "openai/clip-vit-base-patch32",
+            "mode": None,
+            "outdir": "outputs",
+            "device": "cuda",
+            "tau": 1.0,
+            "local_files_only": True,
+            "save_trace": False,
+        },
+        required=("features_dir", "mode"),
+        choices={"mode": {"child_only", "manual_unknown"}},
+    )
 
 
 def main():
