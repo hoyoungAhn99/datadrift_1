@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +15,23 @@ from negzerohoc.clip_backend import ClipBackend, safe_model_name
 from negzerohoc.config import namespace_from_config
 from negzerohoc.evaluation import build_hierarchy
 from negzerohoc.feature_io import ensure_dir, save_feature_file, save_json
+
+
+class DatasetWithPaths(Dataset):
+    def __init__(self, dataset):
+        self.dataset = dataset
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, index):
+        image, target = self.dataset[index]
+        path, _ = self.dataset.samples[index]
+        return image, target, path
+
+    @property
+    def classes(self):
+        return self.dataset.classes
 
 
 def collate_pil(batch):
@@ -81,20 +98,14 @@ def main():
     args = parse_args()
     from negzerohoc.prohoc_compat.utils.dataset_util import SubsetImageFolder, get_id_classes
 
-    class ImageFolderWithPaths(SubsetImageFolder):
-        def __getitem__(self, index):
-            image, target = super().__getitem__(index)
-            path, _ = self.samples[index]
-            return image, target, path
-
     hierarchy, _ = build_hierarchy(REPO_ROOT, args.id_split, args.hierarchy)
     id_classes = get_id_classes(args.id_split)
     ood_classes = hierarchy.ood_train_classes
 
     datadir = Path(args.datadir)
-    train_ds = ImageFolderWithPaths(datadir / "train", id_classes, transform=None)
-    val_ds = ImageFolderWithPaths(datadir / "val", id_classes, transform=None)
-    ood_ds = ImageFolderWithPaths(datadir / "val", ood_classes, transform=None)
+    train_ds = DatasetWithPaths(SubsetImageFolder(datadir / "train", id_classes, transform=None))
+    val_ds = DatasetWithPaths(SubsetImageFolder(datadir / "val", id_classes, transform=None))
+    ood_ds = DatasetWithPaths(SubsetImageFolder(datadir / "val", ood_classes, transform=None))
 
     backend = ClipBackend(args.clip_model, device=args.device, local_files_only=args.local_files_only)
 
