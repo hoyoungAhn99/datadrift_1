@@ -22,7 +22,7 @@ def predict_one(
         feats = local.child_features.to(image_feature.device)
         names = list(local.children)
 
-        if mode == "manual_unknown":
+        if mode == "manual_unknown" and local.unknown_feature is not None:
             feats = torch.cat([feats, local.unknown_feature.to(image_feature.device).unsqueeze(0)], dim=0)
             names.append(f"__unknown__:{node}")
 

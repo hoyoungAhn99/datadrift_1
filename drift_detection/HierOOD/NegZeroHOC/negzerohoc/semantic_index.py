@@ -22,7 +22,13 @@ class LocalSemanticCandidates:
     prompts: dict[str, list[str]]
 
 
-def build_semantic_index(dataset_name: str, hierarchy, clip_backend, mode: str) -> dict[str, LocalSemanticCandidates]:
+def build_semantic_index(
+    dataset_name: str,
+    hierarchy,
+    clip_backend,
+    mode: str,
+    allow_root_unknown: bool = False,
+) -> dict[str, LocalSemanticCandidates]:
     if mode not in {"child_only", "manual_unknown"}:
         raise ValueError(f"Unsupported mode for this implementation pass: {mode}")
 
@@ -41,7 +47,7 @@ def build_semantic_index(dataset_name: str, hierarchy, clip_backend, mode: str) 
         unknown_feature = None
         candidate_names = list(children)
 
-        if mode == "manual_unknown":
+        if mode == "manual_unknown" and (parent != "root" or allow_root_unknown):
             parent_path = node_path_names(hierarchy, parent, include_self=True, dataset_name=dataset_name)
             prompts = build_unknown_prompts(dataset_name, parent, parent_path)
             unknown_name = f"__unknown__:{parent}"

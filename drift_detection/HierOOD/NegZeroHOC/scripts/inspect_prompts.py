@@ -27,6 +27,7 @@ def load_config(path):
         cfg = yaml.safe_load(f) or {}
     dataset_cfg = cfg.get("dataset", {})
     inspect_cfg = cfg.get("prompt_inspection", {})
+    inference_cfg = cfg.get("inference", {})
     return Namespace(
         config=str(path),
         dataset=dataset_cfg.get("name", "fgvc-aircraft"),
@@ -34,6 +35,7 @@ def load_config(path):
         id_split=dataset_cfg.get("id_split", "data/fgvc-aircraft-id-labels.csv"),
         nodes=inspect_cfg.get("nodes", ["m-Boeing", "f-Boeing_737", "v-737-300"]),
         parents=inspect_cfg.get("parents", ["root", "m-Boeing", "f-Boeing_737"]),
+        allow_root_unknown=inference_cfg.get("allow_root_unknown", False),
     )
 
 
@@ -81,6 +83,9 @@ def main():
             continue
         if parent not in hierarchy.parent2children:
             print(f"[skip] {parent}: not an internal parent")
+            continue
+        if parent == "root" and not args.allow_root_unknown:
+            print(f"[skip] {parent}: root unknown disabled by inference.allow_root_unknown")
             continue
         path = node_path_names(hierarchy, parent, include_self=True, dataset_name=args.dataset)
         canonical = canonicalize_node_name(args.dataset, parent, path, infer_node_role(args.dataset, parent))

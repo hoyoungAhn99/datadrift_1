@@ -36,5 +36,6 @@ inference:
   mode: manual_unknown
   features_dir: outputs/features/simple-hier-imagenet/clip_openai_clip-vit-base-patch32
   batch_size: 1024
+  allow_root_unknown: false
   tau: 1.0
   save_trace: false

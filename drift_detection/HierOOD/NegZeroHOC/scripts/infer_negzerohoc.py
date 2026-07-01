@@ -65,6 +65,7 @@ def load_config(path):
         device=runtime_cfg.get("device", "cuda"),
         tau=inference_cfg.get("tau", 1.0),
         batch_size=batch_size,
+        allow_root_unknown=inference_cfg.get("allow_root_unknown", False),
         local_files_only=clip_cfg.get("local_files_only", True),
         save_trace=inference_cfg.get("save_trace", False),
     )
@@ -143,7 +144,13 @@ def main():
     dists_mats = make_distance_mats(hierarchy)
 
     backend = ClipBackend(args.clip_model, device=device, local_files_only=args.local_files_only)
-    semantic_index = build_semantic_index(args.dataset, hierarchy, backend, args.mode)
+    semantic_index = build_semantic_index(
+        args.dataset,
+        hierarchy,
+        backend,
+        args.mode,
+        allow_root_unknown=args.allow_root_unknown,
+    )
 
     features_dir = Path(args.features_dir)
     val_payload = load_feature_file(features_dir / "val-features.pt")
