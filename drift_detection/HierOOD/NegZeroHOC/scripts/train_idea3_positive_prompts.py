@@ -23,10 +23,10 @@ from negzerohoc.clip_backend import ClipBackend
 from negzerohoc.evaluation import build_hierarchy, evaluate_split, make_distance_mats, mixed_summary
 from negzerohoc.feature_io import ensure_dir, load_feature_file, save_json
 from negzerohoc.idea3_inference import build_idea3_semantic_index, predict_features_idea3
-from negzerohoc.losses import positive_ce_loss
+from negzerohoc.losses import positive_ce_loss, prompt_metric_loss
 from negzerohoc.prompt_models import HierPromptConfig, PositivePromptLearner
 from negzerohoc.soft_prompting import SoftPromptTextEncoder, soft_prompt_smoke_test
-from negzerohoc.training_data import build_positive_edge_examples, gather_image_features, group_examples_by_parent, sample_examples
+from negzerohoc.training_data import build_positive_edge_examples, gather_image_features, group_examples_by_parent, node_path, sample_examples
 
 
 def load_config(path):
@@ -39,6 +39,7 @@ def load_config(path):
     features_cfg = cfg.get("features", {})
     prompt_cfg = cfg.get("prompt", {})
     train_cfg = cfg.get("positive_training", {})
+    loss_cfg = train_cfg.get("loss", {})
     inference_cfg = cfg.get("inference", {})
 
     experiment_name = experiment_cfg.get("name", "idea3")
@@ -67,6 +68,16 @@ def load_config(path):
         lr=float(train_cfg.get("lr", 1e-3)),
         weight_decay=float(train_cfg.get("weight_decay", 1e-4)),
         tau=float(train_cfg.get("tau", 0.07)),
+        loss_name=loss_cfg.get("name", "ce"),
+        loss_alpha=float(loss_cfg.get("alpha", 2.0)),
+        loss_beta=float(loss_cfg.get("beta", 50.0)),
+        loss_lam=float(loss_cfg.get("lam", 0.5)),
+        loss_mining_margin=float(loss_cfg.get("mining_margin", 0.1)),
+        loss_minimum_mode=loss_cfg.get("minimum_mode", "sample"),
+        loss_dist_scale=float(loss_cfg.get("dist_scale", 2.0)),
+        loss_dist_pow=float(loss_cfg.get("dist_pow", 1.0)),
+        ce_weight=float(loss_cfg.get("ce_weight", 1.0)),
+        metric_weight=float(loss_cfg.get("metric_weight", 1.0)),
         eval_after_training=bool(train_cfg.get("eval_after_training", True)),
         inference_batch_size=int(inference_cfg.get("batch_size", 1024)),
         inference_tau=float(inference_cfg.get("tau", 1.0)),
@@ -74,6 +85,85 @@ def load_config(path):
         result_path=result_path,
         diagnostics_path=diagnostics_path,
     )
+
+
+def _path_label_tensor(hierarchy, nodes: list[str], max_len: int, device: str | torch.device) -> torch.Tensor:
+    node_to_idx = {node: idx for idx, node in enumerate(hierarchy.id_node_list)}
+    rows = []
+    for node in nodes:
+        path = node_path(hierarchy, node)
+        if len(path) < max_len:
+            path = path + [path[-1]] * (max_len - len(path))
+        elif len(path) > max_len:
+            path = path[:max_len]
+        rows.append([node_to_idx[item] for item in path])
+    return torch.tensor(rows, dtype=torch.long, device=device)
+
+
+def compute_positive_loss(
+    args,
+    hierarchy,
+    learner,
+    image_features,
+    child_features,
+    parent_examples,
+    children,
+    targets,
+    device,
+):
+    loss_name = args.loss_name.lower()
+    logits = image_features @ child_features.t() / float(args.tau)
+    local_acc = (logits.argmax(dim=1) == targets.to(logits.device)).float().mean()
+
+    if loss_name == "ce":
+        loss, stats = positive_ce_loss(image_features, child_features, targets, tau=args.tau)
+        stats["metric_loss"] = 0.0
+        return loss, stats
+
+    metric_names = {"ms", "hims_min", "himsmin", "weihims", "hims_min_wei"}
+    combo_names = {"ce_ms", "ce_hims_min", "ce_himsmin", "ce_weihims"}
+    if loss_name not in metric_names and loss_name not in combo_names:
+        raise ValueError(f"Unsupported positive_training.loss.name: {args.loss_name}")
+
+    metric_name = loss_name
+    use_ce = False
+    if loss_name.startswith("ce_"):
+        use_ce = True
+        metric_name = loss_name[3:]
+
+    max_len = hierarchy.max_depth + 1
+    image_nodes = [example.leaf for example in parent_examples]
+    image_path_labels = _path_label_tensor(hierarchy, image_nodes, max_len, device)
+    prompt_path_labels = _path_label_tensor(hierarchy, children, max_len, device)
+    metric_loss, metric_stats = prompt_metric_loss(
+        image_features,
+        child_features,
+        image_path_labels,
+        prompt_path_labels,
+        loss_name=metric_name,
+        alpha=args.loss_alpha,
+        beta=args.loss_beta,
+        lam=args.loss_lam,
+        mining_margin=args.loss_mining_margin,
+        minimum_mode=args.loss_minimum_mode,
+        dist_scale=args.loss_dist_scale,
+        dist_pow=args.loss_dist_pow,
+    )
+
+    if use_ce:
+        ce_loss, _ = positive_ce_loss(image_features, child_features, targets, tau=args.tau)
+        loss = args.ce_weight * ce_loss + args.metric_weight * metric_loss
+        ce_value = float(ce_loss.detach().cpu())
+    else:
+        loss = metric_loss
+        ce_value = 0.0
+
+    return loss, {
+        "acc": float(local_acc.detach().cpu()),
+        "loss": float(loss.detach().cpu()),
+        "ce_loss": ce_value,
+        "metric_loss": metric_stats["metric_loss"],
+    }
 
 
 def parse_args():
@@ -189,7 +279,17 @@ def main():
                 targets = torch.tensor([child_to_idx[ex.child] for ex in parent_examples], dtype=torch.long, device=device)
                 image_features = gather_image_features(train_features, parent_examples, device)
                 child_features = learner.encode_children(parent, children)
-                loss, stats = positive_ce_loss(image_features, child_features, targets, tau=args.tau)
+                loss, stats = compute_positive_loss(
+                    args,
+                    hierarchy,
+                    learner,
+                    image_features,
+                    child_features,
+                    parent_examples,
+                    children,
+                    targets,
+                    device,
+                )
                 losses.append(loss)
                 step_accs.append(stats["acc"])
 

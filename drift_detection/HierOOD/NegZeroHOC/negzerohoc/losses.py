@@ -18,6 +18,214 @@ def positive_ce_loss(
     return loss, {"acc": float(acc.detach().cpu()), "loss": float(loss.detach().cpu())}
 
 
+def ms_loss_level(
+    sim_mat: torch.Tensor,
+    labels: torch.Tensor,
+    neg_weights: torch.Tensor | None = None,
+    alpha: float = 2.0,
+    beta: float = 50.0,
+    lam: float = 0.5,
+    mining_margin: float = 0.1,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    device = sim_mat.device
+    batch_size = sim_mat.size(0)
+    labels = labels.view(-1)
+    loss_list = []
+    set_size_list = []
+
+    for i in range(batch_size):
+        label_i = labels[i]
+        mask_pos = labels == label_i
+        mask_neg = labels != label_i
+        mask_pos[i] = False
+
+        pos_sim = sim_mat[i][mask_pos]
+        neg_sim = sim_mat[i][mask_neg]
+        current_neg_w = None if neg_weights is None else neg_weights[i][mask_neg]
+
+        if pos_sim.numel() == 0 or neg_sim.numel() == 0:
+            loss_list.append(torch.tensor(0.0, device=device))
+            set_size_list.append(torch.tensor(1.0, device=device))
+            continue
+
+        hardest_pos_sim = torch.min(pos_sim)
+        hardest_neg_sim = torch.max(neg_sim)
+
+        neg_keep = (neg_sim + mining_margin) > hardest_pos_sim
+        pos_keep = (pos_sim - mining_margin) < hardest_neg_sim
+        neg_sim = neg_sim[neg_keep]
+        pos_sim = pos_sim[pos_keep]
+        if current_neg_w is not None:
+            current_neg_w = current_neg_w[neg_keep]
+
+        if pos_sim.numel() == 0 or neg_sim.numel() == 0:
+            loss_list.append(torch.tensor(0.0, device=device))
+            set_size_list.append(torch.tensor(1.0, device=device))
+            continue
+
+        pos_term = torch.log(1.0 + torch.sum(torch.exp(-alpha * (pos_sim - lam)))) / alpha
+        if current_neg_w is None:
+            neg_exp = torch.exp(beta * (neg_sim - lam))
+        else:
+            neg_exp = current_neg_w * torch.exp(beta * (neg_sim - lam))
+        neg_term = torch.log(1.0 + torch.sum(neg_exp)) / beta
+
+        loss_list.append(pos_term + neg_term)
+        set_size_list.append(torch.tensor(pos_sim.numel() + neg_sim.numel(), dtype=sim_mat.dtype, device=device))
+
+    return torch.stack(loss_list), torch.stack(set_size_list)
+
+
+def multi_similarity_loss(
+    features: torch.Tensor,
+    path_labels: torch.Tensor,
+    alpha: float = 2.0,
+    beta: float = 50.0,
+    lam: float = 0.5,
+    mining_margin: float = 0.1,
+) -> torch.Tensor:
+    features = F.normalize(features.float(), dim=-1)
+    sim_mat = torch.clamp(features @ features.t(), min=-1.0 + 1e-6, max=1.0 - 1e-6)
+    _, labels = torch.unique(path_labels, dim=0, return_inverse=True)
+    losses, _ = ms_loss_level(
+        sim_mat,
+        labels,
+        alpha=alpha,
+        beta=beta,
+        lam=lam,
+        mining_margin=mining_margin,
+    )
+    return losses.mean()
+
+
+def get_slice_distance_weights(
+    slice_labels: torch.Tensor,
+    scale: float = 2.0,
+    dist_pow: float = 1.0,
+) -> torch.Tensor:
+    matches = (slice_labels.unsqueeze(1) == slice_labels.unsqueeze(0)).float()
+    continuous_matches = torch.cumprod(matches, dim=2)
+    shared_depth = continuous_matches.sum(dim=2)
+    tree_dist = (float(slice_labels.size(1)) - shared_depth).pow(dist_pow)
+    return torch.pow(float(scale), tree_dist - 1.0)
+
+
+def hierarchical_ms_min_loss(
+    features: torch.Tensor,
+    path_labels: torch.Tensor,
+    alpha: float = 2.0,
+    beta: float = 50.0,
+    lam: float = 0.5,
+    mining_margin: float = 0.1,
+    minimum_mode: str = "sample",
+    use_distance_weights: bool = False,
+    dist_scale: float = 2.0,
+    dist_pow: float = 1.0,
+) -> torch.Tensor:
+    if minimum_mode not in {"batch", "sample"}:
+        raise ValueError(f"Unsupported minimum_mode: {minimum_mode}")
+
+    features = F.normalize(features.float(), dim=-1)
+    sim_mat = torch.clamp(features @ features.t(), min=-1.0 + 1e-6, max=1.0 - 1e-6)
+    num_levels = int(path_labels.size(1))
+    device = features.device
+
+    level_losses = []
+    for level in range(num_levels):
+        current_path = path_labels[:, : level + 1]
+        _, labels_level = torch.unique(current_path, dim=0, return_inverse=True)
+        neg_weights = None
+        if use_distance_weights:
+            neg_weights = get_slice_distance_weights(
+                current_path,
+                scale=dist_scale,
+                dist_pow=dist_pow,
+            )
+        losses_l, _ = ms_loss_level(
+            sim_mat,
+            labels_level,
+            neg_weights=neg_weights,
+            alpha=alpha,
+            beta=beta,
+            lam=lam,
+            mining_margin=mining_margin,
+        )
+        level_losses.append(losses_l)
+
+    total_loss = torch.tensor(0.0, dtype=features.dtype, device=device)
+    cur_min = None
+    for rev_level in range(num_levels - 1, -1, -1):
+        base_loss_l = level_losses[rev_level]
+        if cur_min is None:
+            cur_loss = base_loss_l
+        else:
+            cur_loss = torch.min(base_loss_l, cur_min)
+        cur_min = torch.min(cur_loss) if minimum_mode == "batch" else cur_loss
+        k_l = torch.exp(torch.tensor(1.0 / float(rev_level + 1), dtype=features.dtype, device=device))
+        total_loss = total_loss + (k_l * cur_loss.mean()) / float(num_levels)
+    return total_loss
+
+
+def prompt_metric_loss(
+    image_features: torch.Tensor,
+    prompt_features: torch.Tensor,
+    image_path_labels: torch.Tensor,
+    prompt_path_labels: torch.Tensor,
+    loss_name: str,
+    alpha: float = 2.0,
+    beta: float = 50.0,
+    lam: float = 0.5,
+    mining_margin: float = 0.1,
+    minimum_mode: str = "sample",
+    dist_scale: float = 2.0,
+    dist_pow: float = 1.0,
+) -> tuple[torch.Tensor, dict]:
+    features = torch.cat([image_features, prompt_features], dim=0)
+    path_labels = torch.cat([image_path_labels, prompt_path_labels], dim=0).to(features.device)
+    loss_name = loss_name.lower()
+
+    if loss_name == "ms":
+        loss = multi_similarity_loss(
+            features,
+            path_labels,
+            alpha=alpha,
+            beta=beta,
+            lam=lam,
+            mining_margin=mining_margin,
+        )
+    elif loss_name in {"hims_min", "himsmin"}:
+        loss = hierarchical_ms_min_loss(
+            features,
+            path_labels,
+            alpha=alpha,
+            beta=beta,
+            lam=lam,
+            mining_margin=mining_margin,
+            minimum_mode=minimum_mode,
+            use_distance_weights=False,
+        )
+    elif loss_name in {"weihims", "hims_min_wei"}:
+        loss = hierarchical_ms_min_loss(
+            features,
+            path_labels,
+            alpha=alpha,
+            beta=beta,
+            lam=lam,
+            mining_margin=mining_margin,
+            minimum_mode=minimum_mode,
+            use_distance_weights=True,
+            dist_scale=dist_scale,
+            dist_pow=dist_pow,
+        )
+    else:
+        raise ValueError(f"Unsupported prompt metric loss: {loss_name}")
+
+    return loss, {
+        "metric_loss": float(loss.detach().cpu()),
+        "loss": float(loss.detach().cpu()),
+    }
+
+
 def unknown_ce_loss(
     image_features: torch.Tensor,
     candidate_features: torch.Tensor,
