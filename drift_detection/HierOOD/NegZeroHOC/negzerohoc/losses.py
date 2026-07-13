@@ -166,6 +166,176 @@ def hierarchical_ms_min_loss(
     return total_loss
 
 
+def _cross_modal_ms_loss_level(
+    sim_mat: torch.Tensor,
+    image_labels: torch.Tensor,
+    prompt_labels: torch.Tensor,
+    neg_weights: torch.Tensor | None = None,
+    alpha: float = 2.0,
+    beta: float = 50.0,
+    lam: float = 0.5,
+    mining_margin: float = 0.1,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    device = sim_mat.device
+    num_images = sim_mat.size(0)
+    loss_list = []
+    set_size_list = []
+
+    for i in range(num_images):
+        mask_pos = prompt_labels == image_labels[i]
+        mask_neg = ~mask_pos
+
+        pos_sim = sim_mat[i][mask_pos]
+        neg_sim = sim_mat[i][mask_neg]
+        current_neg_w = None if neg_weights is None else neg_weights[i][mask_neg]
+
+        if pos_sim.numel() == 0 or neg_sim.numel() == 0:
+            loss_list.append(torch.tensor(0.0, device=device))
+            set_size_list.append(torch.tensor(1.0, device=device))
+            continue
+
+        hardest_pos_sim = torch.min(pos_sim)
+        hardest_neg_sim = torch.max(neg_sim)
+
+        neg_keep = (neg_sim + mining_margin) > hardest_pos_sim
+        pos_keep = (pos_sim - mining_margin) < hardest_neg_sim
+        neg_sim = neg_sim[neg_keep]
+        pos_sim = pos_sim[pos_keep]
+        if current_neg_w is not None:
+            current_neg_w = current_neg_w[neg_keep]
+
+        if pos_sim.numel() == 0 or neg_sim.numel() == 0:
+            loss_list.append(torch.tensor(0.0, device=device))
+            set_size_list.append(torch.tensor(1.0, device=device))
+            continue
+
+        pos_term = torch.log(1.0 + torch.sum(torch.exp(-alpha * (pos_sim - lam)))) / alpha
+        if current_neg_w is None:
+            neg_exp = torch.exp(beta * (neg_sim - lam))
+        else:
+            neg_exp = current_neg_w * torch.exp(beta * (neg_sim - lam))
+        neg_term = torch.log(1.0 + torch.sum(neg_exp)) / beta
+
+        loss_list.append(pos_term + neg_term)
+        set_size_list.append(torch.tensor(pos_sim.numel() + neg_sim.numel(), dtype=sim_mat.dtype, device=device))
+
+    return torch.stack(loss_list), torch.stack(set_size_list)
+
+
+def _cross_modal_distance_weights(
+    image_slice_labels: torch.Tensor,
+    prompt_slice_labels: torch.Tensor,
+    scale: float = 2.0,
+    dist_pow: float = 1.0,
+) -> torch.Tensor:
+    matches = (image_slice_labels.unsqueeze(1) == prompt_slice_labels.unsqueeze(0)).float()
+    continuous_matches = torch.cumprod(matches, dim=2)
+    shared_depth = continuous_matches.sum(dim=2)
+    tree_dist = (float(image_slice_labels.size(1)) - shared_depth).pow(dist_pow)
+    return torch.pow(float(scale), tree_dist - 1.0)
+
+
+def cross_modal_multi_similarity_loss(
+    image_features: torch.Tensor,
+    prompt_features: torch.Tensor,
+    image_path_labels: torch.Tensor,
+    prompt_path_labels: torch.Tensor,
+    alpha: float = 2.0,
+    beta: float = 50.0,
+    lam: float = 0.5,
+    mining_margin: float = 0.1,
+) -> torch.Tensor:
+    image_features = F.normalize(image_features.float(), dim=-1)
+    prompt_features = F.normalize(prompt_features.float(), dim=-1)
+    sim_mat = torch.clamp(image_features @ prompt_features.t(), min=-1.0 + 1e-6, max=1.0 - 1e-6)
+    _, all_labels = torch.unique(
+        torch.cat([image_path_labels, prompt_path_labels], dim=0),
+        dim=0,
+        return_inverse=True,
+    )
+    image_labels = all_labels[: image_path_labels.size(0)]
+    prompt_labels = all_labels[image_path_labels.size(0):]
+    losses, _ = _cross_modal_ms_loss_level(
+        sim_mat,
+        image_labels,
+        prompt_labels,
+        alpha=alpha,
+        beta=beta,
+        lam=lam,
+        mining_margin=mining_margin,
+    )
+    return losses.mean()
+
+
+def cross_modal_hierarchical_ms_min_loss(
+    image_features: torch.Tensor,
+    prompt_features: torch.Tensor,
+    image_path_labels: torch.Tensor,
+    prompt_path_labels: torch.Tensor,
+    alpha: float = 2.0,
+    beta: float = 50.0,
+    lam: float = 0.5,
+    mining_margin: float = 0.1,
+    minimum_mode: str = "sample",
+    use_distance_weights: bool = False,
+    dist_scale: float = 2.0,
+    dist_pow: float = 1.0,
+) -> torch.Tensor:
+    if minimum_mode not in {"batch", "sample"}:
+        raise ValueError(f"Unsupported minimum_mode: {minimum_mode}")
+
+    image_features = F.normalize(image_features.float(), dim=-1)
+    prompt_features = F.normalize(prompt_features.float(), dim=-1)
+    sim_mat = torch.clamp(image_features @ prompt_features.t(), min=-1.0 + 1e-6, max=1.0 - 1e-6)
+    num_levels = int(image_path_labels.size(1))
+    device = image_features.device
+
+    level_losses = []
+    for level in range(num_levels):
+        image_path = image_path_labels[:, : level + 1]
+        prompt_path = prompt_path_labels[:, : level + 1]
+        _, all_labels = torch.unique(
+            torch.cat([image_path, prompt_path], dim=0),
+            dim=0,
+            return_inverse=True,
+        )
+        image_labels = all_labels[: image_path.size(0)]
+        prompt_labels = all_labels[image_path.size(0):]
+        neg_weights = None
+        if use_distance_weights:
+            neg_weights = _cross_modal_distance_weights(
+                image_path,
+                prompt_path,
+                scale=dist_scale,
+                dist_pow=dist_pow,
+            )
+
+        losses_l, _ = _cross_modal_ms_loss_level(
+            sim_mat,
+            image_labels,
+            prompt_labels,
+            neg_weights=neg_weights,
+            alpha=alpha,
+            beta=beta,
+            lam=lam,
+            mining_margin=mining_margin,
+        )
+        level_losses.append(losses_l)
+
+    total_loss = torch.tensor(0.0, dtype=image_features.dtype, device=device)
+    cur_min = None
+    for rev_level in range(num_levels - 1, -1, -1):
+        base_loss_l = level_losses[rev_level]
+        if cur_min is None:
+            cur_loss = base_loss_l
+        else:
+            cur_loss = torch.min(base_loss_l, cur_min)
+        cur_min = torch.min(cur_loss) if minimum_mode == "batch" else cur_loss
+        k_l = torch.exp(torch.tensor(1.0 / float(rev_level + 1), dtype=image_features.dtype, device=device))
+        total_loss = total_loss + (k_l * cur_loss.mean()) / float(num_levels)
+    return total_loss
+
+
 def prompt_metric_loss(
     image_features: torch.Tensor,
     prompt_features: torch.Tensor,
@@ -180,23 +350,27 @@ def prompt_metric_loss(
     dist_scale: float = 2.0,
     dist_pow: float = 1.0,
 ) -> tuple[torch.Tensor, dict]:
-    features = torch.cat([image_features, prompt_features], dim=0)
-    path_labels = torch.cat([image_path_labels, prompt_path_labels], dim=0).to(features.device)
+    image_path_labels = image_path_labels.to(image_features.device)
+    prompt_path_labels = prompt_path_labels.to(image_features.device)
     loss_name = loss_name.lower()
 
     if loss_name == "ms":
-        loss = multi_similarity_loss(
-            features,
-            path_labels,
+        loss = cross_modal_multi_similarity_loss(
+            image_features,
+            prompt_features,
+            image_path_labels,
+            prompt_path_labels,
             alpha=alpha,
             beta=beta,
             lam=lam,
             mining_margin=mining_margin,
         )
     elif loss_name in {"hims_min", "himsmin"}:
-        loss = hierarchical_ms_min_loss(
-            features,
-            path_labels,
+        loss = cross_modal_hierarchical_ms_min_loss(
+            image_features,
+            prompt_features,
+            image_path_labels,
+            prompt_path_labels,
             alpha=alpha,
             beta=beta,
             lam=lam,
@@ -205,9 +379,11 @@ def prompt_metric_loss(
             use_distance_weights=False,
         )
     elif loss_name in {"weihims", "hims_min_wei"}:
-        loss = hierarchical_ms_min_loss(
-            features,
-            path_labels,
+        loss = cross_modal_hierarchical_ms_min_loss(
+            image_features,
+            prompt_features,
+            image_path_labels,
+            prompt_path_labels,
             alpha=alpha,
             beta=beta,
             lam=lam,
@@ -221,6 +397,7 @@ def prompt_metric_loss(
         raise ValueError(f"Unsupported prompt metric loss: {loss_name}")
 
     return loss, {
+        "pair_mode": "cross_modal_image_prompt_only",
         "metric_loss": float(loss.detach().cpu()),
         "loss": float(loss.detach().cpu()),
     }

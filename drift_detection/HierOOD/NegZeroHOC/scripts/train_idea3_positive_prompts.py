@@ -132,7 +132,7 @@ def compute_positive_loss(
         metric_name = loss_name[3:]
 
     max_len = hierarchy.max_depth + 1
-    image_nodes = [example.leaf for example in parent_examples]
+    image_nodes = [example.child for example in parent_examples]
     image_path_labels = _path_label_tensor(hierarchy, image_nodes, max_len, device)
     prompt_path_labels = _path_label_tensor(hierarchy, children, max_len, device)
     metric_loss, metric_stats = prompt_metric_loss(
