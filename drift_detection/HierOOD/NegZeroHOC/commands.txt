@@ -1,0 +1,3 @@
+python scripts\extract_clip_features.py --config configs\idea3_fgvc_aircraft.yaml
+python scripts\train_idea3_positive_prompts.py --config configs\idea3_fgvc_aircraft.yaml
+python scripts\infer_idea3.py --config configs\idea3_fgvc_aircraft.yaml --mode positive_child_only

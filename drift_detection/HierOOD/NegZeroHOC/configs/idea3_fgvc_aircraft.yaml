@@ -51,7 +51,7 @@ prompt:
 
 positive_training:
   enabled: true
-  epochs: 20
+  epochs: 100
   batch_size: 1024
   parents_per_step: 4
   lr: 0.001
