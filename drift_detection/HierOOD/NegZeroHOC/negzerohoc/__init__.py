@@ -4,7 +4,13 @@ __all__ = [
     "clip_backend",
     "evaluation",
     "feature_io",
+    "idea3_inference",
     "inference",
+    "losses",
+    "prompt_models",
+    "prompt_text",
     "prompts",
     "semantic_index",
+    "soft_prompting",
+    "training_data",
 ]

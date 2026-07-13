@@ -1,0 +1,211 @@
+from __future__ import annotations
+
+import argparse
+from argparse import Namespace
+from collections import Counter
+import sys
+from pathlib import Path
+
+import torch
+import yaml
+
+try:
+    from tqdm.auto import tqdm
+except ImportError:  # pragma: no cover
+    tqdm = None
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+
+from negzerohoc.checkpointing import load_idea3_checkpoint
+from negzerohoc.clip_backend import ClipBackend
+from negzerohoc.evaluation import build_hierarchy, evaluate_split, make_distance_mats, mixed_summary
+from negzerohoc.feature_io import ensure_dir, load_feature_file
+from negzerohoc.idea3_inference import build_idea3_semantic_index, predict_features_idea3
+from negzerohoc.prompt_models import HierPromptConfig, PositivePromptLearner, UnknownPromptLearner
+from negzerohoc.soft_prompting import SoftPromptTextEncoder
+
+
+def load_config(path, mode_override=None):
+    with Path(path).open("r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    experiment_cfg = cfg.get("experiment", {})
+    runtime_cfg = cfg.get("runtime", {})
+    dataset_cfg = cfg.get("dataset", {})
+    clip_cfg = cfg.get("clip", {})
+    features_cfg = cfg.get("features", {})
+    inference_cfg = cfg.get("inference", {})
+
+    mode = mode_override or inference_cfg.get("mode", "positive_child_only")
+    if mode not in {"positive_child_only", "positive_pathscore_diagnostic", "parent_unknown"}:
+        raise ValueError(f"Unsupported Idea 3 inference mode: {mode}")
+
+    checkpoint = inference_cfg.get("checkpoint")
+    if mode == "parent_unknown":
+        checkpoint = inference_cfg.get("unknown_checkpoint") or checkpoint
+    if not checkpoint:
+        checkpoint = inference_cfg.get("positive_checkpoint")
+    if not checkpoint:
+        raise ValueError(f"Missing inference.checkpoint in {path}")
+
+    return Namespace(
+        config=str(path),
+        experiment_name=experiment_cfg.get("name", "idea3"),
+        output_root=experiment_cfg.get("output_root", "outputs"),
+        dataset=dataset_cfg.get("name", "fgvc-aircraft"),
+        hierarchy=dataset_cfg.get("hierarchy", "hierarchies/fgvc-aircraft.json"),
+        id_split=dataset_cfg.get("id_split", "data/fgvc-aircraft-id-labels.csv"),
+        clip_model=clip_cfg.get("model", "openai/clip-vit-base-patch32"),
+        local_files_only=bool(clip_cfg.get("local_files_only", True)),
+        features_dir=features_cfg.get("dir") or inference_cfg.get("features_dir"),
+        device=runtime_cfg.get("device", "cuda"),
+        checkpoint=checkpoint,
+        mode=mode,
+        batch_size=int(inference_cfg.get("batch_size", 1024)),
+        tau=float(inference_cfg.get("tau", 1.0)),
+        allow_root_unknown=bool(inference_cfg.get("allow_root_unknown", False)),
+        save_trace=bool(inference_cfg.get("save_trace", False)),
+    )
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", required=True)
+    parser.add_argument("--mode", default=None)
+    parsed = parser.parse_args()
+    return load_config(parsed.config, parsed.mode)
+
+
+def load_models(args, hierarchy, device):
+    checkpoint = load_idea3_checkpoint(args.checkpoint, map_location="cpu")
+    backend = ClipBackend(args.clip_model, device=device, local_files_only=args.local_files_only)
+    text_encoder = SoftPromptTextEncoder(
+        backend.model,
+        backend.processor.tokenizer,
+        max_length=int(checkpoint.get("prompt_config", {}).get("max_length", 77)),
+    )
+    prompt_cfg = HierPromptConfig.from_dict(checkpoint.get("prompt_config", {}))
+
+    positive = PositivePromptLearner(args.dataset, hierarchy, text_encoder, prompt_cfg).to(device)
+    positive_state = checkpoint.get("positive_state_dict")
+    if positive_state is None:
+        raise ValueError(f"Checkpoint has no positive_state_dict: {args.checkpoint}")
+    positive.load_state_dict(positive_state)
+    positive.eval()
+
+    unknown = None
+    if args.mode == "parent_unknown":
+        unknown_state = checkpoint.get("unknown_state_dict")
+        if unknown_state is None:
+            raise ValueError(
+                f"parent_unknown mode requires unknown_state_dict. "
+                f"Use an unknown checkpoint, got: {args.checkpoint}"
+            )
+        unknown = UnknownPromptLearner(args.dataset, hierarchy, text_encoder, prompt_cfg).to(device)
+        unknown.load_state_dict(unknown_state)
+        unknown.eval()
+
+    return checkpoint, positive, unknown
+
+
+@torch.no_grad()
+def predict_payload_in_batches(args, payload, hierarchy, semantic_index, device, split_name):
+    features = payload["features"]
+    num_features = int(features.shape[0])
+    starts = range(0, num_features, args.batch_size)
+    if tqdm is not None:
+        total = (num_features + args.batch_size - 1) // args.batch_size
+        starts = tqdm(starts, total=total, desc=f"infer {split_name}", leave=False)
+
+    preds = []
+    traces = [] if args.save_trace else None
+    stop_depth_counts = Counter()
+    stop_node_counts = Counter()
+
+    for start in starts:
+        end = min(start + args.batch_size, num_features)
+        out = predict_features_idea3(
+            features[start:end].to(device),
+            hierarchy,
+            semantic_index,
+            mode="positive_child_only" if args.mode == "positive_pathscore_diagnostic" else args.mode,
+            tau=args.tau,
+            return_trace=args.save_trace,
+        )
+        preds.append(out["preds"].cpu())
+        stop_depth_counts.update({int(k): int(v) for k, v in out["diagnostics"]["stop_depth_counts"].items()})
+        stop_node_counts.update({str(k): int(v) for k, v in out["diagnostics"]["stop_node_counts"].items()})
+        if args.save_trace:
+            traces.extend(out["traces"])
+
+    return {
+        "preds": torch.cat(preds) if preds else torch.empty(0, dtype=torch.long),
+        "traces": traces,
+        "diagnostics": {
+            "stop_depth_counts": dict(sorted(stop_depth_counts.items())),
+            "stop_node_counts": dict(stop_node_counts.most_common()),
+        },
+    }
+
+
+def main():
+    args = parse_args()
+    if not args.features_dir:
+        raise ValueError("Missing features.dir or inference.features_dir in config")
+
+    device = args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu"
+    hierarchy, _ = build_hierarchy(REPO_ROOT, args.id_split, args.hierarchy)
+    dists_mats = make_distance_mats(hierarchy)
+    checkpoint, positive, unknown = load_models(args, hierarchy, device)
+    semantic_index = build_idea3_semantic_index(
+        hierarchy,
+        positive,
+        unknown,
+        mode=args.mode,
+        allow_root_unknown=args.allow_root_unknown,
+    )
+
+    features_dir = Path(args.features_dir)
+    val_payload = load_feature_file(features_dir / "val-features.pt")
+    ood_payload = load_feature_file(features_dir / "ood-features.pt")
+
+    results = {
+        "args": vars(args),
+        "mode": args.mode,
+        "checkpoint": args.checkpoint,
+        "checkpoint_stage": checkpoint.get("stage"),
+        "hierarchy_id_node_list": list(hierarchy.id_node_list),
+        "semantic_prompts": {parent: local.prompts for parent, local in semantic_index.items()},
+    }
+
+    for split_name, payload in [("val", val_payload), ("ood", ood_payload)]:
+        pred_out = predict_payload_in_batches(args, payload, hierarchy, semantic_index, device, split_name)
+        preds = pred_out["preds"].cpu()
+        node_labels, metrics = evaluate_split(hierarchy, payload, preds, dists_mats=dists_mats)
+        results[split_name] = {
+            "preds": preds,
+            "targets": node_labels.cpu(),
+            "metrics": metrics,
+            "diagnostics": pred_out["diagnostics"],
+        }
+        if args.save_trace:
+            results[split_name]["trace"] = pred_out["traces"]
+
+    results["mixed"] = mixed_summary(results["val"]["metrics"], results["ood"]["metrics"])
+
+    result_dir = ensure_dir(Path(args.output_root) / "results")
+    save_path = result_dir / f"{args.experiment_name}-{args.mode}.result"
+    torch.save(results, save_path)
+
+    print(f"saved: {save_path}")
+    print(f"ID BAcc: {results['val']['metrics']['balanced_acc']:.6f}")
+    print(f"OOD BAcc: {results['ood']['metrics']['balanced_acc']:.6f}")
+    print(f"Mixed BAcc: {results['mixed']['mixed_balanced_acc']:.6f}")
+    print(f"ID Balanced H-Dist: {float(results['val']['metrics']['balanced_hdist']):.6f}")
+    print(f"OOD Balanced H-Dist: {float(results['ood']['metrics']['balanced_hdist']):.6f}")
+    print(f"Mixed Balanced H-Dist: {results['mixed']['mixed_balanced_hdist']:.6f}")
+
+
+if __name__ == "__main__":
+    main()
