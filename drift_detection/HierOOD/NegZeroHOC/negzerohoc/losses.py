@@ -455,6 +455,7 @@ def depthwise_prompt_metric_loss(
         neg_weights = None
         if use_distance_weights:
             image_paths = image_node_labels_by_depth[valid, : depth + 1]
+            prompt_paths = prompt_paths[:, : depth + 1]
             neg_weights = _cross_modal_distance_weights(
                 image_paths,
                 prompt_paths,
