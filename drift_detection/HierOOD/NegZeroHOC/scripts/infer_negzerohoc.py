@@ -27,6 +27,7 @@ from negzerohoc.evaluation import (
 )
 from negzerohoc.feature_io import ensure_dir, load_feature_file
 from negzerohoc.inference import predict_features
+from negzerohoc.runtime import available_device, configured_device
 from negzerohoc.semantic_index import build_semantic_index
 
 
@@ -62,7 +63,7 @@ def load_config(path):
         clip_model=clip_cfg.get("model", "openai/clip-vit-base-patch32"),
         mode=mode,
         outdir=experiment_cfg.get("output_root", "outputs"),
-        device=runtime_cfg.get("device", "cuda"),
+        device=configured_device(runtime_cfg),
         tau=inference_cfg.get("tau", 1.0),
         batch_size=batch_size,
         allow_root_unknown=inference_cfg.get("allow_root_unknown", False),
@@ -139,7 +140,7 @@ def predict_payload_in_batches(
 
 def main():
     args = parse_args()
-    device = args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu"
+    device = available_device(args.device)
     hierarchy, _ = build_hierarchy(REPO_ROOT, args.id_split, args.hierarchy)
     dists_mats = make_distance_mats(hierarchy)
 

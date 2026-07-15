@@ -4,6 +4,7 @@ experiment:
 
 runtime:
   device: cuda
+  gpu_id: 0
 
 dataset:
   name: fgvc-aircraft

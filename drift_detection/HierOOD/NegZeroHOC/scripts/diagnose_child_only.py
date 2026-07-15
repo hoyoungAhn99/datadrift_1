@@ -29,6 +29,7 @@ from negzerohoc.evaluation import (
 from negzerohoc.feature_io import ensure_dir, load_feature_file, save_json
 from negzerohoc.inference import predict_features
 from negzerohoc.prompts import build_positive_prompts, infer_node_role, node_path_names
+from negzerohoc.runtime import available_device, configured_device
 from negzerohoc.semantic_index import build_semantic_index
 
 
@@ -54,7 +55,7 @@ def load_config(path: str | Path) -> dict:
         "features_dir": features_dir,
         "clip_model": clip_cfg.get("model", "openai/clip-vit-base-patch32"),
         "local_files_only": clip_cfg.get("local_files_only", True),
-        "device": runtime_cfg.get("device", "cuda"),
+        "device": configured_device(runtime_cfg),
         "batch_size": int(inference_cfg.get("batch_size", 1024)),
         "outdir": experiment_cfg.get("output_root", "outputs"),
     }
@@ -304,7 +305,7 @@ def predict_path_score_leaf(
 def main():
     cli_args = parse_args()
     cfg = load_config(cli_args.config)
-    device = cfg["device"] if torch.cuda.is_available() or cfg["device"] == "cpu" else "cpu"
+    device = available_device(cfg["device"])
 
     hierarchy, _ = build_hierarchy(REPO_ROOT, cfg["id_split"], cfg["hierarchy"])
     dists_mats = make_distance_mats(hierarchy)

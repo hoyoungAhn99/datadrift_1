@@ -25,6 +25,7 @@ from negzerohoc.feature_io import ensure_dir, load_feature_file, save_json
 from negzerohoc.idea3_inference import build_idea3_semantic_index, predict_features_idea3
 from negzerohoc.losses import depthwise_prompt_metric_loss, positive_ce_loss, prompt_metric_loss
 from negzerohoc.prompt_models import HierPromptConfig, PositivePromptLearner
+from negzerohoc.runtime import available_device, configured_device
 from negzerohoc.soft_prompting import SoftPromptTextEncoder, soft_prompt_smoke_test
 from negzerohoc.training_data import build_positive_edge_examples, gather_image_features, group_examples_by_parent, node_path, sample_examples
 
@@ -59,7 +60,7 @@ def load_config(path):
         clip_model=clip_cfg.get("model", "openai/clip-vit-base-patch32"),
         local_files_only=bool(clip_cfg.get("local_files_only", True)),
         features_dir=features_cfg.get("dir") or inference_cfg.get("features_dir"),
-        device=runtime_cfg.get("device", "cuda"),
+        device=configured_device(runtime_cfg),
         seed=int(runtime_cfg.get("seed", 0)),
         prompt=prompt_cfg,
         epochs=int(train_cfg.get("epochs", 20)),
@@ -377,7 +378,7 @@ def main():
 
     random.seed(args.seed)
     torch.manual_seed(args.seed)
-    device = args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu"
+    device = available_device(args.device)
 
     hierarchy, _ = build_hierarchy(REPO_ROOT, args.id_split, args.hierarchy)
     features_dir = Path(args.features_dir)

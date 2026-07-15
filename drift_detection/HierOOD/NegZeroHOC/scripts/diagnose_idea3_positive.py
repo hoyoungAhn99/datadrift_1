@@ -15,6 +15,7 @@ from scripts.infer_idea3 import load_config, load_models
 from negzerohoc.evaluation import build_hierarchy
 from negzerohoc.feature_io import load_feature_file, save_json
 from negzerohoc.idea3_inference import build_idea3_semantic_index
+from negzerohoc.runtime import available_device
 from negzerohoc.training_data import build_positive_edge_examples, group_examples_by_parent
 
 
@@ -122,7 +123,7 @@ def main():
 
     args = load_config(args_ns.config, mode_override="positive_child_only")
     args.batch_size = int(args.batch_size)
-    device = args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu"
+    device = available_device(args.device)
     hierarchy, _ = build_hierarchy(REPO_ROOT, args.id_split, args.hierarchy)
     _, positive, _ = load_models(args, hierarchy, device)
 

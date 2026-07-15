@@ -24,6 +24,7 @@ from negzerohoc.evaluation import build_hierarchy, evaluate_split, make_distance
 from negzerohoc.feature_io import ensure_dir, load_feature_file
 from negzerohoc.idea3_inference import build_idea3_semantic_index, predict_features_idea3
 from negzerohoc.prompt_models import HierPromptConfig, PositivePromptLearner, UnknownPromptLearner
+from negzerohoc.runtime import available_device, configured_device
 from negzerohoc.soft_prompting import SoftPromptTextEncoder
 
 
@@ -59,7 +60,7 @@ def load_config(path, mode_override=None):
         clip_model=clip_cfg.get("model", "openai/clip-vit-base-patch32"),
         local_files_only=bool(clip_cfg.get("local_files_only", True)),
         features_dir=features_cfg.get("dir") or inference_cfg.get("features_dir"),
-        device=runtime_cfg.get("device", "cuda"),
+        device=configured_device(runtime_cfg),
         checkpoint=checkpoint,
         mode=mode,
         batch_size=int(inference_cfg.get("batch_size", 1024)),
@@ -154,7 +155,7 @@ def main():
     if not args.features_dir:
         raise ValueError("Missing features.dir or inference.features_dir in config")
 
-    device = args.device if torch.cuda.is_available() or args.device == "cpu" else "cpu"
+    device = available_device(args.device)
     hierarchy, _ = build_hierarchy(REPO_ROOT, args.id_split, args.hierarchy)
     dists_mats = make_distance_mats(hierarchy)
     checkpoint, positive, unknown = load_models(args, hierarchy, device)

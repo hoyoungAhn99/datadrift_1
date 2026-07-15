@@ -16,6 +16,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from negzerohoc.clip_backend import ClipBackend, safe_model_name
 from negzerohoc.evaluation import build_hierarchy
 from negzerohoc.feature_io import ensure_dir, save_feature_file, save_json
+from negzerohoc.runtime import configured_device
 
 try:
     from tqdm import tqdm
@@ -70,7 +71,7 @@ def load_config(path):
         outdir=experiment_cfg.get("output_root", "outputs"),
         batch_size=dataloader_cfg.get("batch_size", 128),
         num_workers=dataloader_cfg.get("num_workers", 4),
-        device=runtime_cfg.get("device", "cuda"),
+        device=configured_device(runtime_cfg),
         local_files_only=clip_cfg.get("local_files_only", True),
         skip_train=feature_cfg.get("skip_train", True),
     )

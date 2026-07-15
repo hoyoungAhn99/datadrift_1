@@ -17,6 +17,7 @@ from diagnose_child_only import encode_leaf_text_features, load_config, path_edg
 from negzerohoc.clip_backend import ClipBackend, safe_model_name
 from negzerohoc.evaluation import build_hierarchy, node_labels_from_feature_targets
 from negzerohoc.feature_io import ensure_dir, load_feature_file, save_json
+from negzerohoc.runtime import available_device
 from negzerohoc.semantic_index import build_semantic_index
 
 try:
@@ -275,7 +276,7 @@ def oracle_local_prompt_alignment(
 def main():
     args = parse_args()
     cfg = load_config(args.config)
-    device = cfg["device"] if torch.cuda.is_available() or cfg["device"] == "cpu" else "cpu"
+    device = available_device(cfg["device"])
 
     hierarchy, _ = build_hierarchy(REPO_ROOT, cfg["id_split"], cfg["hierarchy"])
     payload = load_feature_file(Path(cfg["features_dir"]) / f"{args.split}-features.pt")
