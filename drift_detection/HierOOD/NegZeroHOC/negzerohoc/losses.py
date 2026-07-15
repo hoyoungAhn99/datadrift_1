@@ -403,6 +403,124 @@ def prompt_metric_loss(
     }
 
 
+def depthwise_prompt_metric_loss(
+    image_features: torch.Tensor,
+    prompt_features_by_depth: dict[int, torch.Tensor],
+    image_node_labels_by_depth: torch.Tensor,
+    prompt_node_labels_by_depth: dict[int, torch.Tensor],
+    prompt_path_labels_by_depth: dict[int, torch.Tensor],
+    loss_name: str,
+    alpha: float = 2.0,
+    beta: float = 50.0,
+    lam: float = 0.5,
+    mining_margin: float = 0.1,
+    minimum_mode: str = "sample",
+    dist_scale: float = 2.0,
+    dist_pow: float = 1.0,
+) -> tuple[torch.Tensor, dict]:
+    if minimum_mode not in {"batch", "sample"}:
+        raise ValueError(f"Unsupported minimum_mode: {minimum_mode}")
+
+    loss_name = loss_name.lower()
+    if loss_name not in {"ms", "hims_min", "himsmin", "weihims", "hims_min_wei"}:
+        raise ValueError(f"Unsupported depthwise prompt metric loss: {loss_name}")
+
+    image_features = F.normalize(image_features.float(), dim=-1)
+    image_node_labels_by_depth = image_node_labels_by_depth.to(image_features.device)
+    use_distance_weights = loss_name in {"weihims", "hims_min_wei"}
+    num_images = int(image_features.shape[0])
+    device = image_features.device
+
+    level_losses = {}
+    valid_counts = {}
+    for depth in sorted(prompt_features_by_depth):
+        if depth <= 0:
+            continue
+        prompt_features = prompt_features_by_depth[depth]
+        if prompt_features.numel() == 0:
+            continue
+
+        image_labels = image_node_labels_by_depth[:, depth]
+        valid = image_labels >= 0
+        if not bool(valid.any()):
+            continue
+
+        prompt_labels = prompt_node_labels_by_depth[depth].to(device)
+        prompt_paths = prompt_path_labels_by_depth[depth].to(device)
+        valid_image_features = image_features[valid]
+        valid_image_labels = image_labels[valid]
+        prompt_features = F.normalize(prompt_features.float(), dim=-1)
+        sim_mat = torch.clamp(valid_image_features @ prompt_features.t(), min=-1.0 + 1e-6, max=1.0 - 1e-6)
+
+        neg_weights = None
+        if use_distance_weights:
+            image_paths = image_node_labels_by_depth[valid, : depth + 1]
+            neg_weights = _cross_modal_distance_weights(
+                image_paths,
+                prompt_paths,
+                scale=dist_scale,
+                dist_pow=dist_pow,
+            )
+
+        losses_l, _ = _cross_modal_ms_loss_level(
+            sim_mat,
+            valid_image_labels,
+            prompt_labels,
+            neg_weights=neg_weights,
+            alpha=alpha,
+            beta=beta,
+            lam=lam,
+            mining_margin=mining_margin,
+        )
+        full_losses = torch.full((num_images,), float("inf"), dtype=losses_l.dtype, device=device)
+        full_losses[valid] = losses_l
+        level_losses[depth] = full_losses
+        valid_counts[depth] = int(valid.sum().detach().cpu())
+
+    if not level_losses:
+        zero = image_features.sum() * 0.0
+        return zero, {
+            "pair_mode": "depthwise_global_image_prompt",
+            "metric_loss": 0.0,
+            "loss": 0.0,
+            "valid_counts": valid_counts,
+        }
+
+    if loss_name == "ms":
+        loss_terms = []
+        for full_losses in level_losses.values():
+            finite = torch.isfinite(full_losses)
+            if bool(finite.any()):
+                loss_terms.append(full_losses[finite].mean())
+        loss = torch.stack(loss_terms).mean() if loss_terms else image_features.sum() * 0.0
+    else:
+        cur_min = torch.full((num_images,), float("inf"), dtype=image_features.dtype, device=device)
+        loss_terms = []
+        max_depth = max(level_losses)
+        for depth in range(max_depth, 0, -1):
+            if depth not in level_losses:
+                continue
+            base_loss = level_losses[depth]
+            finite = torch.isfinite(base_loss)
+            if not bool(finite.any()):
+                continue
+            if minimum_mode == "batch":
+                depth_min = torch.min(base_loss[finite])
+                cur_min[finite] = torch.minimum(base_loss[finite], depth_min.expand_as(base_loss[finite]))
+            else:
+                cur_min[finite] = torch.minimum(base_loss[finite], cur_min[finite])
+            k_l = torch.exp(torch.tensor(1.0 / float(depth + 1), dtype=image_features.dtype, device=device))
+            loss_terms.append(k_l * cur_min[finite].mean())
+        loss = torch.stack(loss_terms).mean() if loss_terms else image_features.sum() * 0.0
+
+    return loss, {
+        "pair_mode": "depthwise_global_image_prompt",
+        "metric_loss": float(loss.detach().cpu()),
+        "loss": float(loss.detach().cpu()),
+        "valid_counts": valid_counts,
+    }
+
+
 def unknown_ce_loss(
     image_features: torch.Tensor,
     candidate_features: torch.Tensor,

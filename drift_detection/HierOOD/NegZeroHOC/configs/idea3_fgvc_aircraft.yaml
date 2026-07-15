@@ -59,6 +59,7 @@ positive_training:
   tau: 0.07
   loss:
     name: weihims
+    prompt_scope: depth_global
     alpha: 2.0
     beta: 50.0
     lam: 0.5

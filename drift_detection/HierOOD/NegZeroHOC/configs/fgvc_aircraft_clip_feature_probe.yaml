@@ -1,5 +1,5 @@
 experiment:
-  name: fgvc-aircraft-clip-feature-probe
+  name: fgvc-aircraft-clip-leaf-probe
   output_root: outputs
 
 runtime:
@@ -29,16 +29,15 @@ features:
   dir: outputs/features/fgvc-aircraft/clip_openai_clip-vit-base-patch32
 
 linear_probe:
-  name: fgvc-aircraft-clip-feature-probe
-  probe: both
+  name: fgvc-aircraft-clip-leaf-probe
+  probe: leaf
   model: linear
   normalize_features: true
   epochs: 100
   batch_size: 1024
-  parents_per_step: 4
   lr: 0.001
   weight_decay: 0.0001
   eval_batch_size: 4096
-  checkpoint: outputs/checkpoints/fgvc-aircraft-clip-feature-probe.pt
-  result_path: outputs/results/fgvc-aircraft-clip-feature-probe.result
-  diagnostics_path: outputs/diagnostics/fgvc-aircraft-clip-feature-probe.json
+  checkpoint: outputs/checkpoints/fgvc-aircraft-clip-leaf-probe.pt
+  result_path: outputs/results/fgvc-aircraft-clip-leaf-probe.result
+  diagnostics_path: outputs/diagnostics/fgvc-aircraft-clip-leaf-probe.json

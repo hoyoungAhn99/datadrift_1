@@ -23,7 +23,7 @@ from negzerohoc.clip_backend import ClipBackend
 from negzerohoc.evaluation import build_hierarchy, evaluate_split, make_distance_mats, mixed_summary
 from negzerohoc.feature_io import ensure_dir, load_feature_file, save_json
 from negzerohoc.idea3_inference import build_idea3_semantic_index, predict_features_idea3
-from negzerohoc.losses import positive_ce_loss, prompt_metric_loss
+from negzerohoc.losses import depthwise_prompt_metric_loss, positive_ce_loss, prompt_metric_loss
 from negzerohoc.prompt_models import HierPromptConfig, PositivePromptLearner
 from negzerohoc.soft_prompting import SoftPromptTextEncoder, soft_prompt_smoke_test
 from negzerohoc.training_data import build_positive_edge_examples, gather_image_features, group_examples_by_parent, node_path, sample_examples
@@ -69,6 +69,7 @@ def load_config(path):
         weight_decay=float(train_cfg.get("weight_decay", 1e-4)),
         tau=float(train_cfg.get("tau", 0.07)),
         loss_name=loss_cfg.get("name", "ce"),
+        loss_prompt_scope=loss_cfg.get("prompt_scope", "parent_local"),
         loss_alpha=float(loss_cfg.get("alpha", 2.0)),
         loss_beta=float(loss_cfg.get("beta", 50.0)),
         loss_lam=float(loss_cfg.get("lam", 0.5)),
@@ -98,6 +99,92 @@ def _path_label_tensor(hierarchy, nodes: list[str], max_len: int, device: str | 
             path = path[:max_len]
         rows.append([node_to_idx[item] for item in path])
     return torch.tensor(rows, dtype=torch.long, device=device)
+
+
+def _variable_path_label_tensor(hierarchy, nodes: list[str], max_len: int, device: str | torch.device) -> torch.Tensor:
+    node_to_idx = {node: idx for idx, node in enumerate(hierarchy.id_node_list)}
+    rows = []
+    for node in nodes:
+        path = node_path(hierarchy, node)
+        row = [-1] * max_len
+        for depth, item in enumerate(path[:max_len]):
+            row[depth] = node_to_idx[item]
+        rows.append(row)
+    return torch.tensor(rows, dtype=torch.long, device=device)
+
+
+def build_depth_prompt_sets(hierarchy) -> dict[int, list[str]]:
+    by_depth = {}
+    for node in hierarchy.id_node_list:
+        depth = len(hierarchy.node_ancestors.get(node, []))
+        if depth <= 0:
+            continue
+        by_depth.setdefault(depth, []).append(node)
+    return {depth: sorted(nodes) for depth, nodes in sorted(by_depth.items())}
+
+
+def build_depth_prompt_metadata(hierarchy, depth_nodes: dict[int, list[str]], device: str | torch.device) -> dict:
+    max_len = hierarchy.max_depth + 1
+    node_to_idx = {node: idx for idx, node in enumerate(hierarchy.id_node_list)}
+    return {
+        "node_labels": {
+            depth: torch.tensor([node_to_idx[node] for node in nodes], dtype=torch.long, device=device)
+            for depth, nodes in depth_nodes.items()
+        },
+        "path_labels": {
+            depth: _variable_path_label_tensor(hierarchy, nodes, max_len, device)
+            for depth, nodes in depth_nodes.items()
+        },
+    }
+
+
+def encode_depth_prompts(learner, hierarchy, depth_nodes: dict[int, list[str]]) -> dict[int, torch.Tensor]:
+    encoded = {}
+    for depth, nodes in depth_nodes.items():
+        pairs = [(hierarchy.child2parent[node], node) for node in nodes]
+        encoded[depth] = learner.encode_edges(pairs)
+    return encoded
+
+
+def depthwise_ce_loss(
+    image_features: torch.Tensor,
+    prompt_features_by_depth: dict[int, torch.Tensor],
+    image_node_labels_by_depth: torch.Tensor,
+    prompt_node_labels_by_depth: dict[int, torch.Tensor],
+    tau: float = 0.07,
+) -> tuple[torch.Tensor, dict]:
+    image_features = torch.nn.functional.normalize(image_features.float(), dim=-1)
+    device = image_features.device
+    losses = []
+    correct = 0
+    total = 0
+
+    for depth in sorted(prompt_features_by_depth):
+        if depth <= 0:
+            continue
+        image_labels = image_node_labels_by_depth[:, depth].to(device)
+        valid = image_labels >= 0
+        if not bool(valid.any()):
+            continue
+        prompt_features = torch.nn.functional.normalize(prompt_features_by_depth[depth].float(), dim=-1)
+        prompt_labels = prompt_node_labels_by_depth[depth].to(device)
+        node_to_pos = {int(node): idx for idx, node in enumerate(prompt_labels.detach().cpu().tolist())}
+        target_positions = torch.tensor(
+            [node_to_pos[int(node)] for node in image_labels[valid].detach().cpu().tolist()],
+            dtype=torch.long,
+            device=device,
+        )
+        logits = image_features[valid] @ prompt_features.t() / float(tau)
+        losses.append(torch.nn.functional.cross_entropy(logits, target_positions))
+        correct += int((logits.argmax(dim=1) == target_positions).sum().detach().cpu())
+        total += int(target_positions.numel())
+
+    if not losses:
+        zero = image_features.sum() * 0.0
+        return zero, {"acc": 0.0, "loss": 0.0}
+
+    loss = torch.stack(losses).mean()
+    return loss, {"acc": correct / max(1, total), "loss": float(loss.detach().cpu())}
 
 
 def compute_positive_loss(
@@ -163,6 +250,73 @@ def compute_positive_loss(
         "loss": float(loss.detach().cpu()),
         "ce_loss": ce_value,
         "metric_loss": metric_stats["metric_loss"],
+    }
+
+
+def compute_depth_global_positive_loss(
+    args,
+    image_features,
+    image_node_labels_by_depth,
+    prompt_features_by_depth,
+    prompt_node_labels_by_depth,
+    prompt_path_labels_by_depth,
+):
+    loss_name = args.loss_name.lower()
+    metric_names = {"ms", "hims_min", "himsmin", "weihims", "hims_min_wei"}
+    combo_names = {"ce_ms", "ce_hims_min", "ce_himsmin", "ce_weihims"}
+    if loss_name not in metric_names and loss_name not in combo_names:
+        raise ValueError(f"Unsupported depth-global positive_training.loss.name: {args.loss_name}")
+
+    metric_name = loss_name
+    use_ce = False
+    if loss_name.startswith("ce_"):
+        use_ce = True
+        metric_name = loss_name[3:]
+
+    metric_loss, metric_stats = depthwise_prompt_metric_loss(
+        image_features,
+        prompt_features_by_depth,
+        image_node_labels_by_depth,
+        prompt_node_labels_by_depth,
+        prompt_path_labels_by_depth,
+        loss_name=metric_name,
+        alpha=args.loss_alpha,
+        beta=args.loss_beta,
+        lam=args.loss_lam,
+        mining_margin=args.loss_mining_margin,
+        minimum_mode=args.loss_minimum_mode,
+        dist_scale=args.loss_dist_scale,
+        dist_pow=args.loss_dist_pow,
+    )
+    ce_value = 0.0
+    if use_ce:
+        ce_loss, ce_stats = depthwise_ce_loss(
+            image_features,
+            prompt_features_by_depth,
+            image_node_labels_by_depth,
+            prompt_node_labels_by_depth,
+            tau=args.tau,
+        )
+        loss = args.ce_weight * ce_loss + args.metric_weight * metric_loss
+        acc = ce_stats["acc"]
+        ce_value = float(ce_loss.detach().cpu())
+    else:
+        loss = metric_loss
+        _, ce_stats = depthwise_ce_loss(
+            image_features,
+            prompt_features_by_depth,
+            image_node_labels_by_depth,
+            prompt_node_labels_by_depth,
+            tau=args.tau,
+        )
+        acc = ce_stats["acc"]
+
+    return loss, {
+        "acc": float(acc),
+        "loss": float(loss.detach().cpu()),
+        "ce_loss": ce_value,
+        "metric_loss": metric_stats["metric_loss"],
+        "pair_mode": metric_stats["pair_mode"],
     }
 
 
@@ -250,67 +404,113 @@ def main():
     optimizer = torch.optim.AdamW(learner.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     rng = random.Random(args.seed)
 
-    n_per_parent = max(1, args.batch_size // max(1, args.parents_per_step))
     history = []
+    use_depth_global = args.loss_prompt_scope == "depth_global" and args.loss_name.lower() != "ce"
+    if args.loss_prompt_scope not in {"parent_local", "depth_global"}:
+        raise ValueError("positive_training.loss.prompt_scope must be one of: parent_local, depth_global")
+
+    if use_depth_global:
+        depth_nodes = build_depth_prompt_sets(hierarchy)
+        depth_prompt_metadata = build_depth_prompt_metadata(hierarchy, depth_nodes, device)
+        node_labels = hierarchy.gen_ds2node_map(train_payload["classes"])[train_payload["targets"].long()]
+        train_nodes = [hierarchy.id_node_list[int(idx)] for idx in node_labels.tolist()]
+        train_path_labels = _variable_path_label_tensor(hierarchy, train_nodes, hierarchy.max_depth + 1, device="cpu")
+        print(
+            "using depth-global prompt metric loss: "
+            + ", ".join(f"depth {depth}={len(nodes)} prompts" for depth, nodes in depth_nodes.items())
+        )
+    else:
+        n_per_parent = max(1, args.batch_size // max(1, args.parents_per_step))
 
     for epoch in range(1, args.epochs + 1):
         learner.train()
-        shuffled = list(parents)
-        rng.shuffle(shuffled)
-        chunks = [
-            shuffled[i:i + args.parents_per_step]
-            for i in range(0, len(shuffled), args.parents_per_step)
-        ]
-        iterator = tqdm(chunks, desc=f"positive epoch {epoch}/{args.epochs}", leave=False) if tqdm else chunks
         epoch_loss = 0.0
         epoch_acc = 0.0
         steps = 0
 
-        for parent_chunk in iterator:
-            optimizer.zero_grad(set_to_none=True)
-            losses = []
-            step_accs = []
-            for parent in parent_chunk:
-                parent_examples = sample_examples(grouped[parent], n_per_parent, rng)
-                if not parent_examples:
+        if use_depth_global:
+            order = list(range(int(train_features.shape[0])))
+            rng.shuffle(order)
+            starts = range(0, len(order), args.batch_size)
+            iterator = tqdm(starts, desc=f"positive epoch {epoch}/{args.epochs}", leave=False) if tqdm else starts
+            for start in iterator:
+                batch_indices = order[start:start + args.batch_size]
+                if not batch_indices:
                     continue
-                children = list(hierarchy.parent2children[parent])
-                child_to_idx = {child: idx for idx, child in enumerate(children)}
-                targets = torch.tensor([child_to_idx[ex.child] for ex in parent_examples], dtype=torch.long, device=device)
-                image_features = gather_image_features(train_features, parent_examples, device)
-                child_features = learner.encode_children(parent, children)
-                loss, stats = compute_positive_loss(
+                optimizer.zero_grad(set_to_none=True)
+                index_tensor = torch.tensor(batch_indices, dtype=torch.long)
+                image_features = train_features.index_select(0, index_tensor).to(device)
+                image_path_labels = train_path_labels.index_select(0, index_tensor).to(device)
+                prompt_features_by_depth = encode_depth_prompts(learner, hierarchy, depth_nodes)
+                loss, stats = compute_depth_global_positive_loss(
                     args,
-                    hierarchy,
-                    learner,
                     image_features,
-                    child_features,
-                    parent_examples,
-                    children,
-                    targets,
-                    device,
+                    image_path_labels,
+                    prompt_features_by_depth,
+                    depth_prompt_metadata["node_labels"],
+                    depth_prompt_metadata["path_labels"],
                 )
-                losses.append(loss)
-                step_accs.append(stats["acc"])
+                loss.backward()
+                optimizer.step()
 
-            if not losses:
-                continue
-            loss = torch.stack(losses).mean()
-            loss.backward()
-            optimizer.step()
+                epoch_loss += float(loss.detach().cpu())
+                epoch_acc += stats["acc"]
+                steps += 1
+        else:
+            shuffled = list(parents)
+            rng.shuffle(shuffled)
+            chunks = [
+                shuffled[i:i + args.parents_per_step]
+                for i in range(0, len(shuffled), args.parents_per_step)
+            ]
+            iterator = tqdm(chunks, desc=f"positive epoch {epoch}/{args.epochs}", leave=False) if tqdm else chunks
 
-            epoch_loss += float(loss.detach().cpu())
-            epoch_acc += sum(step_accs) / max(1, len(step_accs))
-            steps += 1
+            for parent_chunk in iterator:
+                optimizer.zero_grad(set_to_none=True)
+                losses = []
+                step_accs = []
+                for parent in parent_chunk:
+                    parent_examples = sample_examples(grouped[parent], n_per_parent, rng)
+                    if not parent_examples:
+                        continue
+                    children = list(hierarchy.parent2children[parent])
+                    child_to_idx = {child: idx for idx, child in enumerate(children)}
+                    targets = torch.tensor([child_to_idx[ex.child] for ex in parent_examples], dtype=torch.long, device=device)
+                    image_features = gather_image_features(train_features, parent_examples, device)
+                    child_features = learner.encode_children(parent, children)
+                    loss, stats = compute_positive_loss(
+                        args,
+                        hierarchy,
+                        learner,
+                        image_features,
+                        child_features,
+                        parent_examples,
+                        children,
+                        targets,
+                        device,
+                    )
+                    losses.append(loss)
+                    step_accs.append(stats["acc"])
+
+                if not losses:
+                    continue
+                loss = torch.stack(losses).mean()
+                loss.backward()
+                optimizer.step()
+
+                epoch_loss += float(loss.detach().cpu())
+                epoch_acc += sum(step_accs) / max(1, len(step_accs))
+                steps += 1
 
         epoch_stats = {
             "epoch": epoch,
             "loss": epoch_loss / max(1, steps),
-            "local_acc": epoch_acc / max(1, steps),
+            "depth_acc" if use_depth_global else "local_acc": epoch_acc / max(1, steps),
             "steps": steps,
         }
         history.append(epoch_stats)
-        print(f"epoch {epoch}: loss={epoch_stats['loss']:.6f}, local_acc={epoch_stats['local_acc']:.6f}")
+        acc_key = "depth_acc" if use_depth_global else "local_acc"
+        print(f"epoch {epoch}: loss={epoch_stats['loss']:.6f}, {acc_key}={epoch_stats[acc_key]:.6f}")
 
     metrics = {"train_history": history, "soft_prompt_smoke": smoke}
     result = None
