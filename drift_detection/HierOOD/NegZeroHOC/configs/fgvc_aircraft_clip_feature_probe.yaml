@@ -36,7 +36,7 @@ linear_probe:
   epochs: 100
   batch_size: 1024
   parents_per_step: 4
-  lr: 0.001
+  lr: 0.005
   weight_decay: 0.0001
   eval_batch_size: 4096
   checkpoint: outputs/checkpoints/fgvc-aircraft-clip-feature-probe.pt
