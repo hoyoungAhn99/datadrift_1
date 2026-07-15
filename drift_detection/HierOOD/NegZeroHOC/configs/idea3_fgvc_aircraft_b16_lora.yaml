@@ -3,6 +3,10 @@ base_config: idea3_fgvc_aircraft_b16.yaml
 experiment:
   name: idea3-fgvc-aircraft-b16-lora
 
+runtime:
+  device: cuda
+  gpu_id: 1
+
 image_adapter:
   mode: lora
   rank: 16
