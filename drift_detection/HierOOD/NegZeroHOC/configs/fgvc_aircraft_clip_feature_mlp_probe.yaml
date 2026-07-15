@@ -1,0 +1,45 @@
+experiment:
+  name: fgvc-aircraft-clip-mlp-leaf-probe
+  output_root: outputs
+
+runtime:
+  device: cuda
+  seed: 0
+
+dataset:
+  name: fgvc-aircraft
+  datadir: D:/HY_Data/HierOOD/fgvc-aircraft
+  hierarchy: hierarchies/fgvc-aircraft.json
+  id_split: data/fgvc-aircraft-id-labels.csv
+
+clip:
+  model: openai/clip-vit-base-patch32
+  local_files_only: true
+  freeze_text_encoder: true
+  freeze_image_encoder: true
+
+dataloader:
+  batch_size: 128
+  num_workers: 4
+
+feature_extraction:
+  skip_train: false
+
+features:
+  dir: outputs/features/fgvc-aircraft/clip_openai_clip-vit-base-patch32
+
+linear_probe:
+  name: fgvc-aircraft-clip-mlp-leaf-probe
+  probe: leaf
+  model: mlp
+  hidden_dim: 1024
+  dropout: 0.2
+  normalize_features: true
+  epochs: 100
+  batch_size: 1024
+  lr: 0.001
+  weight_decay: 0.0001
+  eval_batch_size: 4096
+  checkpoint: outputs/checkpoints/fgvc-aircraft-clip-mlp-leaf-probe.pt
+  result_path: outputs/results/fgvc-aircraft-clip-mlp-leaf-probe.result
+  diagnostics_path: outputs/diagnostics/fgvc-aircraft-clip-mlp-leaf-probe.json
