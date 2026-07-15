@@ -402,6 +402,30 @@ def json_safe_result(results: dict) -> dict:
     return summary
 
 
+def print_eval_summary(diagnostics: dict) -> None:
+    for probe_name in ["leaf", "local"]:
+        if probe_name not in diagnostics:
+            continue
+        print(f"== {probe_name} probe evaluation ==")
+        for split in ["val", "ood"]:
+            metrics = diagnostics[probe_name][split]["metrics"]
+            acc = metrics.get("acc")
+            bacc = metrics.get("balanced_acc")
+            bh = metrics.get("balanced_hdist")
+            print(
+                f"{split}: "
+                f"acc={acc:.6f}, "
+                f"balanced_acc={bacc:.6f}, "
+                f"balanced_hdist={bh:.6f}"
+            )
+        mixed = diagnostics[probe_name]["mixed"]
+        print(
+            "mixed: "
+            f"balanced_acc={mixed['mixed_balanced_acc']:.6f}, "
+            f"balanced_hdist={mixed['mixed_balanced_hdist']:.6f}"
+        )
+
+
 def parse_args() -> Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
@@ -451,6 +475,7 @@ def main() -> None:
         "leaf": leaf_history,
         "local": local_history,
     }
+    print_eval_summary(diagnostics)
 
     ensure_dir(Path(args.result_path).parent)
     ensure_dir(Path(args.checkpoint).parent)
