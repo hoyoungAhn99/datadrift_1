@@ -4,6 +4,7 @@ __all__ = [
     "clip_backend",
     "evaluation",
     "feature_io",
+    "image_adapters",
     "idea3_inference",
     "inference",
     "losses",

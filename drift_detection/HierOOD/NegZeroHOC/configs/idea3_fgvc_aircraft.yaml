@@ -50,6 +50,16 @@ prompt:
   ablation: global_depth_parent
   unknown_prompts: 1
 
+image_adapter:
+  mode: none
+  output_dim:
+  hidden_dim: 1024
+  dropout: 0.1
+  rank: 16
+  alpha: 16.0
+  residual: true
+  normalize_output: true
+
 positive_training:
   enabled: true
   epochs: 100

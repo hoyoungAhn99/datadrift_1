@@ -20,8 +20,10 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from negzerohoc.checkpointing import load_idea3_checkpoint, save_idea3_checkpoint
 from negzerohoc.clip_backend import ClipBackend
+from negzerohoc.config_utils import load_yaml_config
 from negzerohoc.evaluation import build_hierarchy, evaluate_split, make_distance_mats, mixed_summary
 from negzerohoc.feature_io import ensure_dir, load_feature_file, save_json
+from negzerohoc.image_adapters import build_image_adapter
 from negzerohoc.idea3_inference import build_idea3_semantic_index, predict_features_idea3
 from negzerohoc.losses import unknown_ce_loss, unknown_regularization
 from negzerohoc.prompt_models import HierPromptConfig, PositivePromptLearner, UnknownPromptLearner
@@ -37,8 +39,7 @@ from negzerohoc.training_data import (
 
 
 def load_config(path):
-    with Path(path).open("r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f) or {}
+    cfg = load_yaml_config(path)
     experiment_cfg = cfg.get("experiment", {})
     runtime_cfg = cfg.get("runtime", {})
     dataset_cfg = cfg.get("dataset", {})
@@ -94,8 +95,19 @@ def parse_args():
     return load_config(parser.parse_args().config)
 
 
+def load_positive_image_adapter(positive_ckpt: dict, input_dim: int, device):
+    adapter = build_image_adapter(input_dim, positive_ckpt.get("image_adapter_config") or {"mode": "none"}).to(device)
+    state = positive_ckpt.get("image_adapter_state_dict")
+    if state is not None:
+        adapter.load_state_dict(state)
+    adapter.eval()
+    for param in adapter.parameters():
+        param.requires_grad_(False)
+    return adapter
+
+
 @torch.no_grad()
-def evaluate_parent_unknown(args, hierarchy, positive, unknown, features_dir: Path, device: str) -> dict:
+def evaluate_parent_unknown(args, hierarchy, positive, unknown, image_adapter, features_dir: Path, device: str) -> dict:
     dists_mats = make_distance_mats(hierarchy)
     semantic_index = build_idea3_semantic_index(
         hierarchy,
@@ -117,8 +129,9 @@ def evaluate_parent_unknown(args, hierarchy, positive, unknown, features_dir: Pa
         features = payload["features"]
         for start in range(0, int(features.shape[0]), args.inference_batch_size):
             end = min(start + args.inference_batch_size, int(features.shape[0]))
+            image_features = image_adapter(features[start:end].to(device))
             out = predict_features_idea3(
-                features[start:end].to(device),
+                image_features,
                 hierarchy,
                 semantic_index,
                 mode="parent_unknown",
@@ -157,6 +170,7 @@ def main():
     features_dir = Path(args.features_dir)
     train_payload = load_feature_file(features_dir / "train-features.pt")
     train_features = train_payload["features"].float()
+    image_dim = int(train_features.shape[1])
     examples = build_positive_edge_examples(hierarchy, train_payload)
     grouped = group_examples_by_parent_child(examples)
     parents = sorted(parent for parent in grouped if parent != "root" and len(grouped[parent]) >= 2)
@@ -165,6 +179,7 @@ def main():
 
     positive_ckpt = load_idea3_checkpoint(args.positive_checkpoint, map_location="cpu")
     prompt_cfg = HierPromptConfig.from_dict(positive_ckpt.get("prompt_config", {}))
+    image_adapter = load_positive_image_adapter(positive_ckpt, image_dim, device)
 
     backend = ClipBackend(args.clip_model, device=device, local_files_only=args.local_files_only)
     text_encoder = SoftPromptTextEncoder(
@@ -212,7 +227,7 @@ def main():
                 if episode is None:
                     continue
 
-                image_features = gather_image_features(train_features, episode.examples, device)
+                image_features = image_adapter(gather_image_features(train_features, episode.examples, device))
                 with torch.no_grad():
                     child_features = positive.encode_children(parent, episode.known_children).detach()
                 unknown_feature = unknown.encode_unknown(parent)
@@ -260,7 +275,7 @@ def main():
     metrics = {"train_history": history}
     result = None
     if args.eval_after_training:
-        result = evaluate_parent_unknown(args, hierarchy, positive, unknown, features_dir, device)
+        result = evaluate_parent_unknown(args, hierarchy, positive, unknown, image_adapter, features_dir, device)
         ensure_dir(Path(args.result_path).parent)
         torch.save(result, args.result_path)
         metrics["final"] = {
@@ -283,6 +298,8 @@ def main():
         prompt_config=prompt_cfg.to_dict(),
         positive_state_dict=positive.state_dict(),
         unknown_state_dict=unknown.state_dict(),
+        image_adapter_config=positive_ckpt.get("image_adapter_config") or {"mode": "none"},
+        image_adapter_state_dict=image_adapter.state_dict(),
         positive_checkpoint=args.positive_checkpoint,
         metrics=metrics,
         args=vars(args),

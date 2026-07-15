@@ -20,8 +20,10 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from negzerohoc.checkpointing import save_idea3_checkpoint
 from negzerohoc.clip_backend import ClipBackend
+from negzerohoc.config_utils import load_yaml_config
 from negzerohoc.evaluation import build_hierarchy, evaluate_split, make_distance_mats, mixed_summary
 from negzerohoc.feature_io import ensure_dir, load_feature_file, save_json
+from negzerohoc.image_adapters import ImageAdapterConfig, build_image_adapter
 from negzerohoc.idea3_inference import build_idea3_semantic_index, predict_features_idea3
 from negzerohoc.losses import depthwise_prompt_metric_loss, positive_ce_loss, prompt_metric_loss
 from negzerohoc.prompt_models import HierPromptConfig, PositivePromptLearner
@@ -31,14 +33,14 @@ from negzerohoc.training_data import build_positive_edge_examples, gather_image_
 
 
 def load_config(path):
-    with Path(path).open("r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f) or {}
+    cfg = load_yaml_config(path)
     experiment_cfg = cfg.get("experiment", {})
     runtime_cfg = cfg.get("runtime", {})
     dataset_cfg = cfg.get("dataset", {})
     clip_cfg = cfg.get("clip", {})
     features_cfg = cfg.get("features", {})
     prompt_cfg = cfg.get("prompt", {})
+    image_adapter_cfg = cfg.get("image_adapter", cfg.get("image_adaptation", {}))
     train_cfg = cfg.get("positive_training", {})
     loss_cfg = train_cfg.get("loss", {})
     inference_cfg = cfg.get("inference", {})
@@ -63,6 +65,7 @@ def load_config(path):
         device=configured_device(runtime_cfg),
         seed=int(runtime_cfg.get("seed", 0)),
         prompt=prompt_cfg,
+        image_adapter=image_adapter_cfg,
         epochs=int(train_cfg.get("epochs", 20)),
         batch_size=int(train_cfg.get("batch_size", 1024)),
         parents_per_step=int(train_cfg.get("parents_per_step", 4)),
@@ -328,9 +331,10 @@ def parse_args():
 
 
 @torch.no_grad()
-def evaluate_positive(args, hierarchy, learner, features_dir: Path, device: str) -> dict:
+def evaluate_positive(args, hierarchy, learner, image_adapter, features_dir: Path, device: str) -> dict:
     dists_mats = make_distance_mats(hierarchy)
     semantic_index = build_idea3_semantic_index(hierarchy, learner, mode="positive_child_only")
+    image_adapter.eval()
     results = {
         "args": vars(args),
         "mode": "positive_child_only",
@@ -344,8 +348,9 @@ def evaluate_positive(args, hierarchy, learner, features_dir: Path, device: str)
         features = payload["features"]
         for start in range(0, int(features.shape[0]), args.inference_batch_size):
             end = min(start + args.inference_batch_size, int(features.shape[0]))
+            image_features = image_adapter(features[start:end].to(device))
             out = predict_features_idea3(
-                features[start:end].to(device),
+                image_features,
                 hierarchy,
                 semantic_index,
                 mode="positive_child_only",
@@ -384,6 +389,7 @@ def main():
     features_dir = Path(args.features_dir)
     train_payload = load_feature_file(features_dir / "train-features.pt")
     train_features = train_payload["features"].float()
+    image_dim = int(train_features.shape[1])
     examples = build_positive_edge_examples(hierarchy, train_payload)
     grouped = group_examples_by_parent(examples)
     parents = sorted(grouped)
@@ -402,7 +408,15 @@ def main():
     )
     prompt_cfg = HierPromptConfig.from_dict(args.prompt)
     learner = PositivePromptLearner(args.dataset, hierarchy, text_encoder, prompt_cfg).to(device)
-    optimizer = torch.optim.AdamW(learner.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    adapter_cfg = ImageAdapterConfig.from_dict(args.image_adapter)
+    image_adapter = build_image_adapter(image_dim, adapter_cfg.to_dict()).to(device)
+    trainable_params = list(learner.parameters()) + [p for p in image_adapter.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=args.weight_decay)
+    print(
+        "image adapter: "
+        f"mode={adapter_cfg.mode}, input_dim={image_dim}, output_dim={image_adapter.output_dim}, "
+        f"trainable_params={sum(p.numel() for p in image_adapter.parameters() if p.requires_grad)}"
+    )
     rng = random.Random(args.seed)
 
     history = []
@@ -425,6 +439,7 @@ def main():
 
     for epoch in range(1, args.epochs + 1):
         learner.train()
+        image_adapter.train()
         epoch_loss = 0.0
         epoch_acc = 0.0
         steps = 0
@@ -440,7 +455,7 @@ def main():
                     continue
                 optimizer.zero_grad(set_to_none=True)
                 index_tensor = torch.tensor(batch_indices, dtype=torch.long)
-                image_features = train_features.index_select(0, index_tensor).to(device)
+                image_features = image_adapter(train_features.index_select(0, index_tensor).to(device))
                 image_path_labels = train_path_labels.index_select(0, index_tensor).to(device)
                 prompt_features_by_depth = encode_depth_prompts(learner, hierarchy, depth_nodes)
                 loss, stats = compute_depth_global_positive_loss(
@@ -477,7 +492,7 @@ def main():
                     children = list(hierarchy.parent2children[parent])
                     child_to_idx = {child: idx for idx, child in enumerate(children)}
                     targets = torch.tensor([child_to_idx[ex.child] for ex in parent_examples], dtype=torch.long, device=device)
-                    image_features = gather_image_features(train_features, parent_examples, device)
+                    image_features = image_adapter(gather_image_features(train_features, parent_examples, device))
                     child_features = learner.encode_children(parent, children)
                     loss, stats = compute_positive_loss(
                         args,
@@ -516,7 +531,7 @@ def main():
     metrics = {"train_history": history, "soft_prompt_smoke": smoke}
     result = None
     if args.eval_after_training:
-        result = evaluate_positive(args, hierarchy, learner, features_dir, device)
+        result = evaluate_positive(args, hierarchy, learner, image_adapter, features_dir, device)
         ensure_dir(Path(args.result_path).parent)
         torch.save(result, args.result_path)
         metrics["final"] = {
@@ -538,6 +553,8 @@ def main():
         id_split=args.id_split,
         prompt_config=prompt_cfg.to_dict(),
         positive_state_dict=learner.state_dict(),
+        image_adapter_config=adapter_cfg.to_dict(),
+        image_adapter_state_dict=image_adapter.state_dict(),
         metrics=metrics,
         args=vars(args),
     )

@@ -20,8 +20,10 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from negzerohoc.checkpointing import load_idea3_checkpoint
 from negzerohoc.clip_backend import ClipBackend
+from negzerohoc.config_utils import load_yaml_config
 from negzerohoc.evaluation import build_hierarchy, evaluate_split, make_distance_mats, mixed_summary
 from negzerohoc.feature_io import ensure_dir, load_feature_file
+from negzerohoc.image_adapters import build_image_adapter
 from negzerohoc.idea3_inference import build_idea3_semantic_index, predict_features_idea3
 from negzerohoc.prompt_models import HierPromptConfig, PositivePromptLearner, UnknownPromptLearner
 from negzerohoc.runtime import available_device, configured_device
@@ -29,8 +31,7 @@ from negzerohoc.soft_prompting import SoftPromptTextEncoder
 
 
 def load_config(path, mode_override=None):
-    with Path(path).open("r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f) or {}
+    cfg = load_yaml_config(path)
     experiment_cfg = cfg.get("experiment", {})
     runtime_cfg = cfg.get("runtime", {})
     dataset_cfg = cfg.get("dataset", {})
@@ -110,8 +111,18 @@ def load_models(args, hierarchy, device):
     return checkpoint, positive, unknown
 
 
+def load_image_adapter(checkpoint, input_dim: int, device):
+    cfg = checkpoint.get("image_adapter_config") or {"mode": "none"}
+    adapter = build_image_adapter(input_dim, cfg).to(device)
+    state = checkpoint.get("image_adapter_state_dict")
+    if state is not None:
+        adapter.load_state_dict(state)
+    adapter.eval()
+    return adapter
+
+
 @torch.no_grad()
-def predict_payload_in_batches(args, payload, hierarchy, semantic_index, device, split_name):
+def predict_payload_in_batches(args, payload, hierarchy, semantic_index, image_adapter, device, split_name):
     features = payload["features"]
     num_features = int(features.shape[0])
     starts = range(0, num_features, args.batch_size)
@@ -126,8 +137,9 @@ def predict_payload_in_batches(args, payload, hierarchy, semantic_index, device,
 
     for start in starts:
         end = min(start + args.batch_size, num_features)
+        image_features = image_adapter(features[start:end].to(device))
         out = predict_features_idea3(
-            features[start:end].to(device),
+            image_features,
             hierarchy,
             semantic_index,
             mode="positive_child_only" if args.mode == "positive_pathscore_diagnostic" else args.mode,
@@ -170,6 +182,7 @@ def main():
     features_dir = Path(args.features_dir)
     val_payload = load_feature_file(features_dir / "val-features.pt")
     ood_payload = load_feature_file(features_dir / "ood-features.pt")
+    image_adapter = load_image_adapter(checkpoint, int(val_payload["features"].shape[1]), device)
 
     results = {
         "args": vars(args),
@@ -181,7 +194,7 @@ def main():
     }
 
     for split_name, payload in [("val", val_payload), ("ood", ood_payload)]:
-        pred_out = predict_payload_in_batches(args, payload, hierarchy, semantic_index, device, split_name)
+        pred_out = predict_payload_in_batches(args, payload, hierarchy, semantic_index, image_adapter, device, split_name)
         preds = pred_out["preds"].cpu()
         node_labels, metrics = evaluate_split(hierarchy, payload, preds, dists_mats=dists_mats)
         results[split_name] = {
