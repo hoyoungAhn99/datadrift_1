@@ -1,7 +1,7 @@
 base_config: idea3_inat19.yaml
 
 experiment:
-  name: idea3-inat19-linear
+  name: idea3-inat19-b16-linear
 
 runtime:
   device: cuda
@@ -13,16 +13,16 @@ image_adapter:
   normalize_output: true
 
 positive_training:
-  checkpoint: outputs/checkpoints/idea3-inat19-linear-positive.pt
-  result_path: outputs/results/idea3-inat19-linear-positive_child_only.result
-  diagnostics_path: outputs/diagnostics/idea3-inat19-linear-positive-diagnostics.json
+  checkpoint: outputs/checkpoints/idea3-inat19-b16-linear-positive.pt
+  result_path: outputs/results/idea3-inat19-b16-linear-positive_child_only.result
+  diagnostics_path: outputs/diagnostics/idea3-inat19-b16-linear-positive-diagnostics.json
 
 unknown_training:
-  positive_checkpoint: outputs/checkpoints/idea3-inat19-linear-positive.pt
-  checkpoint: outputs/checkpoints/idea3-inat19-linear-parent_unknown.pt
-  result_path: outputs/results/idea3-inat19-linear-parent_unknown.result
-  diagnostics_path: outputs/diagnostics/idea3-inat19-linear-unknown-diagnostics.json
+  positive_checkpoint: outputs/checkpoints/idea3-inat19-b16-linear-positive.pt
+  checkpoint: outputs/checkpoints/idea3-inat19-b16-linear-parent_unknown.pt
+  result_path: outputs/results/idea3-inat19-b16-linear-parent_unknown.result
+  diagnostics_path: outputs/diagnostics/idea3-inat19-b16-linear-unknown-diagnostics.json
 
 inference:
-  positive_checkpoint: outputs/checkpoints/idea3-inat19-linear-positive.pt
-  unknown_checkpoint: outputs/checkpoints/idea3-inat19-linear-parent_unknown.pt
+  positive_checkpoint: outputs/checkpoints/idea3-inat19-b16-linear-positive.pt
+  unknown_checkpoint: outputs/checkpoints/idea3-inat19-b16-linear-parent_unknown.pt
