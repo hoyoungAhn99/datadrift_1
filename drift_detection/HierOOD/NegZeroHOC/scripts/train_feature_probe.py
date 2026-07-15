@@ -82,6 +82,7 @@ def load_config(path: str | Path) -> Namespace:
         parents_per_step=int(probe_cfg.get("parents_per_step", 4)),
         lr=float(probe_cfg.get("lr", 1e-3)),
         weight_decay=float(probe_cfg.get("weight_decay", 1e-4)),
+        eval_every=int(probe_cfg.get("eval_every", 1)),
         eval_batch_size=int(probe_cfg.get("eval_batch_size", 4096)),
         checkpoint=probe_cfg.get("checkpoint") or str(Path(output_root) / "checkpoints" / f"{probe_name}.pt"),
         result_path=probe_cfg.get("result_path") or str(Path(output_root) / "results" / f"{probe_name}.result"),
@@ -102,7 +103,33 @@ def metric_summary(metrics: dict) -> dict:
     return out
 
 
-def train_leaf_probe(args, train_payload: dict, device: str) -> tuple[nn.Module, list[dict]]:
+@torch.no_grad()
+def evaluate_leaf_classification(args, model: nn.Module, payload: dict, device: str) -> dict:
+    model.eval()
+    features = maybe_normalize(payload["features"], args.normalize_features)
+    targets = payload["targets"].long()
+    total_loss = 0.0
+    total_correct = 0
+    total_seen = 0
+    steps = 0
+
+    for start in range(0, features.shape[0], args.eval_batch_size):
+        batch_x = features[start:start + args.eval_batch_size].to(device)
+        batch_y = targets[start:start + args.eval_batch_size].to(device)
+        logits = model(batch_x)
+        loss = F.cross_entropy(logits, batch_y)
+        total_loss += float(loss.detach().cpu())
+        total_correct += int((logits.argmax(dim=1) == batch_y).sum().detach().cpu())
+        total_seen += int(batch_y.numel())
+        steps += 1
+
+    return {
+        "loss": total_loss / max(1, steps),
+        "acc": total_correct / max(1, total_seen),
+    }
+
+
+def train_leaf_probe(args, train_payload: dict, val_payload: dict | None, device: str) -> tuple[nn.Module, list[dict]]:
     features = maybe_normalize(train_payload["features"], args.normalize_features)
     targets = train_payload["targets"].long()
     input_dim = int(features.shape[1])
@@ -138,14 +165,23 @@ def train_leaf_probe(args, train_payload: dict, device: str) -> tuple[nn.Module,
             total_seen += int(batch_y.numel())
             steps += 1
 
+        train_loss = total_loss / max(1, steps)
+        train_acc = total_correct / max(1, total_seen)
         stats = {
             "epoch": epoch,
-            "loss": total_loss / max(1, steps),
-            "acc": total_correct / max(1, total_seen),
+            "train_loss": train_loss,
+            "train_acc": train_acc,
             "steps": steps,
         }
+        if val_payload is not None and args.eval_every > 0 and (epoch == 1 or epoch % args.eval_every == 0 or epoch == args.epochs):
+            val_stats = evaluate_leaf_classification(args, model, val_payload, device)
+            stats["val_loss"] = val_stats["loss"]
+            stats["val_acc"] = val_stats["acc"]
         history.append(stats)
-        print(f"leaf epoch {epoch}: loss={stats['loss']:.6f}, acc={stats['acc']:.6f}")
+        message = f"leaf epoch {epoch}: train_loss={stats['train_loss']:.6f}, train_acc={stats['train_acc']:.6f}"
+        if "val_acc" in stats:
+            message += f", val_loss={stats['val_loss']:.6f}, val_acc={stats['val_acc']:.6f}"
+        print(message)
 
     return model, history
 
@@ -448,13 +484,14 @@ def main() -> None:
     hierarchy, _ = build_hierarchy(REPO_ROOT, args.id_split, args.hierarchy)
     features_dir = Path(args.features_dir)
     train_payload = load_feature_file(features_dir / "train-features.pt")
+    val_payload = load_feature_file(features_dir / "val-features.pt") if args.probe in {"leaf", "both"} else None
 
     leaf_model = None
     local_model = None
     train_classes = list(train_payload["classes"])
 
     if args.probe in {"leaf", "both"}:
-        leaf_model, leaf_history = train_leaf_probe(args, train_payload, device)
+        leaf_model, leaf_history = train_leaf_probe(args, train_payload, val_payload, device)
     else:
         leaf_history = None
 
