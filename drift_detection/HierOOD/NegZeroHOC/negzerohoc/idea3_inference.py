@@ -9,6 +9,10 @@ import torch.nn.functional as F
 from .semantic_index import LocalSemanticCandidates
 
 
+POSITIVE_GLOBAL_PATH_MODES = {"positive_global_path", "positive_pathscore_diagnostic"}
+SUPPORTED_IDEA3_MODES = {"positive_child_only", "parent_unknown"} | POSITIVE_GLOBAL_PATH_MODES
+
+
 @dataclass
 class Idea3SemanticIndex:
     locals: dict[str, LocalSemanticCandidates]
@@ -22,7 +26,7 @@ def build_idea3_semantic_index(
     mode: str = "positive_child_only",
     allow_root_unknown: bool = False,
 ) -> dict[str, LocalSemanticCandidates]:
-    if mode not in {"positive_child_only", "positive_pathscore_diagnostic", "parent_unknown"}:
+    if mode not in SUPPORTED_IDEA3_MODES:
         raise ValueError(f"Unsupported Idea 3 inference mode: {mode}")
 
     index = {}
@@ -112,6 +116,15 @@ def predict_features_idea3(
     tau: float = 1.0,
     return_trace: bool = False,
 ) -> dict:
+    if mode in POSITIVE_GLOBAL_PATH_MODES:
+        return predict_features_global_path(
+            features,
+            hierarchy,
+            semantic_index,
+            logit_scale=tau,
+            return_trace=return_trace,
+        )
+
     features = F.normalize(features.float(), dim=-1)
     preds = []
     traces = [] if return_trace else None
@@ -135,6 +148,85 @@ def predict_features_idea3(
         "preds": torch.tensor(preds, dtype=torch.long),
         "traces": traces,
         "diagnostics": summarize_stop_nodes(hierarchy, stop_nodes),
+    }
+
+
+def predict_features_global_path(
+    features: torch.Tensor,
+    hierarchy,
+    semantic_index,
+    logit_scale: float = 1.0,
+    return_trace: bool = False,
+) -> dict:
+    """Exact MAP decoding under the hierarchy's local conditional models.
+
+    Each local softmax defines ``P(child | image, parent)``. Dynamic
+    programming accumulates log probabilities from root to every leaf and
+    returns the globally most probable complete path. Complexity is linear in
+    the number of hierarchy edges and no beam-width approximation is used.
+    """
+    if float(logit_scale) <= 0.0:
+        raise ValueError("Global path logit_scale must be positive")
+
+    features = F.normalize(features.float(), dim=-1)
+    device = features.device
+    batch_size = int(features.shape[0])
+    node_scores = {"root": torch.zeros(batch_size, dtype=features.dtype, device=device)}
+    edge_log_probs = {} if return_trace else None
+
+    ordered_parents = sorted(
+        hierarchy.parent2children,
+        key=lambda parent: (len(hierarchy.node_ancestors.get(parent, [])), parent),
+    )
+    for parent in ordered_parents:
+        if parent not in node_scores:
+            continue
+        local = semantic_index[parent]
+        child_features = F.normalize(local.child_features.to(device).float(), dim=-1)
+        logits = float(logit_scale) * (features @ child_features.t())
+        log_probs = F.log_softmax(logits, dim=1)
+        parent_score = node_scores[parent]
+        for child_index, child in enumerate(local.children):
+            node_scores[child] = parent_score + log_probs[:, child_index]
+            if return_trace:
+                edge_log_probs[(parent, child)] = log_probs[:, child_index].detach().cpu()
+
+    leaves = [node for node in hierarchy.id_node_list if node not in hierarchy.parent2children]
+    if not leaves:
+        raise RuntimeError("Global path inference found no leaf nodes")
+    missing = [leaf for leaf in leaves if leaf not in node_scores]
+    if missing:
+        raise RuntimeError(f"Global path inference could not reach {len(missing)} leaves")
+
+    leaf_scores = torch.stack([node_scores[leaf] for leaf in leaves], dim=1)
+    winner_indices = torch.argmax(leaf_scores, dim=1)
+    winner_nodes = [leaves[int(index)] for index in winner_indices.detach().cpu().tolist()]
+    node_to_index = {node: index for index, node in enumerate(hierarchy.id_node_list)}
+    preds = torch.tensor([node_to_index[node] for node in winner_nodes], dtype=torch.long)
+
+    traces = None
+    if return_trace:
+        traces = []
+        for sample_index, leaf in enumerate(winner_nodes):
+            path_indices = hierarchy.node_ancestors.get(leaf, [])
+            path = [hierarchy.id_node_list[index] for index in path_indices] + [leaf]
+            decisions = []
+            cumulative = 0.0
+            for parent, child in zip(path[:-1], path[1:]):
+                edge_score = float(edge_log_probs[(parent, child)][sample_index])
+                cumulative += edge_score
+                decisions.append({
+                    "parent": parent,
+                    "child": child,
+                    "edge_log_probability": edge_score,
+                    "cumulative_log_probability": cumulative,
+                })
+            traces.append(decisions)
+
+    return {
+        "preds": preds,
+        "traces": traces,
+        "diagnostics": summarize_stop_nodes(hierarchy, winner_nodes),
     }
 
 

@@ -40,7 +40,12 @@ def load_config(path, mode_override=None):
     inference_cfg = cfg.get("inference", {})
 
     mode = mode_override or inference_cfg.get("mode", "positive_child_only")
-    if mode not in {"positive_child_only", "positive_pathscore_diagnostic", "parent_unknown"}:
+    if mode not in {
+        "positive_child_only",
+        "positive_global_path",
+        "positive_pathscore_diagnostic",
+        "parent_unknown",
+    }:
         raise ValueError(f"Unsupported Idea 3 inference mode: {mode}")
 
     checkpoint = inference_cfg.get("checkpoint")
@@ -142,7 +147,7 @@ def predict_payload_in_batches(args, payload, hierarchy, semantic_index, image_a
             image_features,
             hierarchy,
             semantic_index,
-            mode="positive_child_only" if args.mode == "positive_pathscore_diagnostic" else args.mode,
+            mode=args.mode,
             tau=args.tau,
             return_trace=args.save_trace,
         )

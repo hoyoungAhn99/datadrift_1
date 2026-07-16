@@ -18,6 +18,111 @@ def positive_ce_loss(
     return loss, {"acc": float(acc.detach().cpu()), "loss": float(loss.detach().cpu())}
 
 
+def sparse_path_bottleneck_loss(
+    decision_logits: list[list[torch.Tensor]],
+    target_indices: list[list[int]],
+    bottleneck_weight: float = 0.5,
+    bottleneck_temperature: float = 0.5,
+    route_margin: float = 0.0,
+    margin_weight: float = 0.0,
+) -> tuple[torch.Tensor, dict]:
+    """Optimize exhaustive sibling decisions on each sample's true path.
+
+    ``decision_logits[i][d]`` contains every child logit for the parent at
+    depth ``d`` on sample ``i``'s ground-truth path. No hierarchy-wide prompt
+    set or sampled negative set is required: all siblings at each active
+    parent are exact negatives.
+
+    The normalized smooth maximum emphasizes the weakest decision on a path.
+    This matches the all-edges-correct requirement of hierarchical routing
+    while keeping the objective decomposable over samples for exact gradient
+    accumulation with small microbatches.
+    """
+    if len(decision_logits) != len(target_indices):
+        raise ValueError("decision_logits and target_indices must have the same number of samples")
+    if not 0.0 <= float(bottleneck_weight) <= 1.0:
+        raise ValueError("bottleneck_weight must be in [0, 1]")
+    if float(bottleneck_temperature) <= 0.0:
+        raise ValueError("bottleneck_temperature must be positive")
+
+    sample_losses = []
+    local_losses_all = []
+    margin_losses_all = []
+    local_correct = 0
+    local_total = 0
+    path_correct = 0
+
+    for sample_logits, sample_targets in zip(decision_logits, target_indices):
+        if len(sample_logits) != len(sample_targets):
+            raise ValueError("Each sample must have one target for every path decision")
+        if not sample_logits:
+            continue
+
+        local_losses = []
+        local_margin_losses = []
+        sample_is_correct = True
+        for logits, target in zip(sample_logits, sample_targets):
+            if logits.ndim != 1:
+                raise ValueError("Each local decision tensor must be one-dimensional")
+            if not 0 <= int(target) < int(logits.numel()):
+                raise ValueError(f"Target {target} is outside a decision with {logits.numel()} children")
+
+            target_tensor = torch.tensor([int(target)], dtype=torch.long, device=logits.device)
+            local_loss = F.cross_entropy(logits.unsqueeze(0), target_tensor)
+            local_losses.append(local_loss)
+            local_losses_all.append(local_loss)
+
+            prediction = int(torch.argmax(logits.detach()).item())
+            is_correct = prediction == int(target)
+            local_correct += int(is_correct)
+            local_total += 1
+            sample_is_correct = sample_is_correct and is_correct
+
+            if logits.numel() > 1 and (float(margin_weight) > 0.0 or float(route_margin) > 0.0):
+                negative_mask = torch.ones_like(logits, dtype=torch.bool)
+                negative_mask[int(target)] = False
+                negative_lse = torch.logsumexp(logits[negative_mask], dim=0)
+                margin_loss = F.softplus(negative_lse - logits[int(target)] + float(route_margin))
+                local_margin_losses.append(margin_loss)
+                margin_losses_all.append(margin_loss)
+
+        path_correct += int(sample_is_correct)
+        local_tensor = torch.stack(local_losses)
+        mean_local = local_tensor.mean()
+        temperature = float(bottleneck_temperature)
+        smooth_worst = temperature * (
+            torch.logsumexp(local_tensor / temperature, dim=0)
+            - torch.log(torch.tensor(float(local_tensor.numel()), device=local_tensor.device))
+        )
+        sample_loss = (
+            (1.0 - float(bottleneck_weight)) * mean_local
+            + float(bottleneck_weight) * smooth_worst
+        )
+        if local_margin_losses and float(margin_weight) > 0.0:
+            sample_loss = sample_loss + float(margin_weight) * torch.stack(local_margin_losses).mean()
+        sample_losses.append(sample_loss)
+
+    if not sample_losses:
+        raise ValueError("Sparse path bottleneck loss received no valid path decisions")
+
+    loss = torch.stack(sample_losses).mean()
+    mean_local_loss = torch.stack(local_losses_all).mean()
+    mean_margin_loss = (
+        torch.stack(margin_losses_all).mean()
+        if margin_losses_all
+        else loss.detach().new_zeros(())
+    )
+    return loss, {
+        "loss": float(loss.detach().cpu()),
+        "mean_local_loss": float(mean_local_loss.detach().cpu()),
+        "mean_margin_loss": float(mean_margin_loss.detach().cpu()),
+        "local_acc": local_correct / max(1, local_total),
+        "path_acc": path_correct / max(1, len(sample_losses)),
+        "num_samples": len(sample_losses),
+        "num_decisions": local_total,
+    }
+
+
 def ms_loss_level(
     sim_mat: torch.Tensor,
     labels: torch.Tensor,
