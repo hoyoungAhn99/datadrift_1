@@ -63,7 +63,7 @@ image_adapter:
 positive_training:
   enabled: true
   epochs: 20
-  batch_size: 1024
+  batch_size: 512
   parents_per_step: 4
   lr: 0.001
   weight_decay: 0.0001
