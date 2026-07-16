@@ -48,11 +48,14 @@ def load_config(path):
     image_adapter_cfg = cfg.get("image_adapter", cfg.get("image_adaptation", {}))
     train_cfg = cfg.get("positive_training", {})
     loss_cfg = train_cfg.get("loss", {})
+    validation_cfg = train_cfg.get("validation", {})
     inference_cfg = cfg.get("inference", {})
 
     experiment_name = experiment_cfg.get("name", "idea3")
     output_root = experiment_cfg.get("output_root", "outputs")
     checkpoint = train_cfg.get("checkpoint") or str(Path(output_root) / "checkpoints" / f"{experiment_name}-positive.pt")
+    checkpoint_path = Path(checkpoint)
+    default_last_checkpoint = checkpoint_path.with_name(f"{checkpoint_path.stem}-last{checkpoint_path.suffix}")
     result_path = train_cfg.get("result_path") or str(Path(output_root) / "results" / f"{experiment_name}-positive_child_only.result")
     diagnostics_path = train_cfg.get("diagnostics_path") or str(Path(output_root) / "diagnostics" / f"{experiment_name}-positive-diagnostics.json")
 
@@ -96,6 +99,16 @@ def load_config(path):
         loss_margin_weight=float(loss_cfg.get("margin_weight", 0.25)),
         eval_after_training=bool(train_cfg.get("eval_after_training", True)),
         eval_inference_mode=train_cfg.get("eval_mode", inference_cfg.get("mode", "positive_child_only")),
+        validation_enabled=bool(validation_cfg.get("enabled", False)),
+        validation_every_n_epochs=max(1, int(validation_cfg.get("every_n_epochs", 1))),
+        validation_start_epoch=max(1, int(validation_cfg.get("start_epoch", 1))),
+        validation_inference_mode=validation_cfg.get(
+            "mode",
+            train_cfg.get("eval_mode", inference_cfg.get("mode", "positive_child_only")),
+        ),
+        validation_metric=validation_cfg.get("metric", "balanced_acc"),
+        validation_save_best=bool(validation_cfg.get("save_best", True)),
+        last_checkpoint=str(validation_cfg.get("last_checkpoint", default_last_checkpoint)),
         inference_batch_size=int(inference_cfg.get("batch_size", 1024)),
         inference_tau=float(inference_cfg.get("tau", 1.0)),
         checkpoint=checkpoint,
@@ -626,10 +639,26 @@ def parse_args():
     return load_config(parser.parse_args().config)
 
 
+def state_dict_to_cpu(module: torch.nn.Module) -> dict[str, torch.Tensor]:
+    return {
+        key: value.detach().cpu().clone()
+        for key, value in module.state_dict().items()
+    }
+
+
 @torch.no_grad()
-def evaluate_positive(args, hierarchy, learner, image_adapter, features_dir: Path, device: str) -> dict:
+def evaluate_positive(
+    args,
+    hierarchy,
+    learner,
+    image_adapter,
+    features_dir: Path,
+    device: str,
+    split_names: tuple[str, ...] = ("val", "ood"),
+    eval_mode: str | None = None,
+) -> dict:
     dists_mats = make_distance_mats(hierarchy)
-    eval_mode = args.eval_inference_mode
+    eval_mode = eval_mode or args.eval_inference_mode
     semantic_index = build_idea3_semantic_index(hierarchy, learner, mode=eval_mode)
     image_adapter.eval()
     results = {
@@ -637,7 +666,7 @@ def evaluate_positive(args, hierarchy, learner, image_adapter, features_dir: Pat
         "mode": eval_mode,
         "hierarchy_id_node_list": list(hierarchy.id_node_list),
     }
-    for split_name in ["val", "ood"]:
+    for split_name in split_names:
         payload = load_feature_file(features_dir / f"{split_name}-features.pt")
         preds = []
         stop_depth_counts = {}
@@ -669,7 +698,8 @@ def evaluate_positive(args, hierarchy, learner, image_adapter, features_dir: Pat
                 "stop_node_counts": dict(sorted(stop_node_counts.items(), key=lambda x: x[1], reverse=True)),
             },
         }
-    results["mixed"] = mixed_summary(results["val"]["metrics"], results["ood"]["metrics"])
+    if "val" in results and "ood" in results:
+        results["mixed"] = mixed_summary(results["val"]["metrics"], results["ood"]["metrics"])
     return results
 
 
@@ -759,6 +789,15 @@ def main():
         )
     else:
         n_per_parent = max(1, args.batch_size // max(1, args.parents_per_step))
+
+    if args.validation_metric not in {"balanced_acc", "balanced_hdist"}:
+        raise ValueError(
+            "positive_training.validation.metric must be one of: balanced_acc, balanced_hdist"
+        )
+    best_validation_score = float("-inf")
+    best_validation = None
+    best_positive_state = None
+    best_adapter_state = None
 
     for epoch in range(1, args.epochs + 1):
         learner.train()
@@ -913,9 +952,50 @@ def main():
             })
         else:
             epoch_stats["depth_acc" if use_depth_global else "local_acc"] = epoch_acc / max(1, steps)
+
+        validation_due = (
+            args.validation_enabled
+            and epoch >= args.validation_start_epoch
+            and (epoch - args.validation_start_epoch) % args.validation_every_n_epochs == 0
+        )
+        is_best_epoch = False
+        if validation_due:
+            validation_result = evaluate_positive(
+                args,
+                hierarchy,
+                learner,
+                image_adapter,
+                features_dir,
+                device,
+                split_names=("val",),
+                eval_mode=args.validation_inference_mode,
+            )
+            val_metrics = validation_result["val"]["metrics"]
+            val_bacc = float(val_metrics["balanced_acc"])
+            val_bmhd = float(val_metrics["balanced_hdist"])
+            epoch_stats.update({
+                "val_balanced_acc": val_bacc,
+                "val_balanced_hdist": val_bmhd,
+                "val_inference_mode": args.validation_inference_mode,
+            })
+            validation_score = val_bacc if args.validation_metric == "balanced_acc" else -val_bmhd
+            if validation_score > best_validation_score:
+                best_validation_score = validation_score
+                best_validation = {
+                    "epoch": epoch,
+                    "metric": args.validation_metric,
+                    "score": val_bacc if args.validation_metric == "balanced_acc" else val_bmhd,
+                    "val_balanced_acc": val_bacc,
+                    "val_balanced_hdist": val_bmhd,
+                    "inference_mode": args.validation_inference_mode,
+                }
+                best_positive_state = state_dict_to_cpu(learner)
+                best_adapter_state = state_dict_to_cpu(image_adapter)
+                is_best_epoch = True
+
         history.append(epoch_stats)
         if use_sparse_path:
-            print(
+            message = (
                 f"epoch {epoch}: loss={epoch_stats['loss']:.6f}, "
                 f"path_acc={epoch_stats['path_acc']:.6f}, "
                 f"local_acc={epoch_stats['local_acc']:.6f}, "
@@ -923,9 +1003,76 @@ def main():
             )
         else:
             acc_key = "depth_acc" if use_depth_global else "local_acc"
-            print(f"epoch {epoch}: loss={epoch_stats['loss']:.6f}, {acc_key}={epoch_stats[acc_key]:.6f}")
+            message = f"epoch {epoch}: loss={epoch_stats['loss']:.6f}, {acc_key}={epoch_stats[acc_key]:.6f}"
+        if validation_due:
+            message += (
+                f", val_bacc={epoch_stats['val_balanced_acc']:.6f}, "
+                f"val_bmhd={epoch_stats['val_balanced_hdist']:.6f}"
+            )
+            if is_best_epoch:
+                message += " [best]"
+        print(message)
 
-    metrics = {"train_history": history, "soft_prompt_smoke": smoke}
+        if is_best_epoch and args.validation_save_best:
+            save_idea3_checkpoint(
+                args.checkpoint,
+                stage="positive",
+                dataset=args.dataset,
+                clip_model=args.clip_model,
+                hierarchy=args.hierarchy,
+                id_split=args.id_split,
+                prompt_config=prompt_cfg.to_dict(),
+                positive_state_dict=best_positive_state,
+                image_adapter_config=adapter_cfg.to_dict(),
+                image_adapter_state_dict=best_adapter_state,
+                metrics={
+                    "train_history": history,
+                    "soft_prompt_smoke": smoke,
+                    "best_validation": best_validation,
+                },
+                args=vars(args),
+            )
+            print(f"saved best checkpoint: {args.checkpoint}")
+
+    metrics = {
+        "train_history": history,
+        "soft_prompt_smoke": smoke,
+        "best_validation": best_validation,
+    }
+
+    if args.validation_enabled:
+        last_ckpt_path = save_idea3_checkpoint(
+            args.last_checkpoint,
+            stage="positive",
+            dataset=args.dataset,
+            clip_model=args.clip_model,
+            hierarchy=args.hierarchy,
+            id_split=args.id_split,
+            prompt_config=prompt_cfg.to_dict(),
+            positive_state_dict=learner.state_dict(),
+            image_adapter_config=adapter_cfg.to_dict(),
+            image_adapter_state_dict=image_adapter.state_dict(),
+            metrics=metrics,
+            args=vars(args),
+        )
+        print(f"saved last checkpoint: {last_ckpt_path}")
+
+        if best_positive_state is None or best_adapter_state is None:
+            best_positive_state = state_dict_to_cpu(learner)
+            best_adapter_state = state_dict_to_cpu(image_adapter)
+            best_validation = {
+                "epoch": args.epochs,
+                "metric": args.validation_metric,
+                "score": None,
+                "val_balanced_acc": None,
+                "val_balanced_hdist": None,
+                "inference_mode": args.validation_inference_mode,
+            }
+            metrics["best_validation"] = best_validation
+        learner.load_state_dict(best_positive_state)
+        image_adapter.load_state_dict(best_adapter_state)
+        print(f"restored best epoch: {best_validation['epoch']}")
+
     result = None
     if args.eval_after_training:
         result = evaluate_positive(args, hierarchy, learner, image_adapter, features_dir, device)
@@ -956,7 +1103,10 @@ def main():
         args=vars(args),
     )
     save_json(args.diagnostics_path, metrics)
-    print(f"saved checkpoint: {ckpt_path}")
+    if args.validation_enabled:
+        print(f"saved best checkpoint: {ckpt_path}")
+    else:
+        print(f"saved checkpoint: {ckpt_path}")
     print(f"saved diagnostics: {args.diagnostics_path}")
 
 
