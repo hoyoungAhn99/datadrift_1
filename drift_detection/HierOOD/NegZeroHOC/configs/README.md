@@ -28,3 +28,7 @@ Only `04_joint_vision_lora/` modifies the actual CLIP vision transformer.
 The joint trainer validates every configured interval and runs final inference
 automatically. The separate inference command regenerates the metrics from the
 compact positive-prompt and Vision-LoRA checkpoint without retraining.
+
+`idea3_fgvc_aircraft_b16_joint_vision_lora_global_depth.yaml` is the GPU 1
+parent-context ablation. It inherits the main joint experiment and changes only
+the prompt ablation, GPU, experiment name, and output paths.

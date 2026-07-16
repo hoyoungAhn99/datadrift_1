@@ -18,7 +18,7 @@ clip:
   tokenizer_model: openai/clip-vit-base-patch32
   local_files_only: true
   freeze_text_encoder: true
-  freeze_image_encoder: false
+  freeze_image_encoder: true
 
 dataloader:
   num_workers: 4

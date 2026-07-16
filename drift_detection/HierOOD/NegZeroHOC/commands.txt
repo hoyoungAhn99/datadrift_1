@@ -21,3 +21,7 @@ python scripts\infer_idea3.py --config configs\03_sparse_path\idea3_inat19_spars
 # Main direct joint experiment: raw images + true CLIP Vision LoRA + positive prompts
 python scripts\train_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora.yaml
 python scripts\infer_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora.yaml
+
+# GPU 1 parent-context ablation: global + depth prompts only
+python scripts\train_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_global_depth.yaml
+python scripts\infer_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_global_depth.yaml
