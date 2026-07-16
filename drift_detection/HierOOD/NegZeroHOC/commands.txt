@@ -6,5 +6,12 @@ python scripts\infer_idea3.py --config configs\idea3_fgvc_aircraft.yaml --mode p
 python scripts\train_idea3_positive_prompts.py --config configs\idea3_fgvc_aircraft_b16_sparse_path.yaml
 python scripts\infer_idea3.py --config configs\idea3_fgvc_aircraft_b16_sparse_path.yaml --mode positive_global_path
 
+python scripts\train_idea3_positive_prompts.py --config configs\idea3_fgvc_aircraft_b16_sparse_path_linear.yaml
+python scripts\train_idea3_positive_prompts.py --config configs\idea3_fgvc_aircraft_b16_sparse_path_mlp.yaml
+python scripts\train_idea3_positive_prompts.py --config configs\idea3_fgvc_aircraft_b16_sparse_path_lora.yaml
+python scripts\infer_idea3.py --config configs\idea3_fgvc_aircraft_b16_sparse_path_linear.yaml --mode positive_global_path
+python scripts\infer_idea3.py --config configs\idea3_fgvc_aircraft_b16_sparse_path_mlp.yaml --mode positive_global_path
+python scripts\infer_idea3.py --config configs\idea3_fgvc_aircraft_b16_sparse_path_lora.yaml --mode positive_global_path
+
 python scripts\train_idea3_positive_prompts.py --config configs\idea3_inat19_sparse_path.yaml
 python scripts\infer_idea3.py --config configs\idea3_inat19_sparse_path.yaml --mode positive_global_path
