@@ -462,6 +462,7 @@ def backward_sparse_path_bottleneck_streaming(
     image_adapter,
     raw_image_features: torch.Tensor,
     leaf_nodes: list[str],
+    grad_scaler=None,
 ) -> dict:
     """Backpropagate exact bottleneck-path gradients one parent at a time.
 
@@ -615,7 +616,10 @@ def backward_sparse_path_bottleneck_streaming(
             sample_correct[sample_index] = sample_correct[sample_index] and (
                 int(predictions[row]) == int(target_tensor[row])
             )
-        weighted_loss.backward()
+        if grad_scaler is not None and grad_scaler.is_enabled():
+            grad_scaler.scale(weighted_loss).backward()
+        else:
+            weighted_loss.backward()
 
     if adapted_features.requires_grad and feature_leaf.grad is not None:
         adapted_features.backward(feature_leaf.grad)

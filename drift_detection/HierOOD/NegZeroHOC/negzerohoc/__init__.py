@@ -14,4 +14,5 @@ __all__ = [
     "semantic_index",
     "soft_prompting",
     "training_data",
+    "vision_lora",
 ]

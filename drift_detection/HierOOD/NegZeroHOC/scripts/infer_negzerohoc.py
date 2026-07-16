@@ -7,7 +7,6 @@ import sys
 from pathlib import Path
 
 import torch
-import yaml
 
 try:
     from tqdm.auto import tqdm
@@ -19,6 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from negzerohoc.clip_backend import ClipBackend, safe_model_name
+from negzerohoc.config_utils import load_yaml_config
 from negzerohoc.evaluation import (
     build_hierarchy,
     evaluate_split,
@@ -32,8 +32,7 @@ from negzerohoc.semantic_index import build_semantic_index
 
 
 def load_config(path):
-    with Path(path).open("r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f) or {}
+    cfg = load_yaml_config(path)
     dataset_cfg = cfg.get("dataset", {})
     runtime_cfg = cfg.get("runtime", {})
     clip_cfg = cfg.get("clip", {})

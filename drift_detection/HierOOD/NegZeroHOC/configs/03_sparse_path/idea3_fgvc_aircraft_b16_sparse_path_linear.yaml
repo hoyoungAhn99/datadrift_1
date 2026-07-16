@@ -26,4 +26,3 @@ unknown_training:
 inference:
   positive_checkpoint: outputs/checkpoints/idea3-fgvc-aircraft-b16-sparse-path-linear-positive.pt
   unknown_checkpoint: outputs/checkpoints/idea3-fgvc-aircraft-b16-sparse-path-linear-parent_unknown.pt
-

@@ -1,4 +1,4 @@
-base_config: idea3_fgvc_aircraft_b16.yaml
+base_config: ../02_idea3_cached_prompt/idea3_fgvc_aircraft_b16.yaml
 
 experiment:
   name: idea3-fgvc-aircraft-b16-sparse-path

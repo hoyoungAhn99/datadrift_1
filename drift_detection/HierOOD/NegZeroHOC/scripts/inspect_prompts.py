@@ -5,12 +5,11 @@ from argparse import Namespace
 import sys
 from pathlib import Path
 
-import yaml
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
+from negzerohoc.config_utils import load_yaml_config
 from negzerohoc.evaluation import build_hierarchy
 from negzerohoc.prompts import (
     build_positive_prompts,
@@ -23,8 +22,7 @@ from negzerohoc.prompts import (
 
 
 def load_config(path):
-    with Path(path).open("r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f) or {}
+    cfg = load_yaml_config(path)
     dataset_cfg = cfg.get("dataset", {})
     inspect_cfg = cfg.get("prompt_inspection", {})
     inference_cfg = cfg.get("inference", {})

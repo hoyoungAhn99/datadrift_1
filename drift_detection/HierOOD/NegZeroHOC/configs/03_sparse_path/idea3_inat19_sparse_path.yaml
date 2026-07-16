@@ -1,4 +1,4 @@
-base_config: idea3_inat19.yaml
+base_config: ../02_idea3_cached_prompt/idea3_inat19.yaml
 
 experiment:
   name: idea3-inat19-b16-sparse-path

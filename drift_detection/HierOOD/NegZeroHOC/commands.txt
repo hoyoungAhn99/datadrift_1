@@ -1,17 +1,23 @@
-python scripts\extract_clip_features.py --config configs\idea3_fgvc_aircraft.yaml
-python scripts\train_feature_probe.py --config configs\fgvc_aircraft_clip_feature_probe.yaml
-python scripts\train_idea3_positive_prompts.py --config configs\idea3_fgvc_aircraft.yaml
-python scripts\infer_idea3.py --config configs\idea3_fgvc_aircraft.yaml --mode positive_child_only
+# Cached CLIP feature extraction and probes
+python scripts\extract_clip_features.py --config configs\02_idea3_cached_prompt\idea3_fgvc_aircraft.yaml
+python scripts\train_feature_probe.py --config configs\01_feature_probes\fgvc_aircraft_clip_feature_probe.yaml
 
-python scripts\train_idea3_positive_prompts.py --config configs\idea3_fgvc_aircraft_b16_sparse_path.yaml
-python scripts\infer_idea3.py --config configs\idea3_fgvc_aircraft_b16_sparse_path.yaml --mode positive_global_path
+# Idea 3 cached-feature prompt learning
+python scripts\train_idea3_positive_prompts.py --config configs\02_idea3_cached_prompt\idea3_fgvc_aircraft.yaml
+python scripts\infer_idea3.py --config configs\02_idea3_cached_prompt\idea3_fgvc_aircraft.yaml --mode positive_child_only
 
-python scripts\train_idea3_positive_prompts.py --config configs\idea3_fgvc_aircraft_b16_sparse_path_linear.yaml
-python scripts\train_idea3_positive_prompts.py --config configs\idea3_fgvc_aircraft_b16_sparse_path_mlp.yaml
-python scripts\train_idea3_positive_prompts.py --config configs\idea3_fgvc_aircraft_b16_sparse_path_lora.yaml
-python scripts\infer_idea3.py --config configs\idea3_fgvc_aircraft_b16_sparse_path_linear.yaml --mode positive_global_path
-python scripts\infer_idea3.py --config configs\idea3_fgvc_aircraft_b16_sparse_path_mlp.yaml --mode positive_global_path
-python scripts\infer_idea3.py --config configs\idea3_fgvc_aircraft_b16_sparse_path_lora.yaml --mode positive_global_path
+# Sparse-path cached-feature experiments
+python scripts\train_idea3_positive_prompts.py --config configs\03_sparse_path\idea3_fgvc_aircraft_b16_sparse_path.yaml
+python scripts\infer_idea3.py --config configs\03_sparse_path\idea3_fgvc_aircraft_b16_sparse_path.yaml --mode positive_global_path
+python scripts\train_idea3_positive_prompts.py --config configs\03_sparse_path\idea3_fgvc_aircraft_b16_sparse_path_linear.yaml
+python scripts\train_idea3_positive_prompts.py --config configs\03_sparse_path\idea3_fgvc_aircraft_b16_sparse_path_mlp.yaml
+python scripts\train_idea3_positive_prompts.py --config configs\03_sparse_path\idea3_fgvc_aircraft_b16_sparse_path_lora.yaml
+python scripts\infer_idea3.py --config configs\03_sparse_path\idea3_fgvc_aircraft_b16_sparse_path_linear.yaml --mode positive_global_path
+python scripts\infer_idea3.py --config configs\03_sparse_path\idea3_fgvc_aircraft_b16_sparse_path_mlp.yaml --mode positive_global_path
+python scripts\infer_idea3.py --config configs\03_sparse_path\idea3_fgvc_aircraft_b16_sparse_path_lora.yaml --mode positive_global_path
+python scripts\train_idea3_positive_prompts.py --config configs\03_sparse_path\idea3_inat19_sparse_path.yaml
+python scripts\infer_idea3.py --config configs\03_sparse_path\idea3_inat19_sparse_path.yaml --mode positive_global_path
 
-python scripts\train_idea3_positive_prompts.py --config configs\idea3_inat19_sparse_path.yaml
-python scripts\infer_idea3.py --config configs\idea3_inat19_sparse_path.yaml --mode positive_global_path
+# Main direct joint experiment: raw images + true CLIP Vision LoRA + positive prompts
+python scripts\train_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora.yaml
+python scripts\infer_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora.yaml

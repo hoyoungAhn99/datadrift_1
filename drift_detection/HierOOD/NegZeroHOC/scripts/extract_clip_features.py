@@ -6,7 +6,6 @@ import sys
 from pathlib import Path
 
 import torch
-import yaml
 from torch.utils.data import DataLoader, Dataset
 
 
@@ -14,6 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from negzerohoc.clip_backend import ClipBackend, safe_model_name
+from negzerohoc.config_utils import load_yaml_config
 from negzerohoc.evaluation import build_hierarchy
 from negzerohoc.feature_io import ensure_dir, save_feature_file, save_json
 from negzerohoc.runtime import configured_device
@@ -47,8 +47,7 @@ def collate_pil(batch):
 
 
 def load_config(path):
-    with Path(path).open("r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f) or {}
+    cfg = load_yaml_config(path)
     dataset_cfg = cfg.get("dataset", {})
     runtime_cfg = cfg.get("runtime", {})
     clip_cfg = cfg.get("clip", {})
