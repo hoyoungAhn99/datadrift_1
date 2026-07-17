@@ -25,3 +25,11 @@ python scripts\infer_idea3_joint_vision_lora.py --config configs\04_joint_vision
 # GPU 1 parent-context ablation: global + depth prompts only
 python scripts\train_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_global_depth.yaml
 python scripts\infer_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_global_depth.yaml
+
+# Two-GPU follow-up: weak fine-grained augmentation on GPU 0
+python scripts\train_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_weak_aug.yaml
+python scripts\infer_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_weak_aug.yaml
+
+# Two-GPU follow-up: higher-capacity Vision LoRA on GPU 1
+python scripts\train_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_r16_qkvo.yaml
+python scripts\infer_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_r16_qkvo.yaml
