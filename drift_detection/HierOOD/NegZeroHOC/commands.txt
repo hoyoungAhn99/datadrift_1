@@ -37,3 +37,7 @@ python scripts\infer_idea3_joint_vision_lora.py --config configs\04_joint_vision
 # Controlled follow-up: higher-capacity Vision LoRA with batch 16 on GPU 0
 python scripts\train_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_r16_qkvo_b16.yaml
 python scripts\infer_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_r16_qkvo_b16.yaml
+
+# iNaturalist19: same Rank-16 q/k/v/out joint setting with batch 16 on GPU 0
+python scripts\train_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_inat19_b16_joint_vision_lora_r16_qkvo_b16.yaml
+python scripts\infer_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_inat19_b16_joint_vision_lora_r16_qkvo_b16.yaml
