@@ -33,3 +33,7 @@ python scripts\infer_idea3_joint_vision_lora.py --config configs\04_joint_vision
 # Two-GPU follow-up: higher-capacity Vision LoRA on GPU 1
 python scripts\train_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_r16_qkvo.yaml
 python scripts\infer_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_r16_qkvo.yaml
+
+# Controlled follow-up: higher-capacity Vision LoRA with batch 16 on GPU 0
+python scripts\train_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_r16_qkvo_b16.yaml
+python scripts\infer_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_r16_qkvo_b16.yaml
