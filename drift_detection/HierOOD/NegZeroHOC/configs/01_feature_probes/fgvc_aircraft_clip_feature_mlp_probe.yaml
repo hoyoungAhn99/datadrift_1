@@ -27,7 +27,7 @@ feature_extraction:
   skip_train: false
 
 features:
-  dir: outputs/features/fgvc-aircraft/clip_openai_clip-vit-base-patch32
+  dir: outputs/shared/features/fgvc-aircraft/clip_openai_clip-vit-base-patch32
 
 linear_probe:
   name: fgvc-aircraft-clip-mlp-leaf-probe
@@ -42,6 +42,6 @@ linear_probe:
   weight_decay: 0.0001
   eval_every: 1
   eval_batch_size: 4096
-  checkpoint: outputs/checkpoints/fgvc-aircraft-clip-mlp-leaf-probe.pt
-  result_path: outputs/results/fgvc-aircraft-clip-mlp-leaf-probe.result
-  diagnostics_path: outputs/diagnostics/fgvc-aircraft-clip-mlp-leaf-probe.json
+  checkpoint: outputs/experiments/fgvc-aircraft-clip-mlp-leaf-probe/checkpoints/fgvc-aircraft-clip-mlp-leaf-probe.pt
+  result_path: outputs/experiments/fgvc-aircraft-clip-mlp-leaf-probe/results/fgvc-aircraft-clip-mlp-leaf-probe.result
+  diagnostics_path: outputs/experiments/fgvc-aircraft-clip-mlp-leaf-probe/diagnostics/fgvc-aircraft-clip-mlp-leaf-probe.json

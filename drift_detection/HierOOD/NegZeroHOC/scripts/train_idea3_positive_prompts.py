@@ -31,6 +31,7 @@ from negzerohoc.losses import (
     prompt_metric_loss,
     sparse_path_bottleneck_loss,
 )
+from negzerohoc.output_layout import resolve_experiment_artifact, resolve_shared_feature_dir
 from negzerohoc.prompt_models import HierPromptConfig, PositivePromptLearner
 from negzerohoc.runtime import available_device, configured_device
 from negzerohoc.soft_prompting import SoftPromptTextEncoder, soft_prompt_smoke_test
@@ -53,11 +54,36 @@ def load_config(path):
 
     experiment_name = experiment_cfg.get("name", "idea3")
     output_root = experiment_cfg.get("output_root", "outputs")
-    checkpoint = train_cfg.get("checkpoint") or str(Path(output_root) / "checkpoints" / f"{experiment_name}-positive.pt")
+    checkpoint = resolve_experiment_artifact(
+        train_cfg.get("checkpoint"),
+        output_root=output_root,
+        experiment_name=experiment_name,
+        kind="checkpoints",
+        default_filename=f"{experiment_name}-positive.pt",
+    )
     checkpoint_path = Path(checkpoint)
     default_last_checkpoint = checkpoint_path.with_name(f"{checkpoint_path.stem}-last{checkpoint_path.suffix}")
-    result_path = train_cfg.get("result_path") or str(Path(output_root) / "results" / f"{experiment_name}-positive_child_only.result")
-    diagnostics_path = train_cfg.get("diagnostics_path") or str(Path(output_root) / "diagnostics" / f"{experiment_name}-positive-diagnostics.json")
+    result_path = resolve_experiment_artifact(
+        train_cfg.get("result_path"),
+        output_root=output_root,
+        experiment_name=experiment_name,
+        kind="results",
+        default_filename=f"{experiment_name}-positive_child_only.result",
+    )
+    diagnostics_path = resolve_experiment_artifact(
+        train_cfg.get("diagnostics_path"),
+        output_root=output_root,
+        experiment_name=experiment_name,
+        kind="diagnostics",
+        default_filename=f"{experiment_name}-positive-diagnostics.json",
+    )
+    last_checkpoint = resolve_experiment_artifact(
+        validation_cfg.get("last_checkpoint"),
+        output_root=output_root,
+        experiment_name=experiment_name,
+        kind="checkpoints",
+        default_filename=default_last_checkpoint.name,
+    )
 
     return Namespace(
         config=str(path),
@@ -69,7 +95,10 @@ def load_config(path):
         id_split=dataset_cfg.get("id_split", "data/fgvc-aircraft-id-labels.csv"),
         clip_model=clip_cfg.get("model", "openai/clip-vit-base-patch32"),
         local_files_only=bool(clip_cfg.get("local_files_only", True)),
-        features_dir=features_cfg.get("dir") or inference_cfg.get("features_dir"),
+        features_dir=str(resolve_shared_feature_dir(
+            features_cfg.get("dir") or inference_cfg.get("features_dir"),
+            output_root=output_root,
+        )) if features_cfg.get("dir") or inference_cfg.get("features_dir") else None,
         device=configured_device(runtime_cfg),
         seed=int(runtime_cfg.get("seed", 0)),
         prompt=prompt_cfg,
@@ -108,12 +137,12 @@ def load_config(path):
         ),
         validation_metric=validation_cfg.get("metric", "balanced_acc"),
         validation_save_best=bool(validation_cfg.get("save_best", True)),
-        last_checkpoint=str(validation_cfg.get("last_checkpoint", default_last_checkpoint)),
+        last_checkpoint=str(last_checkpoint),
         inference_batch_size=int(inference_cfg.get("batch_size", 1024)),
         inference_tau=float(inference_cfg.get("tau", 1.0)),
-        checkpoint=checkpoint,
-        result_path=result_path,
-        diagnostics_path=diagnostics_path,
+        checkpoint=str(checkpoint),
+        result_path=str(result_path),
+        diagnostics_path=str(diagnostics_path),
     )
 
 

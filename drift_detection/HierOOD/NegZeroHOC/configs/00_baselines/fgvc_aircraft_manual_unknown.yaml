@@ -35,7 +35,7 @@ feature_extraction:
 
 inference:
   mode: manual_unknown
-  features_dir: outputs/features/fgvc-aircraft/clip_openai_clip-vit-base-patch32
+  features_dir: outputs/shared/features/fgvc-aircraft/clip_openai_clip-vit-base-patch32
   batch_size: 1024
   allow_root_unknown: false
   tau: 1.0

@@ -28,6 +28,7 @@ from negzerohoc.evaluation import (
 )
 from negzerohoc.feature_io import ensure_dir, load_feature_file, save_json
 from negzerohoc.inference import predict_features
+from negzerohoc.output_layout import experiment_artifact_path, resolve_shared_feature_dir
 from negzerohoc.prompts import build_positive_prompts, infer_node_role, node_path_names
 from negzerohoc.runtime import available_device, configured_device
 from negzerohoc.semantic_index import build_semantic_index
@@ -42,21 +43,26 @@ def load_config(path: str | Path) -> dict:
     inference_cfg = cfg.get("inference", {})
     experiment_cfg = cfg.get("experiment", {})
 
-    features_dir = inference_cfg.get("features_dir")
+    output_root = experiment_cfg.get("output_root", "outputs")
+    features_dir = resolve_shared_feature_dir(
+        inference_cfg.get("features_dir"),
+        output_root=output_root,
+    )
     if not features_dir:
         raise ValueError(f"Missing inference.features_dir in {path}")
 
     return {
         "config": str(path),
+        "experiment_name": experiment_cfg.get("name", "child-only-diagnostics"),
         "dataset": dataset_cfg.get("name", "fgvc-aircraft"),
         "hierarchy": dataset_cfg.get("hierarchy", "hierarchies/fgvc-aircraft.json"),
         "id_split": dataset_cfg.get("id_split", "data/fgvc-aircraft-id-labels.csv"),
-        "features_dir": features_dir,
+        "features_dir": str(features_dir),
         "clip_model": clip_cfg.get("model", "openai/clip-vit-base-patch32"),
         "local_files_only": clip_cfg.get("local_files_only", True),
         "device": configured_device(runtime_cfg),
         "batch_size": int(inference_cfg.get("batch_size", 1024)),
-        "outdir": experiment_cfg.get("output_root", "outputs"),
+        "outdir": output_root,
     }
 
 
@@ -67,7 +73,7 @@ def parse_args():
     parser.add_argument(
         "--out",
         default=None,
-        help="Optional output JSON path. Defaults to outputs/diagnostics/<dataset>-child-only-diagnostics.json.",
+        help="Optional output JSON path. Defaults to the experiment diagnostics directory.",
     )
     return parser.parse_args()
 
@@ -368,7 +374,12 @@ def main():
         out_path = Path(cli_args.out)
     else:
         model_key = safe_model_name(cfg["clip_model"])
-        out_path = Path(cfg["outdir"]) / "diagnostics" / f"{cfg['dataset']}-clip_{model_key}-{cli_args.split}-child-only-diagnostics.json"
+        out_path = experiment_artifact_path(
+            cfg["outdir"],
+            cfg["experiment_name"],
+            "diagnostics",
+            f"{cfg['dataset']}-clip_{model_key}-{cli_args.split}-child-only-diagnostics.json",
+        )
 
     ensure_dir(out_path.parent)
     save_json(out_path, diagnostics)

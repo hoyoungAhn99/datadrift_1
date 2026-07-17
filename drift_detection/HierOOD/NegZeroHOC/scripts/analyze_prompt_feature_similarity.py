@@ -17,6 +17,7 @@ from diagnose_child_only import encode_leaf_text_features, load_config, path_edg
 from negzerohoc.clip_backend import ClipBackend, safe_model_name
 from negzerohoc.evaluation import build_hierarchy, node_labels_from_feature_targets
 from negzerohoc.feature_io import ensure_dir, load_feature_file, save_json
+from negzerohoc.output_layout import experiment_artifact_path
 from negzerohoc.runtime import available_device
 from negzerohoc.semantic_index import build_semantic_index
 
@@ -329,7 +330,12 @@ def main():
         out_path = Path(args.out)
     else:
         model_key = safe_model_name(cfg["clip_model"])
-        out_path = Path(cfg["outdir"]) / "diagnostics" / f"{cfg['dataset']}-clip_{model_key}-{args.split}-prompt-feature-similarity.json"
+        out_path = experiment_artifact_path(
+            cfg["outdir"],
+            cfg["experiment_name"],
+            "diagnostics",
+            f"{cfg['dataset']}-clip_{model_key}-{args.split}-prompt-feature-similarity.json",
+        )
 
     ensure_dir(out_path.parent)
     save_json(out_path, output)

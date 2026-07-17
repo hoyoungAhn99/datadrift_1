@@ -26,6 +26,7 @@ from negzerohoc.feature_io import ensure_dir, load_feature_file, save_json
 from negzerohoc.image_adapters import build_image_adapter
 from negzerohoc.idea3_inference import build_idea3_semantic_index, predict_features_idea3
 from negzerohoc.losses import unknown_ce_loss, unknown_regularization
+from negzerohoc.output_layout import resolve_experiment_artifact, resolve_shared_feature_dir
 from negzerohoc.prompt_models import HierPromptConfig, PositivePromptLearner, UnknownPromptLearner
 from negzerohoc.runtime import available_device, configured_device
 from negzerohoc.soft_prompting import SoftPromptTextEncoder
@@ -50,11 +51,34 @@ def load_config(path):
 
     experiment_name = experiment_cfg.get("name", "idea3")
     output_root = experiment_cfg.get("output_root", "outputs")
-    default_positive = str(Path(output_root) / "checkpoints" / f"{experiment_name}-positive.pt")
-    positive_checkpoint = unknown_cfg.get("positive_checkpoint") or inference_cfg.get("positive_checkpoint") or default_positive
-    checkpoint = unknown_cfg.get("checkpoint") or str(Path(output_root) / "checkpoints" / f"{experiment_name}-parent_unknown.pt")
-    result_path = unknown_cfg.get("result_path") or str(Path(output_root) / "results" / f"{experiment_name}-parent_unknown.result")
-    diagnostics_path = unknown_cfg.get("diagnostics_path") or str(Path(output_root) / "diagnostics" / f"{experiment_name}-unknown-diagnostics.json")
+    positive_checkpoint = resolve_experiment_artifact(
+        unknown_cfg.get("positive_checkpoint") or inference_cfg.get("positive_checkpoint"),
+        output_root=output_root,
+        experiment_name=experiment_name,
+        kind="checkpoints",
+        default_filename=f"{experiment_name}-positive.pt",
+    )
+    checkpoint = resolve_experiment_artifact(
+        unknown_cfg.get("checkpoint"),
+        output_root=output_root,
+        experiment_name=experiment_name,
+        kind="checkpoints",
+        default_filename=f"{experiment_name}-parent_unknown.pt",
+    )
+    result_path = resolve_experiment_artifact(
+        unknown_cfg.get("result_path"),
+        output_root=output_root,
+        experiment_name=experiment_name,
+        kind="results",
+        default_filename=f"{experiment_name}-parent_unknown.result",
+    )
+    diagnostics_path = resolve_experiment_artifact(
+        unknown_cfg.get("diagnostics_path"),
+        output_root=output_root,
+        experiment_name=experiment_name,
+        kind="diagnostics",
+        default_filename=f"{experiment_name}-unknown-diagnostics.json",
+    )
 
     return Namespace(
         config=str(path),
@@ -66,7 +90,10 @@ def load_config(path):
         id_split=dataset_cfg.get("id_split", "data/fgvc-aircraft-id-labels.csv"),
         clip_model=clip_cfg.get("model", "openai/clip-vit-base-patch32"),
         local_files_only=bool(clip_cfg.get("local_files_only", True)),
-        features_dir=features_cfg.get("dir") or inference_cfg.get("features_dir"),
+        features_dir=str(resolve_shared_feature_dir(
+            features_cfg.get("dir") or inference_cfg.get("features_dir"),
+            output_root=output_root,
+        )) if features_cfg.get("dir") or inference_cfg.get("features_dir") else None,
         device=configured_device(runtime_cfg),
         seed=int(runtime_cfg.get("seed", 0)),
         epochs=int(unknown_cfg.get("epochs", 20)),
@@ -82,10 +109,10 @@ def load_config(path):
         inference_batch_size=int(inference_cfg.get("batch_size", 1024)),
         inference_tau=float(inference_cfg.get("tau", 1.0)),
         allow_root_unknown=bool(inference_cfg.get("allow_root_unknown", False)),
-        positive_checkpoint=positive_checkpoint,
-        checkpoint=checkpoint,
-        result_path=result_path,
-        diagnostics_path=diagnostics_path,
+        positive_checkpoint=str(positive_checkpoint),
+        checkpoint=str(checkpoint),
+        result_path=str(result_path),
+        diagnostics_path=str(diagnostics_path),
     )
 
 

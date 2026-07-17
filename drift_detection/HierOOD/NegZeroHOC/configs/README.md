@@ -32,3 +32,18 @@ compact positive-prompt and Vision-LoRA checkpoint without retraining.
 `idea3_fgvc_aircraft_b16_joint_vision_lora_global_depth.yaml` is the GPU 1
 parent-context ablation. It inherits the main joint experiment and changes only
 the prompt ablation, GPU, experiment name, and output paths.
+
+Experiment outputs use this layout:
+
+```text
+outputs/
+  shared/features/<dataset>/<clip-model>/
+  experiments/<experiment-name>/
+    checkpoints/
+    results/
+    diagnostics/
+```
+
+CLIP feature caches are shared because several experiments reuse the same
+frozen features. All trainable checkpoints and evaluation artifacts are grouped
+under the experiment that produced them.

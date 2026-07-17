@@ -27,7 +27,7 @@ feature_extraction:
   skip_train: false
 
 features:
-  dir: outputs/features/simple-hier-imagenet/clip_openai_clip-vit-base-patch32
+  dir: outputs/shared/features/simple-hier-imagenet/clip_openai_clip-vit-base-patch32
 
 prompt_inspection:
   nodes:
@@ -70,13 +70,13 @@ positive_training:
     ce_weight: 1.0
     metric_weight: 1.0
   eval_after_training: true
-  checkpoint: outputs/checkpoints/idea3-simple-hier-imagenet-positive.pt
-  result_path: outputs/results/idea3-simple-hier-imagenet-positive_child_only.result
-  diagnostics_path: outputs/diagnostics/idea3-simple-hier-imagenet-positive-diagnostics.json
+  checkpoint: outputs/experiments/idea3-simple-hier-imagenet/checkpoints/idea3-simple-hier-imagenet-positive.pt
+  result_path: outputs/experiments/idea3-simple-hier-imagenet/results/idea3-simple-hier-imagenet-positive_child_only.result
+  diagnostics_path: outputs/experiments/idea3-simple-hier-imagenet/diagnostics/idea3-simple-hier-imagenet-positive-diagnostics.json
 
 unknown_training:
   enabled: true
-  positive_checkpoint: outputs/checkpoints/idea3-simple-hier-imagenet-positive.pt
+  positive_checkpoint: outputs/experiments/idea3-simple-hier-imagenet/checkpoints/idea3-simple-hier-imagenet-positive.pt
   epochs: 20
   batch_size: 1024
   parents_per_step: 4
@@ -87,14 +87,14 @@ unknown_training:
   lambda_anchor: 0.1
   lambda_child_sep: 0.1
   eval_after_training: true
-  checkpoint: outputs/checkpoints/idea3-simple-hier-imagenet-parent_unknown.pt
-  result_path: outputs/results/idea3-simple-hier-imagenet-parent_unknown.result
-  diagnostics_path: outputs/diagnostics/idea3-simple-hier-imagenet-unknown-diagnostics.json
+  checkpoint: outputs/experiments/idea3-simple-hier-imagenet/checkpoints/idea3-simple-hier-imagenet-parent_unknown.pt
+  result_path: outputs/experiments/idea3-simple-hier-imagenet/results/idea3-simple-hier-imagenet-parent_unknown.result
+  diagnostics_path: outputs/experiments/idea3-simple-hier-imagenet/diagnostics/idea3-simple-hier-imagenet-unknown-diagnostics.json
 
 inference:
   mode: positive_child_only
-  positive_checkpoint: outputs/checkpoints/idea3-simple-hier-imagenet-positive.pt
-  unknown_checkpoint: outputs/checkpoints/idea3-simple-hier-imagenet-parent_unknown.pt
+  positive_checkpoint: outputs/experiments/idea3-simple-hier-imagenet/checkpoints/idea3-simple-hier-imagenet-positive.pt
+  unknown_checkpoint: outputs/experiments/idea3-simple-hier-imagenet/checkpoints/idea3-simple-hier-imagenet-parent_unknown.pt
   batch_size: 1024
   allow_root_unknown: false
   tau: 1.0

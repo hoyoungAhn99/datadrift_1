@@ -15,16 +15,16 @@ image_adapter:
   normalize_output: true
 
 positive_training:
-  checkpoint: outputs/checkpoints/idea3-fgvc-aircraft-b16-sparse-path-mlp-positive.pt
-  result_path: outputs/results/idea3-fgvc-aircraft-b16-sparse-path-mlp-positive_global_path.result
-  diagnostics_path: outputs/diagnostics/idea3-fgvc-aircraft-b16-sparse-path-mlp-positive-diagnostics.json
+  checkpoint: outputs/experiments/idea3-fgvc-aircraft-b16-sparse-path-mlp/checkpoints/idea3-fgvc-aircraft-b16-sparse-path-mlp-positive.pt
+  result_path: outputs/experiments/idea3-fgvc-aircraft-b16-sparse-path-mlp/results/idea3-fgvc-aircraft-b16-sparse-path-mlp-positive_global_path.result
+  diagnostics_path: outputs/experiments/idea3-fgvc-aircraft-b16-sparse-path-mlp/diagnostics/idea3-fgvc-aircraft-b16-sparse-path-mlp-positive-diagnostics.json
 
 unknown_training:
-  positive_checkpoint: outputs/checkpoints/idea3-fgvc-aircraft-b16-sparse-path-mlp-positive.pt
-  checkpoint: outputs/checkpoints/idea3-fgvc-aircraft-b16-sparse-path-mlp-parent_unknown.pt
-  result_path: outputs/results/idea3-fgvc-aircraft-b16-sparse-path-mlp-parent_unknown.result
-  diagnostics_path: outputs/diagnostics/idea3-fgvc-aircraft-b16-sparse-path-mlp-unknown-diagnostics.json
+  positive_checkpoint: outputs/experiments/idea3-fgvc-aircraft-b16-sparse-path-mlp/checkpoints/idea3-fgvc-aircraft-b16-sparse-path-mlp-positive.pt
+  checkpoint: outputs/experiments/idea3-fgvc-aircraft-b16-sparse-path-mlp/checkpoints/idea3-fgvc-aircraft-b16-sparse-path-mlp-parent_unknown.pt
+  result_path: outputs/experiments/idea3-fgvc-aircraft-b16-sparse-path-mlp/results/idea3-fgvc-aircraft-b16-sparse-path-mlp-parent_unknown.result
+  diagnostics_path: outputs/experiments/idea3-fgvc-aircraft-b16-sparse-path-mlp/diagnostics/idea3-fgvc-aircraft-b16-sparse-path-mlp-unknown-diagnostics.json
 
 inference:
-  positive_checkpoint: outputs/checkpoints/idea3-fgvc-aircraft-b16-sparse-path-mlp-positive.pt
-  unknown_checkpoint: outputs/checkpoints/idea3-fgvc-aircraft-b16-sparse-path-mlp-parent_unknown.pt
+  positive_checkpoint: outputs/experiments/idea3-fgvc-aircraft-b16-sparse-path-mlp/checkpoints/idea3-fgvc-aircraft-b16-sparse-path-mlp-positive.pt
+  unknown_checkpoint: outputs/experiments/idea3-fgvc-aircraft-b16-sparse-path-mlp/checkpoints/idea3-fgvc-aircraft-b16-sparse-path-mlp-parent_unknown.pt

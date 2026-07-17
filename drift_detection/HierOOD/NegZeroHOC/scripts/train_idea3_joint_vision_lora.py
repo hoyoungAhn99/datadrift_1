@@ -25,6 +25,7 @@ from negzerohoc.config_utils import load_yaml_config
 from negzerohoc.evaluation import build_hierarchy, evaluate_split, make_distance_mats, mixed_summary
 from negzerohoc.feature_io import ensure_dir, save_json
 from negzerohoc.idea3_inference import build_idea3_semantic_index, predict_features_idea3
+from negzerohoc.output_layout import resolve_experiment_artifact
 from negzerohoc.prompt_models import HierPromptConfig, PositivePromptLearner
 from negzerohoc.runtime import available_device, configured_device
 from negzerohoc.soft_prompting import SoftPromptTextEncoder
@@ -60,13 +61,19 @@ def load_config(path: str | Path) -> Namespace:
 
     experiment_name = experiment_cfg.get("name", "idea3-joint-vision-lora")
     output_root = Path(experiment_cfg.get("output_root", "outputs"))
-    checkpoint = Path(
-        train_cfg.get("checkpoint")
-        or output_root / "checkpoints" / f"{experiment_name}-positive.pt"
+    checkpoint = resolve_experiment_artifact(
+        train_cfg.get("checkpoint"),
+        output_root=output_root,
+        experiment_name=experiment_name,
+        kind="checkpoints",
+        default_filename=f"{experiment_name}-positive.pt",
     )
-    last_checkpoint = Path(
-        validation_cfg.get("last_checkpoint")
-        or checkpoint.with_name(f"{checkpoint.stem}-last{checkpoint.suffix}")
+    last_checkpoint = resolve_experiment_artifact(
+        validation_cfg.get("last_checkpoint"),
+        output_root=output_root,
+        experiment_name=experiment_name,
+        kind="checkpoints",
+        default_filename=f"{checkpoint.stem}-last{checkpoint.suffix}",
     )
 
     datadir = dataset_cfg.get("datadir")
@@ -113,14 +120,20 @@ def load_config(path: str | Path) -> Namespace:
         inference_tau=float(inference_cfg.get("tau", 1.0 / float(train_cfg.get("tau", 0.07)))),
         checkpoint=str(checkpoint),
         last_checkpoint=str(last_checkpoint),
-        result_path=str(
-            train_cfg.get("result_path")
-            or output_root / "results" / f"{experiment_name}-positive_global_path.result"
-        ),
-        diagnostics_path=str(
-            train_cfg.get("diagnostics_path")
-            or output_root / "diagnostics" / f"{experiment_name}-positive-diagnostics.json"
-        ),
+        result_path=str(resolve_experiment_artifact(
+            train_cfg.get("result_path"),
+            output_root=output_root,
+            experiment_name=experiment_name,
+            kind="results",
+            default_filename=f"{experiment_name}-positive_global_path.result",
+        )),
+        diagnostics_path=str(resolve_experiment_artifact(
+            train_cfg.get("diagnostics_path"),
+            output_root=output_root,
+            experiment_name=experiment_name,
+            kind="diagnostics",
+            default_filename=f"{experiment_name}-positive-diagnostics.json",
+        )),
     )
 
 
@@ -296,7 +309,17 @@ def set_joint_train_mode(clip_model, learner):
 
 def autocast_context(args, device):
     enabled = device.startswith("cuda") and args.precision in {"fp16", "float16"}
-    return torch.cuda.amp.autocast(enabled=enabled)
+    try:
+        return torch.amp.autocast("cuda", enabled=enabled)
+    except AttributeError:  # pragma: no cover - compatibility with older PyTorch
+        return torch.cuda.amp.autocast(enabled=enabled)
+
+
+def make_grad_scaler(enabled: bool):
+    try:
+        return torch.amp.GradScaler("cuda", enabled=enabled)
+    except AttributeError:  # pragma: no cover - compatibility with older PyTorch
+        return torch.cuda.amp.GradScaler(enabled=enabled)
 
 
 @torch.no_grad()
@@ -448,7 +471,7 @@ def main():
         T_max=max(1, args.epochs),
     )
     use_scaler = device.startswith("cuda") and args.precision in {"fp16", "float16"}
-    scaler = torch.cuda.amp.GradScaler(enabled=use_scaler)
+    scaler = make_grad_scaler(use_scaler)
     identity_adapter = nn.Identity()
 
     print(

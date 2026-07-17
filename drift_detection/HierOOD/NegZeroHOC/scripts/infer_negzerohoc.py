@@ -27,6 +27,7 @@ from negzerohoc.evaluation import (
 )
 from negzerohoc.feature_io import ensure_dir, load_feature_file
 from negzerohoc.inference import predict_features
+from negzerohoc.output_layout import experiment_artifact_path, resolve_shared_feature_dir
 from negzerohoc.runtime import available_device, configured_device
 from negzerohoc.semantic_index import build_semantic_index
 
@@ -45,7 +46,12 @@ def load_config(path):
             f"Invalid or missing inference.mode in {path}: {mode}. "
             "Expected one of: child_only, manual_unknown"
         )
-    features_dir = inference_cfg.get("features_dir")
+    experiment_name = experiment_cfg.get("name", f"fgvc-aircraft-{mode}")
+    output_root = experiment_cfg.get("output_root", "outputs")
+    features_dir = resolve_shared_feature_dir(
+        inference_cfg.get("features_dir"),
+        output_root=output_root,
+    )
     if not features_dir:
         raise ValueError(f"Missing required config key: inference.features_dir in {path}")
     batch_size = int(inference_cfg.get("batch_size", 1024))
@@ -54,14 +60,14 @@ def load_config(path):
 
     return Namespace(
         config=str(path),
-        experiment_name=experiment_cfg.get("name", f"fgvc-aircraft-{mode}"),
+        experiment_name=experiment_name,
         dataset=dataset_cfg.get("name", "fgvc-aircraft"),
         hierarchy=dataset_cfg.get("hierarchy", "hierarchies/fgvc-aircraft.json"),
         id_split=dataset_cfg.get("id_split", "data/fgvc-aircraft-id-labels.csv"),
-        features_dir=features_dir,
+        features_dir=str(features_dir),
         clip_model=clip_cfg.get("model", "openai/clip-vit-base-patch32"),
         mode=mode,
-        outdir=experiment_cfg.get("output_root", "outputs"),
+        outdir=output_root,
         device=configured_device(runtime_cfg),
         tau=inference_cfg.get("tau", 1.0),
         batch_size=batch_size,
@@ -191,8 +197,13 @@ def main():
     results["mixed"] = mixed_summary(results["val"]["metrics"], results["ood"]["metrics"])
 
     model_key = f"clip_{safe_model_name(args.clip_model)}"
-    result_dir = ensure_dir(Path(args.outdir) / "results")
-    save_path = result_dir / f"negzerohoc-{args.dataset}-{model_key}-{args.mode}.result"
+    save_path = experiment_artifact_path(
+        args.outdir,
+        args.experiment_name,
+        "results",
+        f"negzerohoc-{args.dataset}-{model_key}-{args.mode}.result",
+    )
+    ensure_dir(save_path.parent)
     torch.save(results, save_path)
 
     print(f"saved: {save_path}")

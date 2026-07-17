@@ -10,6 +10,6 @@ prompt:
   ablation: global_depth
 
 joint_training:
-  checkpoint: outputs/checkpoints/idea3-fgvc-aircraft-b16-joint-vision-lora-global-depth-positive.pt
-  result_path: outputs/results/idea3-fgvc-aircraft-b16-joint-vision-lora-global-depth-positive_global_path.result
-  diagnostics_path: outputs/diagnostics/idea3-fgvc-aircraft-b16-joint-vision-lora-global-depth-positive-diagnostics.json
+  checkpoint: outputs/experiments/idea3-fgvc-aircraft-b16-joint-vision-lora-global-depth/checkpoints/idea3-fgvc-aircraft-b16-joint-vision-lora-global-depth-positive.pt
+  result_path: outputs/experiments/idea3-fgvc-aircraft-b16-joint-vision-lora-global-depth/results/idea3-fgvc-aircraft-b16-joint-vision-lora-global-depth-positive_global_path.result
+  diagnostics_path: outputs/experiments/idea3-fgvc-aircraft-b16-joint-vision-lora-global-depth/diagnostics/idea3-fgvc-aircraft-b16-joint-vision-lora-global-depth-positive-diagnostics.json

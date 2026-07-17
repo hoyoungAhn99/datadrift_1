@@ -21,18 +21,18 @@ positive_training:
     mode: positive_global_path
     metric: balanced_acc
     save_best: true
-  checkpoint: outputs/checkpoints/idea3-fgvc-aircraft-b16-sparse-path-positive.pt
-  result_path: outputs/results/idea3-fgvc-aircraft-b16-sparse-path-positive_global_path.result
-  diagnostics_path: outputs/diagnostics/idea3-fgvc-aircraft-b16-sparse-path-positive-diagnostics.json
+  checkpoint: outputs/experiments/idea3-fgvc-aircraft-b16-sparse-path/checkpoints/idea3-fgvc-aircraft-b16-sparse-path-positive.pt
+  result_path: outputs/experiments/idea3-fgvc-aircraft-b16-sparse-path/results/idea3-fgvc-aircraft-b16-sparse-path-positive_global_path.result
+  diagnostics_path: outputs/experiments/idea3-fgvc-aircraft-b16-sparse-path/diagnostics/idea3-fgvc-aircraft-b16-sparse-path-positive-diagnostics.json
 
 unknown_training:
-  positive_checkpoint: outputs/checkpoints/idea3-fgvc-aircraft-b16-sparse-path-positive.pt
-  checkpoint: outputs/checkpoints/idea3-fgvc-aircraft-b16-sparse-path-parent_unknown.pt
-  result_path: outputs/results/idea3-fgvc-aircraft-b16-sparse-path-parent_unknown.result
-  diagnostics_path: outputs/diagnostics/idea3-fgvc-aircraft-b16-sparse-path-unknown-diagnostics.json
+  positive_checkpoint: outputs/experiments/idea3-fgvc-aircraft-b16-sparse-path/checkpoints/idea3-fgvc-aircraft-b16-sparse-path-positive.pt
+  checkpoint: outputs/experiments/idea3-fgvc-aircraft-b16-sparse-path/checkpoints/idea3-fgvc-aircraft-b16-sparse-path-parent_unknown.pt
+  result_path: outputs/experiments/idea3-fgvc-aircraft-b16-sparse-path/results/idea3-fgvc-aircraft-b16-sparse-path-parent_unknown.result
+  diagnostics_path: outputs/experiments/idea3-fgvc-aircraft-b16-sparse-path/diagnostics/idea3-fgvc-aircraft-b16-sparse-path-unknown-diagnostics.json
 
 inference:
   mode: positive_global_path
-  positive_checkpoint: outputs/checkpoints/idea3-fgvc-aircraft-b16-sparse-path-positive.pt
-  unknown_checkpoint: outputs/checkpoints/idea3-fgvc-aircraft-b16-sparse-path-parent_unknown.pt
+  positive_checkpoint: outputs/experiments/idea3-fgvc-aircraft-b16-sparse-path/checkpoints/idea3-fgvc-aircraft-b16-sparse-path-positive.pt
+  unknown_checkpoint: outputs/experiments/idea3-fgvc-aircraft-b16-sparse-path/checkpoints/idea3-fgvc-aircraft-b16-sparse-path-parent_unknown.pt
   tau: 14.285714

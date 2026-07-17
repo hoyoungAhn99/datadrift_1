@@ -81,9 +81,9 @@ joint_training:
     start_epoch: 1
     batch_size: 64
     mode: positive_global_path
-  checkpoint: outputs/checkpoints/idea3-fgvc-aircraft-b16-joint-vision-lora-positive.pt
-  result_path: outputs/results/idea3-fgvc-aircraft-b16-joint-vision-lora-positive_global_path.result
-  diagnostics_path: outputs/diagnostics/idea3-fgvc-aircraft-b16-joint-vision-lora-positive-diagnostics.json
+  checkpoint: outputs/experiments/idea3-fgvc-aircraft-b16-joint-vision-lora/checkpoints/idea3-fgvc-aircraft-b16-joint-vision-lora-positive.pt
+  result_path: outputs/experiments/idea3-fgvc-aircraft-b16-joint-vision-lora/results/idea3-fgvc-aircraft-b16-joint-vision-lora-positive_global_path.result
+  diagnostics_path: outputs/experiments/idea3-fgvc-aircraft-b16-joint-vision-lora/diagnostics/idea3-fgvc-aircraft-b16-joint-vision-lora-positive-diagnostics.json
 
 inference:
   mode: positive_global_path

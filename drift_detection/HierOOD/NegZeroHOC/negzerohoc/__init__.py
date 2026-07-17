@@ -8,6 +8,7 @@ __all__ = [
     "idea3_inference",
     "inference",
     "losses",
+    "output_layout",
     "prompt_models",
     "prompt_text",
     "prompts",

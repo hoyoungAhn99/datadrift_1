@@ -23,6 +23,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from negzerohoc.config_utils import load_yaml_config
 from negzerohoc.evaluation import build_hierarchy, evaluate_split, make_distance_mats, mixed_summary
 from negzerohoc.feature_io import ensure_dir, load_feature_file, save_json
+from negzerohoc.output_layout import resolve_experiment_artifact, resolve_shared_feature_dir
 from negzerohoc.runtime import available_device, configured_device
 from negzerohoc.training_data import build_positive_edge_examples, gather_image_features, group_examples_by_parent, node_path, sample_examples
 
@@ -68,7 +69,10 @@ def load_config(path: str | Path) -> Namespace:
         dataset=dataset_cfg.get("name", "fgvc-aircraft"),
         hierarchy=dataset_cfg.get("hierarchy", "hierarchies/fgvc-aircraft.json"),
         id_split=dataset_cfg.get("id_split", "data/fgvc-aircraft-id-labels.csv"),
-        features_dir=features_cfg.get("dir") or inference_cfg.get("features_dir"),
+        features_dir=str(resolve_shared_feature_dir(
+            features_cfg.get("dir") or inference_cfg.get("features_dir"),
+            output_root=output_root,
+        )) if features_cfg.get("dir") or inference_cfg.get("features_dir") else None,
         device=configured_device(runtime_cfg),
         seed=int(runtime_cfg.get("seed", 0)),
         probe=probe_cfg.get("probe", "both"),
@@ -83,9 +87,27 @@ def load_config(path: str | Path) -> Namespace:
         weight_decay=float(probe_cfg.get("weight_decay", 1e-4)),
         eval_every=int(probe_cfg.get("eval_every", 1)),
         eval_batch_size=int(probe_cfg.get("eval_batch_size", 4096)),
-        checkpoint=probe_cfg.get("checkpoint") or str(Path(output_root) / "checkpoints" / f"{probe_name}.pt"),
-        result_path=probe_cfg.get("result_path") or str(Path(output_root) / "results" / f"{probe_name}.result"),
-        diagnostics_path=probe_cfg.get("diagnostics_path") or str(Path(output_root) / "diagnostics" / f"{probe_name}.json"),
+        checkpoint=str(resolve_experiment_artifact(
+            probe_cfg.get("checkpoint"),
+            output_root=output_root,
+            experiment_name=experiment_name,
+            kind="checkpoints",
+            default_filename=f"{probe_name}.pt",
+        )),
+        result_path=str(resolve_experiment_artifact(
+            probe_cfg.get("result_path"),
+            output_root=output_root,
+            experiment_name=experiment_name,
+            kind="results",
+            default_filename=f"{probe_name}.result",
+        )),
+        diagnostics_path=str(resolve_experiment_artifact(
+            probe_cfg.get("diagnostics_path"),
+            output_root=output_root,
+            experiment_name=experiment_name,
+            kind="diagnostics",
+            default_filename=f"{probe_name}.json",
+        )),
     )
 
 

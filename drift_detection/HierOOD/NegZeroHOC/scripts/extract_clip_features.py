@@ -16,6 +16,7 @@ from negzerohoc.clip_backend import ClipBackend, safe_model_name
 from negzerohoc.config_utils import load_yaml_config
 from negzerohoc.evaluation import build_hierarchy
 from negzerohoc.feature_io import ensure_dir, save_feature_file, save_json
+from negzerohoc.output_layout import shared_feature_dir
 from negzerohoc.runtime import configured_device
 
 try:
@@ -135,7 +136,7 @@ def main():
     backend = ClipBackend(args.clip_model, device=args.device, local_files_only=args.local_files_only)
 
     model_key = f"clip_{safe_model_name(args.clip_model)}"
-    feature_dir = ensure_dir(Path(args.outdir) / "features" / args.dataset / model_key)
+    feature_dir = ensure_dir(shared_feature_dir(args.outdir, args.dataset, model_key))
     split_items = [("val", val_ds), ("ood", ood_ds)]
     if not args.skip_train:
         split_items.insert(0, ("train", train_ds))

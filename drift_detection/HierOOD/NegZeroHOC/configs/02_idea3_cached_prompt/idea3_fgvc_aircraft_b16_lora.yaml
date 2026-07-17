@@ -16,16 +16,16 @@ image_adapter:
   normalize_output: true
 
 positive_training:
-  checkpoint: outputs/checkpoints/idea3-fgvc-aircraft-b16-lora-positive.pt
-  result_path: outputs/results/idea3-fgvc-aircraft-b16-lora-positive_child_only.result
-  diagnostics_path: outputs/diagnostics/idea3-fgvc-aircraft-b16-lora-positive-diagnostics.json
+  checkpoint: outputs/experiments/idea3-fgvc-aircraft-b16-lora/checkpoints/idea3-fgvc-aircraft-b16-lora-positive.pt
+  result_path: outputs/experiments/idea3-fgvc-aircraft-b16-lora/results/idea3-fgvc-aircraft-b16-lora-positive_child_only.result
+  diagnostics_path: outputs/experiments/idea3-fgvc-aircraft-b16-lora/diagnostics/idea3-fgvc-aircraft-b16-lora-positive-diagnostics.json
 
 unknown_training:
-  positive_checkpoint: outputs/checkpoints/idea3-fgvc-aircraft-b16-lora-positive.pt
-  checkpoint: outputs/checkpoints/idea3-fgvc-aircraft-b16-lora-parent_unknown.pt
-  result_path: outputs/results/idea3-fgvc-aircraft-b16-lora-parent_unknown.result
-  diagnostics_path: outputs/diagnostics/idea3-fgvc-aircraft-b16-lora-unknown-diagnostics.json
+  positive_checkpoint: outputs/experiments/idea3-fgvc-aircraft-b16-lora/checkpoints/idea3-fgvc-aircraft-b16-lora-positive.pt
+  checkpoint: outputs/experiments/idea3-fgvc-aircraft-b16-lora/checkpoints/idea3-fgvc-aircraft-b16-lora-parent_unknown.pt
+  result_path: outputs/experiments/idea3-fgvc-aircraft-b16-lora/results/idea3-fgvc-aircraft-b16-lora-parent_unknown.result
+  diagnostics_path: outputs/experiments/idea3-fgvc-aircraft-b16-lora/diagnostics/idea3-fgvc-aircraft-b16-lora-unknown-diagnostics.json
 
 inference:
-  positive_checkpoint: outputs/checkpoints/idea3-fgvc-aircraft-b16-lora-positive.pt
-  unknown_checkpoint: outputs/checkpoints/idea3-fgvc-aircraft-b16-lora-parent_unknown.pt
+  positive_checkpoint: outputs/experiments/idea3-fgvc-aircraft-b16-lora/checkpoints/idea3-fgvc-aircraft-b16-lora-positive.pt
+  unknown_checkpoint: outputs/experiments/idea3-fgvc-aircraft-b16-lora/checkpoints/idea3-fgvc-aircraft-b16-lora-parent_unknown.pt

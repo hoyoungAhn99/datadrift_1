@@ -25,6 +25,7 @@ from negzerohoc.evaluation import build_hierarchy, evaluate_split, make_distance
 from negzerohoc.feature_io import ensure_dir, load_feature_file
 from negzerohoc.image_adapters import build_image_adapter
 from negzerohoc.idea3_inference import build_idea3_semantic_index, predict_features_idea3
+from negzerohoc.output_layout import resolve_experiment_artifact, resolve_shared_feature_dir
 from negzerohoc.prompt_models import HierPromptConfig, PositivePromptLearner, UnknownPromptLearner
 from negzerohoc.runtime import available_device, configured_device
 from negzerohoc.soft_prompting import SoftPromptTextEncoder
@@ -39,6 +40,8 @@ def load_config(path, mode_override=None):
     features_cfg = cfg.get("features", {})
     inference_cfg = cfg.get("inference", {})
 
+    experiment_name = experiment_cfg.get("name", "idea3")
+    output_root = experiment_cfg.get("output_root", "outputs")
     mode = mode_override or inference_cfg.get("mode", "positive_child_only")
     if mode not in {
         "positive_child_only",
@@ -53,21 +56,41 @@ def load_config(path, mode_override=None):
         checkpoint = inference_cfg.get("unknown_checkpoint") or checkpoint
     if not checkpoint:
         checkpoint = inference_cfg.get("positive_checkpoint")
-    if not checkpoint:
-        raise ValueError(f"Missing inference.checkpoint in {path}")
+    checkpoint = resolve_experiment_artifact(
+        checkpoint,
+        output_root=output_root,
+        experiment_name=experiment_name,
+        kind="checkpoints",
+        default_filename=(
+            f"{experiment_name}-parent_unknown.pt"
+            if mode == "parent_unknown"
+            else f"{experiment_name}-positive.pt"
+        ),
+    )
+    result_path = resolve_experiment_artifact(
+        inference_cfg.get("result_path"),
+        output_root=output_root,
+        experiment_name=experiment_name,
+        kind="results",
+        default_filename=f"{experiment_name}-{mode}.result",
+    )
 
     return Namespace(
         config=str(path),
-        experiment_name=experiment_cfg.get("name", "idea3"),
-        output_root=experiment_cfg.get("output_root", "outputs"),
+        experiment_name=experiment_name,
+        output_root=output_root,
         dataset=dataset_cfg.get("name", "fgvc-aircraft"),
         hierarchy=dataset_cfg.get("hierarchy", "hierarchies/fgvc-aircraft.json"),
         id_split=dataset_cfg.get("id_split", "data/fgvc-aircraft-id-labels.csv"),
         clip_model=clip_cfg.get("model", "openai/clip-vit-base-patch32"),
         local_files_only=bool(clip_cfg.get("local_files_only", True)),
-        features_dir=features_cfg.get("dir") or inference_cfg.get("features_dir"),
+        features_dir=str(resolve_shared_feature_dir(
+            features_cfg.get("dir") or inference_cfg.get("features_dir"),
+            output_root=output_root,
+        )) if features_cfg.get("dir") or inference_cfg.get("features_dir") else None,
         device=configured_device(runtime_cfg),
-        checkpoint=checkpoint,
+        checkpoint=str(checkpoint),
+        result_path=str(result_path),
         mode=mode,
         batch_size=int(inference_cfg.get("batch_size", 1024)),
         tau=float(inference_cfg.get("tau", 1.0)),
@@ -213,8 +236,8 @@ def main():
 
     results["mixed"] = mixed_summary(results["val"]["metrics"], results["ood"]["metrics"])
 
-    result_dir = ensure_dir(Path(args.output_root) / "results")
-    save_path = result_dir / f"{args.experiment_name}-{args.mode}.result"
+    save_path = Path(args.result_path)
+    ensure_dir(save_path.parent)
     torch.save(results, save_path)
 
     print(f"saved: {save_path}")

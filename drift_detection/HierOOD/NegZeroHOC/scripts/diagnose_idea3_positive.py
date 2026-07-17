@@ -133,7 +133,7 @@ def main():
         "oracle_local": oracle_local_accuracy_by_depth(args, hierarchy, positive, payload, device),
     }
 
-    result_path = Path(args_ns.result) if args_ns.result else Path(args.output_root) / "results" / f"{args.experiment_name}-positive_child_only.result"
+    result_path = Path(args_ns.result) if args_ns.result else Path(args.result_path)
     if result_path.exists() and args_ns.split in {"val", "ood"}:
         result = torch.load(result_path, map_location="cpu", weights_only=False)
         diagnostics["greedy"] = greedy_prefix_accuracy(hierarchy, payload, result[args_ns.split])
