@@ -4,7 +4,7 @@ experiment:
   name: idea3-inat19-b16-joint-vision-lora-r16-qkvo-batch16
 
 runtime:
-  gpu_id: 0
+  gpu_id: 1
 
 dataset:
   name: inat19
