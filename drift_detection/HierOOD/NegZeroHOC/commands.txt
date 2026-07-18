@@ -41,3 +41,11 @@ python scripts\infer_idea3_joint_vision_lora.py --config configs\04_joint_vision
 # iNaturalist19: same Rank-16 q/k/v/out joint setting with batch 16 on GPU 0
 python scripts\train_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_inat19_b16_joint_vision_lora_r16_qkvo_b16.yaml
 python scripts\infer_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_inat19_b16_joint_vision_lora_r16_qkvo_b16.yaml
+
+# LoRA 2x2 ablation, GPU 0: isolate the effect of increasing rank to 16
+python scripts\train_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_r16_qv_b16.yaml
+python scripts\infer_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_r16_qv_b16.yaml
+
+# LoRA 2x2 ablation, GPU 1: isolate the effect of expanding targets to q/k/v/out
+python scripts\train_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_r8_qkvo_b16.yaml
+python scripts\infer_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_r8_qkvo_b16.yaml
