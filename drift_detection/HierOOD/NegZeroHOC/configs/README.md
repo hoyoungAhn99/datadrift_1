@@ -10,6 +10,7 @@ configs/
   02_idea3_cached_prompt/   Idea 3 prompt learning on cached features
   03_sparse_path/           Sparse-path loss and Global Path MAP experiments
   04_joint_vision_lora/     Raw-image true Vision LoRA + prompt joint training
+  05_idea4_negative_prompt/ Frozen positive/LoRA + parent-local unknown prompts
   references/               External/reference experiment configs
 ```
 
@@ -28,6 +29,12 @@ Only `04_joint_vision_lora/` modifies the actual CLIP vision transformer.
 The joint trainer validates every configured interval and runs final inference
 automatically. The separate inference command regenerates the metrics from the
 compact positive-prompt and Vision-LoRA checkpoint without retraining.
+
+Idea 4 starts from the strongest Idea 3 positive Vision-LoRA checkpoint. It
+freezes the CLIP base, Vision LoRA, and positive prompts, then trains only a
+non-root parent-local unknown prompt with leave-child-out supervision. Its
+primary inference compares ID leaves and local unknown terminal paths with
+exact global-path MAP; local greedy inference is saved as an ablation.
 
 `idea3_fgvc_aircraft_b16_joint_vision_lora_global_depth.yaml` is the GPU 1
 parent-context ablation. It inherits the main joint experiment and changes only

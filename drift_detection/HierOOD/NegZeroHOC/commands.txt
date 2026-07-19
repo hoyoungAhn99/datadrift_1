@@ -49,3 +49,7 @@ python scripts\infer_idea3_joint_vision_lora.py --config configs\04_joint_vision
 # LoRA 2x2 ablation, GPU 1: isolate the effect of expanding targets to q/k/v/out
 python scripts\train_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_r8_qkvo_b16.yaml
 python scripts\infer_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_r8_qkvo_b16.yaml
+
+# Idea 4: freeze the best positive Vision LoRA model and learn parent-local unknown prompts
+python scripts\train_idea4_unknown_prompts.py --config configs\05_idea4_negative_prompt\idea4_fgvc_aircraft_b16_r16_qkvo_parent_unknown.yaml
+python scripts\infer_idea4_unknown_prompts.py --config configs\05_idea4_negative_prompt\idea4_fgvc_aircraft_b16_r16_qkvo_parent_unknown.yaml

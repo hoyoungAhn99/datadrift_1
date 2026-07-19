@@ -6,6 +6,7 @@ __all__ = [
     "feature_io",
     "image_adapters",
     "idea3_inference",
+    "idea4_inference",
     "inference",
     "losses",
     "output_layout",
