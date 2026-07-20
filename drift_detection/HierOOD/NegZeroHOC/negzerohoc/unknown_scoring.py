@@ -22,12 +22,13 @@ def grouped_unknown_logits(
     unknown_features: torch.Tensor,
     *,
     logit_scale: float,
+    aggregation: str = "logmeanexp",
 ) -> torch.Tensor:
-    """Return known-child logits plus one prototype-marginalized unknown logit.
+    """Return known-child logits plus one aggregated unknown logit.
 
-    Unknown prototypes represent one semantic class. Log-mean-exp aggregation
-    prevents the class prior from increasing only because more prototypes are
-    used. With one prototype this is exactly the ordinary cosine logit.
+    ``logmeanexp`` treats prototypes as a marginalized single class and is the
+    legacy Idea 4/5 behavior. ``logsumexp`` preserves total negative mass as in
+    the original NegPrompt softmax denominator.
     """
     if float(logit_scale) <= 0.0:
         raise ValueError("logit_scale must be positive")
@@ -40,7 +41,12 @@ def grouped_unknown_logits(
 
     known_logits = float(logit_scale) * (images @ known.t())
     prototype_logits = float(logit_scale) * (images @ unknown.t())
-    unknown_logit = torch.logsumexp(prototype_logits, dim=1) - math.log(
-        prototype_logits.shape[1]
-    )
+    if aggregation == "logmeanexp":
+        unknown_logit = torch.logsumexp(prototype_logits, dim=1) - math.log(
+            prototype_logits.shape[1]
+        )
+    elif aggregation == "logsumexp":
+        unknown_logit = torch.logsumexp(prototype_logits, dim=1)
+    else:
+        raise ValueError(f"Unsupported unknown aggregation: {aggregation!r}")
     return torch.cat([known_logits, unknown_logit.unsqueeze(1)], dim=1)

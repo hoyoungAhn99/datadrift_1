@@ -69,9 +69,14 @@ def validate_checkpoint(args, checkpoint: dict) -> None:
             for key, (actual, expected_value) in mismatches.items()
         )
         raise ValueError(f"HierNegPrompt checkpoint/config mismatch: {details}")
-    if checkpoint.get("stage") != "hier_negprompt_frozen_positive_lora":
+    expected_stage = (
+        "idea6_hc_negprompt_frozen_positive_lora"
+        if args.method == "hc_negprompt"
+        else "hier_negprompt_frozen_positive_lora"
+    )
+    if checkpoint.get("stage") != expected_stage:
         raise ValueError(
-            "Expected a hier_negprompt_frozen_positive_lora checkpoint, "
+            f"Expected a {expected_stage} checkpoint, "
             f"got {checkpoint.get('stage')!r}"
         )
     checkpoint_method = checkpoint.get("args", {}).get("method")

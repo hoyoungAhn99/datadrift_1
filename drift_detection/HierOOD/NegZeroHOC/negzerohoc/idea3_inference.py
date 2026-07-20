@@ -77,6 +77,7 @@ def predict_one_idea3(
     semantic_index,
     mode: str,
     tau: float = 1.0,
+    unknown_aggregation: str = "logmeanexp",
     return_trace: bool = False,
 ):
     node = "root"
@@ -93,6 +94,7 @@ def predict_one_idea3(
                 feats,
                 local.unknown_feature.to(image_feature.device),
                 logit_scale=float(tau),
+                aggregation=unknown_aggregation,
             )[0]
             names.append(f"__unknown__:{node}")
         else:
@@ -121,6 +123,7 @@ def predict_features_idea3(
     semantic_index,
     mode: str,
     tau: float = 1.0,
+    unknown_aggregation: str = "logmeanexp",
     return_trace: bool = False,
 ) -> dict:
     if mode in POSITIVE_GLOBAL_PATH_MODES:
@@ -144,6 +147,7 @@ def predict_features_idea3(
             semantic_index,
             mode=mode,
             tau=tau,
+            unknown_aggregation=unknown_aggregation,
             return_trace=return_trace,
         )
         preds.append(hierarchy.id_node_list.index(node))

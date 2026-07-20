@@ -15,6 +15,7 @@ def predict_features_terminal_global_path(
     semantic_index,
     logit_scale: float = 1.0,
     allow_root_unknown: bool = False,
+    unknown_aggregation: str = "logmeanexp",
     return_trace: bool = False,
 ) -> dict:
     """Decode ID leaves and parent-local unknown terminals in one path space.
@@ -54,6 +55,7 @@ def predict_features_terminal_global_path(
                 child_features,
                 local.unknown_feature.to(device),
                 logit_scale=float(logit_scale),
+                aggregation=unknown_aggregation,
             )
         else:
             logits = float(logit_scale) * (features @ child_features.t())

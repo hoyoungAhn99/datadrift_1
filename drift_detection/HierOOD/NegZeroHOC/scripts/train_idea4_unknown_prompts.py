@@ -401,6 +401,7 @@ def evaluate_feature_payload(
                 semantic_index,
                 logit_scale=args.inference_tau,
                 allow_root_unknown=args.allow_root_unknown,
+                unknown_aggregation=getattr(args, "unknown_aggregation", "logmeanexp"),
             )
         elif mode == GREEDY_INFERENCE_MODE:
             output = predict_features_idea3(
@@ -409,6 +410,7 @@ def evaluate_feature_payload(
                 semantic_index,
                 mode="parent_unknown",
                 tau=args.inference_tau,
+                unknown_aggregation=getattr(args, "unknown_aggregation", "logmeanexp"),
             )
         elif mode == "positive_global_path":
             output = predict_features_idea3(

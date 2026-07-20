@@ -79,3 +79,7 @@ python scripts\infer_hier_negprompt.py --config configs\06_idea5_hier_negprompt\
 # Idea 5 Hierarchical NegPrompt without leave-one-child-out, GPU 1: paper losses + stop CE + parent anchor
 python scripts\train_hier_negprompt.py --config configs\06_idea5_hier_negprompt\idea5_hnp_stop_fgvc_aircraft_b16_r16_qkvo.yaml
 python scripts\infer_hier_negprompt.py --config configs\06_idea5_hier_negprompt\idea5_hnp_stop_fgvc_aircraft_b16_r16_qkvo.yaml
+
+# Idea 6: hierarchy-constrained NegPrompt without pseudo-OOD targets, GPU 0
+python scripts\train_hier_negprompt.py --config configs\07_idea6_hc_negprompt\idea6_fgvc_aircraft_b16_r16_qkvo_hc_negprompt.yaml
+python scripts\infer_hier_negprompt.py --config configs\07_idea6_hc_negprompt\idea6_fgvc_aircraft_b16_r16_qkvo_hc_negprompt.yaml

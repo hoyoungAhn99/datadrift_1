@@ -22,6 +22,7 @@ from negzerohoc.checkpointing import save_idea3_checkpoint
 from negzerohoc.config_utils import load_yaml_config
 from negzerohoc.evaluation import build_hierarchy, mixed_summary
 from negzerohoc.feature_io import ensure_dir, save_json
+from negzerohoc.hc_negprompt import hierarchy_constrained_negprompt_loss
 from negzerohoc.hier_negprompt import (
     build_hier_negprompt_semantic_index,
     hierarchical_negprompt_loss,
@@ -51,7 +52,7 @@ from scripts.train_idea4_unknown_prompts import (
 from scripts.train_idea3_joint_vision_lora import build_datasets
 
 
-VALID_METHODS = {"hnp_paper", "hnp_stop"}
+VALID_METHODS = {"hnp_paper", "hnp_stop", "hc_negprompt"}
 
 
 def load_config(path: str | Path) -> Namespace:
@@ -88,6 +89,18 @@ def load_config(path: str | Path) -> Namespace:
     allow_root_unknown = bool(inference_cfg.get("allow_root_unknown", False))
     if allow_root_unknown:
         raise ValueError("The FGVC HierNegPrompt protocol disables root unknown")
+    unknown_aggregation = str(
+        inference_cfg.get(
+            "unknown_aggregation",
+            "logsumexp" if method == "hc_negprompt" else "logmeanexp",
+        )
+    )
+    if unknown_aggregation not in {"logmeanexp", "logsumexp"}:
+        raise ValueError(
+            f"Unsupported inference.unknown_aggregation: {unknown_aggregation!r}"
+        )
+    if method == "hc_negprompt" and unknown_aggregation != "logsumexp":
+        raise ValueError("hc_negprompt requires unknown_aggregation='logsumexp'")
 
     checkpoint = resolve_experiment_artifact(
         train_cfg.get("checkpoint"),
@@ -149,6 +162,15 @@ def load_config(path: str | Path) -> Namespace:
         lambda_nnd=float(loss_cfg.get("lambda_nnd", 0.05)),
         lambda_stop=float(loss_cfg.get("lambda_stop", 0.0)),
         lambda_parent=float(loss_cfg.get("lambda_parent", 0.0)),
+        lambda_hnis=float(loss_cfg.get("lambda_hnis", 1.0)),
+        lambda_safe=float(loss_cfg.get("lambda_safe", 1.0)),
+        lambda_shell=float(loss_cfg.get("lambda_shell", 0.1)),
+        lambda_diversity=float(loss_cfg.get("lambda_diversity", 0.05)),
+        lambda_route=float(loss_cfg.get("lambda_route", 0.5)),
+        lambda_balance=float(loss_cfg.get("lambda_balance", 0.1)),
+        hierarchy_tau=float(loss_cfg.get("hierarchy_tau", 0.07)),
+        safety_margin=float(loss_cfg.get("safety_margin", 0.0)),
+        depth_balanced=bool(loss_cfg.get("depth_balanced", True)),
         validation_every_n_epochs=max(
             1, int(validation_cfg.get("every_n_epochs", 1))
         ),
@@ -160,6 +182,7 @@ def load_config(path: str | Path) -> Namespace:
             inference_cfg.get("tau", 1.0 / float(train_cfg.get("tau", 0.07)))
         ),
         allow_root_unknown=allow_root_unknown,
+        unknown_aggregation=unknown_aggregation,
         greedy_ablation=bool(inference_cfg.get("greedy_ablation", True)),
         checkpoint=str(checkpoint),
         result_path=str(result_path),
@@ -180,10 +203,16 @@ def average_stats(stats: list[dict]) -> dict:
     return {key: sum(float(item[key]) for item in stats) / len(stats) for key in keys}
 
 
+def checkpoint_stage(args) -> str:
+    if args.method == "hc_negprompt":
+        return "idea6_hc_negprompt_frozen_positive_lora"
+    return "hier_negprompt_frozen_positive_lora"
+
+
 def save_checkpoint(args, positive_checkpoint, prompt_cfg, negative, metrics):
     return save_idea3_checkpoint(
         args.checkpoint,
-        stage="hier_negprompt_frozen_positive_lora",
+        stage=checkpoint_stage(args),
         dataset=args.dataset,
         clip_model=args.clip_model,
         hierarchy=args.hierarchy,
@@ -265,6 +294,21 @@ def main():
     parents = sorted(parent for parent in train_groups if parent != "root")
     if not parents:
         raise RuntimeError("HierNegPrompt found no eligible non-root parents")
+    depth_counts = {}
+    for parent in parents:
+        depth = len(hierarchy.node_ancestors.get(parent, []))
+        depth_counts[depth] = depth_counts.get(depth, 0) + 1
+    num_training_depths = len(depth_counts)
+    parent_loss_weights = {
+        parent: len(parents)
+        / (
+            num_training_depths
+            * depth_counts[len(hierarchy.node_ancestors.get(parent, []))]
+        )
+        if args.depth_balanced and args.method == "hc_negprompt"
+        else 1.0
+        for parent in parents
+    }
 
     positive_baseline = evaluate_feature_payload(
         args,
@@ -334,22 +378,28 @@ def main():
 
             optimizer.zero_grad(set_to_none=True)
             parent_losses = []
+            loss_weights = []
             parent_stats = []
             for episode in episodes:
                 local = positive_index[episode.parent]
+                model_children = (
+                    list(local.children)
+                    if args.method == "hc_negprompt"
+                    else list(episode.children)
+                )
                 child_to_position = {
                     child: index for index, child in enumerate(local.children)
                 }
                 positive_features = torch.stack([
                     local.child_features[child_to_position[child]]
-                    for child in episode.children
+                    for child in model_children
                 ]).to(device)
                 negative_features = negative.encode_negative_prototypes(
                     episode.parent,
-                    episode.children,
+                    model_children,
                 )
                 child_to_target = {
-                    child: index for index, child in enumerate(episode.children)
+                    child: index for index, child in enumerate(model_children)
                 }
                 targets = torch.tensor(
                     [child_to_target[label] for label in episode.labels],
@@ -360,23 +410,61 @@ def main():
                     feature_by_index[example.image_index]
                     for example in episode.examples
                 ])
-                loss, stats = hierarchical_negprompt_loss(
-                    image_features,
-                    positive_features,
-                    negative_features,
-                    targets,
-                    negative._parent_feature(episode.parent),
-                    tau=args.tau,
-                    lambda_nis=args.lambda_nis,
-                    lambda_npd=args.lambda_npd,
-                    lambda_nnd=args.lambda_nnd,
-                    lambda_stop=args.lambda_stop,
-                    lambda_parent=args.lambda_parent,
-                )
+                if args.method == "hc_negprompt":
+                    parent_path = [
+                        hierarchy.id_node_list[index]
+                        for index in hierarchy.node_ancestors.get(
+                            episode.parent, []
+                        )
+                    ] + [episode.parent]
+                    route_levels = []
+                    for ancestor, route_child in zip(
+                        parent_path[:-1], parent_path[1:]
+                    ):
+                        route_local = positive_index[ancestor]
+                        route_levels.append((
+                            route_local.child_features.to(device),
+                            list(route_local.children).index(route_child),
+                        ))
+                    loss, stats = hierarchy_constrained_negprompt_loss(
+                        image_features,
+                        positive_features,
+                        negative_features,
+                        targets,
+                        negative._parent_feature(episode.parent),
+                        route_levels,
+                        tau=args.tau,
+                        hierarchy_tau=args.hierarchy_tau,
+                        safety_margin=args.safety_margin,
+                        lambda_hnis=args.lambda_hnis,
+                        lambda_safe=args.lambda_safe,
+                        lambda_shell=args.lambda_shell,
+                        lambda_diversity=args.lambda_diversity,
+                        lambda_route=args.lambda_route,
+                        lambda_balance=args.lambda_balance,
+                    )
+                else:
+                    loss, stats = hierarchical_negprompt_loss(
+                        image_features,
+                        positive_features,
+                        negative_features,
+                        targets,
+                        negative._parent_feature(episode.parent),
+                        tau=args.tau,
+                        lambda_nis=args.lambda_nis,
+                        lambda_npd=args.lambda_npd,
+                        lambda_nnd=args.lambda_nnd,
+                        lambda_stop=args.lambda_stop,
+                        lambda_parent=args.lambda_parent,
+                    )
                 parent_losses.append(loss)
+                loss_weights.append(parent_loss_weights[episode.parent])
                 parent_stats.append(stats)
 
-            loss = torch.stack(parent_losses).mean()
+            loss = torch.stack([
+                parent_loss * weight
+                for parent_loss, weight in zip(parent_losses, loss_weights)
+            ]).mean()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(trainable_params, args.gradient_clip_norm)
             optimizer.step()
@@ -415,12 +503,21 @@ def main():
                 ) >= id_bacc_floor,
             })
         history.append(epoch_stats)
-        message = (
-            f"epoch {epoch}: loss={epoch_stats.get('loss', 0.0):.6f}, "
-            f"nis_excess={epoch_stats.get('nis_excess', 0.0):.6f}, "
-            f"stop_loss={epoch_stats.get('stop_loss', 0.0):.6f}, "
-            f"known_acc={epoch_stats.get('known_acc', 0.0):.6f}"
-        )
+        if args.method == "hc_negprompt":
+            message = (
+                f"epoch {epoch}: loss={epoch_stats.get('loss', 0.0):.6f}, "
+                f"hnis_excess={epoch_stats.get('hnis_excess', 0.0):.6f}, "
+                f"safe={epoch_stats.get('safe_loss', 0.0):.6f}, "
+                f"route_acc={epoch_stats.get('route_acc', 0.0):.6f}, "
+                f"id_neg_win={epoch_stats.get('id_unknown_mass_win_rate', 0.0):.6f}"
+            )
+        else:
+            message = (
+                f"epoch {epoch}: loss={epoch_stats.get('loss', 0.0):.6f}, "
+                f"nis_excess={epoch_stats.get('nis_excess', 0.0):.6f}, "
+                f"stop_loss={epoch_stats.get('stop_loss', 0.0):.6f}, "
+                f"known_acc={epoch_stats.get('known_acc', 0.0):.6f}"
+            )
         if "val_balanced_acc" in epoch_stats:
             message += (
                 f", val_bacc={epoch_stats['val_balanced_acc']:.6f}, "
@@ -522,7 +619,7 @@ def main():
         "mode": PRIMARY_INFERENCE_MODE,
         "method": args.method,
         "checkpoint": args.checkpoint,
-        "checkpoint_stage": "hier_negprompt_frozen_positive_lora",
+        "checkpoint_stage": checkpoint_stage(args),
         "positive_checkpoint": args.positive_checkpoint,
         "selected_epoch": args.epochs,
         "selection_policy": "fixed_last_epoch",
