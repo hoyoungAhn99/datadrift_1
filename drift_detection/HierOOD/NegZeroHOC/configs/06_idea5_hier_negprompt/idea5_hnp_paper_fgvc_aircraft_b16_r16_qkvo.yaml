@@ -1,5 +1,5 @@
 experiment:
-  name: hnp-paper-fgvc-aircraft-b16-r16-qkvo
+  name: idea5-hnp-paper-fgvc-aircraft-b16-r16-qkvo
   output_root: outputs
 
 runtime:
@@ -62,9 +62,9 @@ negative_training:
     every_n_epochs: 1
     batch_size: 64
     max_id_bacc_drop: 0.04
-  checkpoint: outputs/experiments/hnp-paper-fgvc-aircraft-b16-r16-qkvo/checkpoints/hnp-paper-fgvc-aircraft-b16-r16-qkvo.pt
-  result_path: outputs/experiments/hnp-paper-fgvc-aircraft-b16-r16-qkvo/results/hnp-paper-fgvc-aircraft-b16-r16-qkvo-global-path.result
-  diagnostics_path: outputs/experiments/hnp-paper-fgvc-aircraft-b16-r16-qkvo/diagnostics/hnp-paper-fgvc-aircraft-b16-r16-qkvo-diagnostics.json
+  checkpoint: outputs/experiments/idea5-hnp-paper-fgvc-aircraft-b16-r16-qkvo/checkpoints/idea5-hnp-paper-fgvc-aircraft-b16-r16-qkvo.pt
+  result_path: outputs/experiments/idea5-hnp-paper-fgvc-aircraft-b16-r16-qkvo/results/idea5-hnp-paper-fgvc-aircraft-b16-r16-qkvo-global-path.result
+  diagnostics_path: outputs/experiments/idea5-hnp-paper-fgvc-aircraft-b16-r16-qkvo/diagnostics/idea5-hnp-paper-fgvc-aircraft-b16-r16-qkvo-diagnostics.json
 
 inference:
   mode: parent_unknown_global_path

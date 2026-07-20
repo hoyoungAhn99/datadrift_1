@@ -72,10 +72,10 @@ python scripts\infer_idea4_unknown_prompts.py --config configs\05_idea4_negative
 python scripts\infer_idea4_unknown_prompts.py --config configs\05_idea4_negative_prompt\idea4_fgvc_aircraft_b16_r16_qkvo_hide25_k4.yaml
 python scripts\infer_idea4_unknown_prompts.py --config configs\05_idea4_negative_prompt\idea4_fgvc_aircraft_b16_r16_qkvo_hide50_k4.yaml
 
-# Hierarchical NegPrompt without leave-one-child-out, GPU 0: original NIS + NPD + NND
-python scripts\train_hier_negprompt.py --config configs\06_hier_negprompt\hnp_paper_fgvc_aircraft_b16_r16_qkvo.yaml
-python scripts\infer_hier_negprompt.py --config configs\06_hier_negprompt\hnp_paper_fgvc_aircraft_b16_r16_qkvo.yaml
+# Idea 5 Hierarchical NegPrompt without leave-one-child-out, GPU 0: original NIS + NPD + NND
+python scripts\train_hier_negprompt.py --config configs\06_idea5_hier_negprompt\idea5_hnp_paper_fgvc_aircraft_b16_r16_qkvo.yaml
+python scripts\infer_hier_negprompt.py --config configs\06_idea5_hier_negprompt\idea5_hnp_paper_fgvc_aircraft_b16_r16_qkvo.yaml
 
-# Hierarchical NegPrompt without leave-one-child-out, GPU 1: paper losses + stop CE + parent anchor
-python scripts\train_hier_negprompt.py --config configs\06_hier_negprompt\hnp_stop_fgvc_aircraft_b16_r16_qkvo.yaml
-python scripts\infer_hier_negprompt.py --config configs\06_hier_negprompt\hnp_stop_fgvc_aircraft_b16_r16_qkvo.yaml
+# Idea 5 Hierarchical NegPrompt without leave-one-child-out, GPU 1: paper losses + stop CE + parent anchor
+python scripts\train_hier_negprompt.py --config configs\06_idea5_hier_negprompt\idea5_hnp_stop_fgvc_aircraft_b16_r16_qkvo.yaml
+python scripts\infer_hier_negprompt.py --config configs\06_idea5_hier_negprompt\idea5_hnp_stop_fgvc_aircraft_b16_r16_qkvo.yaml

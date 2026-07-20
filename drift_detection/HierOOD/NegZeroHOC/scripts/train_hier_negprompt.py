@@ -68,7 +68,7 @@ def load_config(path: str | Path) -> Namespace:
     validation_cfg = train_cfg.get("validation", {})
     inference_cfg = cfg.get("inference", {})
 
-    experiment_name = experiment_cfg.get("name", "hier-negprompt")
+    experiment_name = experiment_cfg.get("name", "idea5-hier-negprompt")
     output_root = Path(experiment_cfg.get("output_root", "outputs"))
     method = str(train_cfg.get("method", "hnp_stop"))
     if method not in VALID_METHODS:
