@@ -30,6 +30,14 @@ class UnknownEpisode:
     labels: list[str]
 
 
+@dataclass(frozen=True)
+class ParentKnownEpisode:
+    parent: str
+    children: list[str]
+    examples: list[EdgeExample]
+    labels: list[str]
+
+
 def node_path(hierarchy, node: str) -> list[str]:
     ancestors = [hierarchy.id_node_list[idx] for idx in hierarchy.node_ancestors.get(node, [])]
     return ancestors + [node]
@@ -143,6 +151,36 @@ def sample_leave_child_out_episode(
         hidden_children=hidden,
         examples=[examples[i] for i in order],
         labels=[labels[i] for i in order],
+    )
+
+
+def sample_parent_known_episode(
+    parent: str,
+    child_examples: dict[str, list[EdgeExample]],
+    max_examples: int,
+    rng: random.Random,
+) -> ParentKnownEpisode | None:
+    children = sorted(child for child, examples in child_examples.items() if examples)
+    if parent == "root" or not children:
+        return None
+
+    per_child = max(1, max_examples // len(children))
+    examples = []
+    labels = []
+    for child in children:
+        chosen = sample_examples(child_examples[child], per_child, rng)
+        examples.extend(chosen)
+        labels.extend([child] * len(chosen))
+    if not examples:
+        return None
+
+    order = list(range(len(examples)))
+    rng.shuffle(order)
+    return ParentKnownEpisode(
+        parent=parent,
+        children=children,
+        examples=[examples[index] for index in order],
+        labels=[labels[index] for index in order],
     )
 
 

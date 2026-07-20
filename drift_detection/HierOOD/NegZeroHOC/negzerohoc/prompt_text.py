@@ -101,3 +101,30 @@ def build_parent_unknown_text(dataset_name: str, hierarchy, parent: str) -> str:
         return f"a photo of another aircraft category under {parent_name}"
 
     return f"a photo of another visual category under {parent_name}"
+
+
+def build_child_negative_text(
+    dataset_name: str,
+    hierarchy,
+    parent: str,
+    child: str,
+) -> str:
+    dataset_key = dataset_name.lower()
+    parent_name = _path_canonical(hierarchy, dataset_name, parent)
+    child_name = _path_canonical(hierarchy, dataset_name, child)
+    child_role = infer_node_role(dataset_name, child, node_depth(hierarchy, child))
+
+    if dataset_key == "fgvc-aircraft":
+        if child_role == "family":
+            return (
+                f"an aircraft manufactured by {parent_name} that is not from "
+                f"the {child_name} family"
+            )
+        if child_role == "model":
+            return (
+                f"an aircraft in the {parent_name} family that is not model "
+                f"{child_name}"
+            )
+        return f"an aircraft under {parent_name} that is not {child_name}"
+
+    return f"a visual category under {parent_name} that is not {child_name}"

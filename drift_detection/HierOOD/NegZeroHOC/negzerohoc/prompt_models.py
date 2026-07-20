@@ -5,7 +5,13 @@ from dataclasses import asdict, dataclass
 import torch
 import torch.nn as nn
 
-from .prompt_text import build_edge_text, build_parent_text, build_parent_unknown_text, node_depth
+from .prompt_text import (
+    build_child_negative_text,
+    build_edge_text,
+    build_parent_text,
+    build_parent_unknown_text,
+    node_depth,
+)
 
 
 @dataclass
@@ -20,6 +26,8 @@ class HierPromptConfig:
     ablation: str = "global_depth_parent"
     unknown_prompts: int = 1
     unknown_prototype_ctx_tokens: int = 1
+    negative_prompts: int = 2
+    negative_prototype_ctx_tokens: int = 2
 
     @classmethod
     def from_dict(cls, data: dict | None) -> "HierPromptConfig":
@@ -209,3 +217,70 @@ class UnknownPromptLearner(_BasePromptLearner):
 
     def encode_unknown(self, parent: str) -> torch.Tensor:
         return self.encode_unknowns([parent])[0]
+
+
+class HierNegativePromptLearner(_BasePromptLearner):
+    def __init__(self, dataset_name: str, hierarchy, text_encoder, cfg: HierPromptConfig):
+        super().__init__(dataset_name, hierarchy, text_encoder, cfg, prefix="negative")
+        self.num_negative_prompts = max(1, int(cfg.negative_prompts))
+        self.prototype_ctx_tokens = max(0, int(cfg.negative_prototype_ctx_tokens))
+        if self.num_negative_prompts > 1 and self.prototype_ctx_tokens > 0:
+            self.prototype_ctx = nn.Parameter(
+                torch.randn(
+                    self.num_negative_prompts,
+                    self.prototype_ctx_tokens,
+                    self.text_width,
+                )
+                * float(cfg.init_std)
+            )
+        else:
+            self.register_parameter("prototype_ctx", None)
+
+    def negative_text(self, parent: str, child: str) -> str:
+        return build_child_negative_text(
+            self.dataset_name,
+            self.hierarchy,
+            parent,
+            child,
+        )
+
+    def encode_negative_prototypes(
+        self,
+        parent: str,
+        children: list[str],
+    ) -> torch.Tensor:
+        if not children:
+            return torch.empty(
+                0,
+                self.num_negative_prompts,
+                self.projection_dim,
+                device=self.device,
+            )
+
+        repeated_parents = [
+            parent
+            for _child in children
+            for _ in range(self.num_negative_prompts)
+        ]
+        repeated_children = [
+            child
+            for child in children
+            for _ in range(self.num_negative_prompts)
+        ]
+        texts = [
+            self.negative_text(parent_name, child)
+            for parent_name, child in zip(repeated_parents, repeated_children)
+        ]
+        context = self._context_for_parents(repeated_parents)
+        if self.prototype_ctx is not None:
+            prototype_context = self.prototype_ctx.unsqueeze(0).expand(
+                len(children), -1, -1, -1
+            )
+            prototype_context = prototype_context.reshape(
+                len(repeated_children),
+                self.prototype_ctx_tokens,
+                self.text_width,
+            )
+            context = torch.cat([context, prototype_context], dim=1)
+        features = self.text_encoder.encode_with_context(texts, context)
+        return features.view(len(children), self.num_negative_prompts, -1)
