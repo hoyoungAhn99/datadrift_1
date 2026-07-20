@@ -154,12 +154,16 @@ def main():
             "mixed": mixed_summary(greedy_val["metrics"], greedy_ood["metrics"]),
         }
 
+    checkpoint_metrics = checkpoint.get("metrics", {})
+    selection = checkpoint_metrics.get("selection", {})
     result = {
         "args": vars(args),
         "mode": PRIMARY_INFERENCE_MODE,
         "checkpoint": args.checkpoint,
         "checkpoint_stage": checkpoint["stage"],
         "positive_checkpoint": checkpoint.get("positive_checkpoint"),
+        "selected_epoch": selection.get("selected_epoch"),
+        "selection_used_id_guard": selection.get("used_id_guard"),
         "hierarchy_id_node_list": list(hierarchy.id_node_list),
         "val": val_result,
         "ood": ood_result,

@@ -5,6 +5,8 @@ from collections import Counter
 import torch
 import torch.nn.functional as F
 
+from .unknown_scoring import grouped_unknown_logits
+
 
 @torch.no_grad()
 def predict_features_terminal_global_path(
@@ -43,18 +45,18 @@ def predict_features_terminal_global_path(
 
         local = semantic_index[parent]
         child_features = F.normalize(local.child_features.to(device).float(), dim=-1)
-        candidate_features = child_features
         has_unknown = local.unknown_feature is not None and (
             parent != "root" or allow_root_unknown
         )
         if has_unknown:
-            unknown_feature = F.normalize(
-                local.unknown_feature.to(device).float().unsqueeze(0),
-                dim=-1,
+            logits = grouped_unknown_logits(
+                features,
+                child_features,
+                local.unknown_feature.to(device),
+                logit_scale=float(logit_scale),
             )
-            candidate_features = torch.cat([candidate_features, unknown_feature], dim=0)
-
-        logits = float(logit_scale) * (features @ candidate_features.t())
+        else:
+            logits = float(logit_scale) * (features @ child_features.t())
         log_probs = F.log_softmax(logits, dim=1)
         parent_score = node_scores[parent]
 

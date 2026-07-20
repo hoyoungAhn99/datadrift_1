@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from argparse import Namespace
+from dataclasses import replace
 import random
 import sys
 from pathlib import Path
@@ -36,6 +37,7 @@ from negzerohoc.training_data import (
     group_examples_by_parent_child,
     sample_leave_child_out_episode,
 )
+from negzerohoc.unknown_scoring import grouped_unknown_logits
 from negzerohoc.vision_lora import (
     VisionLoRAConfig,
     inject_clip_vision_lora,
@@ -66,6 +68,7 @@ def load_config(path: str | Path) -> Namespace:
     augmentation_cfg = cfg.get("augmentation", {})
     positive_cfg = cfg.get("positive", {})
     train_cfg = cfg.get("unknown_training", {})
+    unknown_prompt_cfg = train_cfg.get("prompt", {})
     validation_cfg = train_cfg.get("validation", {})
     inference_cfg = cfg.get("inference", {})
 
@@ -86,6 +89,11 @@ def load_config(path: str | Path) -> Namespace:
     allow_root_unknown = bool(inference_cfg.get("allow_root_unknown", False))
     if allow_root_unknown:
         raise ValueError("Idea 4 FGVC protocol does not allow a root-level unknown candidate")
+    unknown_aggregation = str(unknown_prompt_cfg.get("aggregation", "logmeanexp"))
+    if unknown_aggregation != "logmeanexp":
+        raise ValueError(
+            "Idea 4 multiple unknown prompts currently require aggregation='logmeanexp'"
+        )
 
     checkpoint = resolve_experiment_artifact(
         train_cfg.get("checkpoint"),
@@ -127,9 +135,20 @@ def load_config(path: str | Path) -> Namespace:
         weight_decay=float(train_cfg.get("weight_decay", 1e-4)),
         tau=float(train_cfg.get("tau", 0.07)),
         hide_strategy=train_cfg.get("hide_strategy", "hide_one_child"),
+        num_unknown_prompts=max(1, int(unknown_prompt_cfg.get("count", 1))),
+        unknown_prototype_ctx_tokens=max(
+            0, int(unknown_prompt_cfg.get("prototype_ctx_tokens", 1))
+        ),
+        unknown_aggregation=unknown_aggregation,
         unknown_target_weight=float(train_cfg.get("unknown_target_weight", 1.0)),
         lambda_anchor=float(train_cfg.get("lambda_anchor", 0.1)),
         lambda_child_sep=float(train_cfg.get("lambda_child_sep", 0.1)),
+        lambda_prototype_diversity=float(
+            train_cfg.get("lambda_prototype_diversity", 0.0)
+        ),
+        prototype_diversity_margin=float(
+            train_cfg.get("prototype_diversity_margin", 0.2)
+        ),
         gradient_clip_norm=float(train_cfg.get("gradient_clip_norm", 1.0)),
         precision=str(train_cfg.get("precision", "fp16")).lower(),
         validation_every_n_epochs=max(1, int(validation_cfg.get("every_n_epochs", 1))),
@@ -303,10 +322,13 @@ def build_unknown_semantic_index(hierarchy, positive_index, unknown):
         candidate_names = list(local.children)
         prompts = dict(local.prompts)
         if parent != "root":
-            unknown_feature = unknown.encode_unknown(parent).detach().cpu()
+            unknown_feature = unknown.encode_unknown_prototypes([parent])[0].detach().cpu()
             unknown_name = f"__unknown__:{parent}"
             candidate_names.append(unknown_name)
-            prompts[unknown_name] = [unknown.unknown_text(parent)]
+            prompts[unknown_name] = [
+                unknown.unknown_text(parent)
+                for _ in range(unknown.num_unknown_prompts)
+            ]
         index[parent] = LocalSemanticCandidates(
             parent=parent,
             children=list(local.children),
@@ -322,14 +344,18 @@ def build_unknown_semantic_index(hierarchy, positive_index, unknown):
 
 def weighted_unknown_ce(
     image_features: torch.Tensor,
-    candidate_features: torch.Tensor,
+    known_features: torch.Tensor,
+    unknown_features: torch.Tensor,
     targets: torch.Tensor,
     tau: float,
     unknown_target_weight: float,
 ) -> tuple[torch.Tensor, dict]:
-    image_features = F.normalize(image_features.float(), dim=-1)
-    candidate_features = F.normalize(candidate_features.float(), dim=-1)
-    logits = image_features @ candidate_features.t() / float(tau)
+    logits = grouped_unknown_logits(
+        image_features,
+        known_features,
+        unknown_features,
+        logit_scale=1.0 / float(tau),
+    )
     class_weights = torch.ones(logits.shape[1], dtype=logits.dtype, device=logits.device)
     class_weights[-1] = float(unknown_target_weight)
     targets = targets.long().to(logits.device)
@@ -471,8 +497,8 @@ def evaluate_pseudo_leave_child_out(
 
         for hidden_child in children:
             known_children = [child for child in children if child != hidden_child]
-            candidate_features = torch.stack(
-                [child_to_feature[child] for child in known_children] + [unknown_feature]
+            known_features = torch.stack(
+                [child_to_feature[child] for child in known_children]
             ).float()
             selected_examples = []
             labels = []
@@ -489,7 +515,12 @@ def evaluate_pseudo_leave_child_out(
 
             image_indices = torch.tensor([example.image_index for example in selected_examples], dtype=torch.long)
             image_features = payload["features"].index_select(0, image_indices)
-            logits = F.normalize(image_features.float(), dim=-1) @ F.normalize(candidate_features, dim=-1).t()
+            logits = grouped_unknown_logits(
+                image_features,
+                known_features,
+                unknown_feature,
+                logit_scale=1.0,
+            )
             predictions = logits.argmax(dim=1)
             targets = torch.tensor(labels, dtype=torch.long)
             hidden_mask = targets == len(known_children)
@@ -599,6 +630,11 @@ def main():
         load_frozen_positive_stack(args, hierarchy, device)
     )
     positive_index = build_positive_semantic_index(hierarchy, positive)
+    prompt_cfg = replace(
+        prompt_cfg,
+        unknown_prompts=args.num_unknown_prompts,
+        unknown_prototype_ctx_tokens=args.unknown_prototype_ctx_tokens,
+    )
     unknown = UnknownPromptLearner(args.dataset, hierarchy, text_encoder, prompt_cfg).to(device)
     trainable_params = prompt_parameters(unknown)
     optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=args.weight_decay)
@@ -630,6 +666,8 @@ def main():
         "Idea 4 frozen-positive unknown training: "
         f"vision_lora_modules={len(replaced_modules)}, "
         f"unknown_prompt_params={sum(parameter.numel() for parameter in trainable_params)}, "
+        f"unknown_prototypes={args.num_unknown_prompts}, "
+        f"hide_strategy={args.hide_strategy}, "
         f"eligible_parents={len(parents)}, positive_val_bacc={positive_baseline_bacc:.6f}, "
         f"id_bacc_floor={id_bacc_floor:.6f}"
     )
@@ -660,6 +698,7 @@ def main():
         epoch_loss = 0.0
         epoch_ce = 0.0
         epoch_reg = 0.0
+        epoch_diversity = 0.0
         epoch_known_acc = 0.0
         epoch_hidden_recall = 0.0
         steps = 0
@@ -693,10 +732,13 @@ def main():
             )
 
             optimizer.zero_grad(set_to_none=True)
-            unknown_features = unknown.encode_unknowns([episode.parent for episode in episodes])
+            unknown_features = unknown.encode_unknown_prototypes(
+                [episode.parent for episode in episodes]
+            )
             losses = []
             ce_values = []
             reg_values = []
+            diversity_values = []
             known_acc_values = []
             hidden_recall_values = []
 
@@ -709,7 +751,6 @@ def main():
                 ]).to(device)
                 all_child_features = local.child_features.to(device)
                 unknown_feature = unknown_features[episode_index]
-                candidate_features = torch.cat([known_features, unknown_feature.unsqueeze(0)], dim=0)
                 child_to_target = {child: index for index, child in enumerate(episode.known_children)}
                 targets = torch.tensor([
                     len(episode.known_children) if label == UNKNOWN_LABEL else child_to_target[label]
@@ -722,7 +763,8 @@ def main():
 
                 ce_loss, ce_stats = weighted_unknown_ce(
                     image_features,
-                    candidate_features,
+                    known_features,
+                    unknown_feature,
                     targets,
                     tau=args.tau,
                     unknown_target_weight=args.unknown_target_weight,
@@ -733,10 +775,13 @@ def main():
                     all_child_features,
                     lambda_anchor=args.lambda_anchor,
                     lambda_child_sep=args.lambda_child_sep,
+                    lambda_prototype_diversity=args.lambda_prototype_diversity,
+                    prototype_diversity_margin=args.prototype_diversity_margin,
                 )
                 losses.append(ce_loss + regularizer)
                 ce_values.append(float(ce_loss.detach().cpu()))
                 reg_values.append(reg_stats["regularizer"])
+                diversity_values.append(reg_stats["prototype_diversity_loss"])
                 known_acc_values.append(ce_stats["known_acc"])
                 hidden_recall_values.append(ce_stats["hidden_unknown_recall"])
 
@@ -748,6 +793,7 @@ def main():
             epoch_loss += float(loss.detach().cpu())
             epoch_ce += sum(ce_values) / len(ce_values)
             epoch_reg += sum(reg_values) / len(reg_values)
+            epoch_diversity += sum(diversity_values) / len(diversity_values)
             epoch_known_acc += sum(known_acc_values) / len(known_acc_values)
             epoch_hidden_recall += sum(hidden_recall_values) / len(hidden_recall_values)
             steps += 1
@@ -758,6 +804,7 @@ def main():
             "loss": epoch_loss / max(1, steps),
             "ce_loss": epoch_ce / max(1, steps),
             "regularizer": epoch_reg / max(1, steps),
+            "prototype_diversity_loss": epoch_diversity / max(1, steps),
             "known_acc": epoch_known_acc / max(1, steps),
             "hidden_unknown_recall": epoch_hidden_recall / max(1, steps),
             "lr": optimizer.param_groups[0]["lr"],

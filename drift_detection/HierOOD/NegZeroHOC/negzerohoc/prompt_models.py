@@ -19,6 +19,7 @@ class HierPromptConfig:
     init_std: float = 0.02
     ablation: str = "global_depth_parent"
     unknown_prompts: int = 1
+    unknown_prototype_ctx_tokens: int = 1
 
     @classmethod
     def from_dict(cls, data: dict | None) -> "HierPromptConfig":
@@ -145,16 +146,66 @@ class PositivePromptLearner(_BasePromptLearner):
 class UnknownPromptLearner(_BasePromptLearner):
     def __init__(self, dataset_name: str, hierarchy, text_encoder, cfg: HierPromptConfig):
         super().__init__(dataset_name, hierarchy, text_encoder, cfg, prefix="unknown")
+        self.num_unknown_prompts = max(1, int(cfg.unknown_prompts))
+        self.prototype_ctx_tokens = max(0, int(cfg.unknown_prototype_ctx_tokens))
+        if self.num_unknown_prompts > 1 and self.prototype_ctx_tokens > 0:
+            self.prototype_ctx = nn.Parameter(
+                torch.randn(
+                    self.num_unknown_prompts,
+                    self.prototype_ctx_tokens,
+                    self.text_width,
+                )
+                * float(cfg.init_std)
+            )
+        else:
+            self.register_parameter("prototype_ctx", None)
 
     def unknown_text(self, parent: str) -> str:
         return build_parent_unknown_text(self.dataset_name, self.hierarchy, parent)
 
-    def encode_unknowns(self, parents: list[str]) -> torch.Tensor:
+    def encode_unknown_prototypes(self, parents: list[str]) -> torch.Tensor:
         if not parents:
-            return torch.empty(0, self.projection_dim, device=self.device)
-        texts = [self.unknown_text(parent) for parent in parents]
-        context = self._context_for_parents(parents)
-        return self.text_encoder.encode_with_context(texts, context)
+            return torch.empty(
+                0,
+                self.num_unknown_prompts,
+                self.projection_dim,
+                device=self.device,
+            )
+
+        if self.num_unknown_prompts == 1:
+            texts = [self.unknown_text(parent) for parent in parents]
+            context = self._context_for_parents(parents)
+            features = self.text_encoder.encode_with_context(texts, context)
+            return features.unsqueeze(1)
+
+        repeated_parents = [
+            parent
+            for parent in parents
+            for _ in range(self.num_unknown_prompts)
+        ]
+        texts = [self.unknown_text(parent) for parent in repeated_parents]
+        context = self._context_for_parents(repeated_parents)
+        if self.prototype_ctx is not None:
+            prototype_context = self.prototype_ctx.unsqueeze(0).expand(
+                len(parents), -1, -1, -1
+            )
+            prototype_context = prototype_context.reshape(
+                len(repeated_parents),
+                self.prototype_ctx_tokens,
+                self.text_width,
+            )
+            context = torch.cat([context, prototype_context], dim=1)
+        features = self.text_encoder.encode_with_context(texts, context)
+        return features.view(len(parents), self.num_unknown_prompts, -1)
+
+    def encode_unknowns(self, parents: list[str]) -> torch.Tensor:
+        features = self.encode_unknown_prototypes(parents)
+        if self.num_unknown_prompts != 1:
+            raise RuntimeError(
+                "encode_unknowns only supports one unknown prompt; "
+                "use encode_unknown_prototypes for multiple prototypes"
+            )
+        return features[:, 0]
 
     def encode_unknown(self, parent: str) -> torch.Tensor:
         return self.encode_unknowns([parent])[0]

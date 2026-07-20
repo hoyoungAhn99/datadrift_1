@@ -53,3 +53,21 @@ python scripts\infer_idea3_joint_vision_lora.py --config configs\04_joint_vision
 # Idea 4: freeze the best positive Vision LoRA model and learn parent-local unknown prompts
 python scripts\train_idea4_unknown_prompts.py --config configs\05_idea4_negative_prompt\idea4_fgvc_aircraft_b16_r16_qkvo_parent_unknown.yaml
 python scripts\infer_idea4_unknown_prompts.py --config configs\05_idea4_negative_prompt\idea4_fgvc_aircraft_b16_r16_qkvo_parent_unknown.yaml
+
+# Idea 4 follow-up phase A: isolate pseudo-OOD hidden-child ratio (K=1)
+# GPU 0
+python scripts\train_idea4_unknown_prompts.py --config configs\05_idea4_negative_prompt\idea4_fgvc_aircraft_b16_r16_qkvo_hide25_k1.yaml
+# GPU 1
+python scripts\train_idea4_unknown_prompts.py --config configs\05_idea4_negative_prompt\idea4_fgvc_aircraft_b16_r16_qkvo_hide50_k1.yaml
+
+# Idea 4 follow-up phase B: repeat each ratio with four unknown prototypes
+# GPU 0
+python scripts\train_idea4_unknown_prompts.py --config configs\05_idea4_negative_prompt\idea4_fgvc_aircraft_b16_r16_qkvo_hide25_k4.yaml
+# GPU 1
+python scripts\train_idea4_unknown_prompts.py --config configs\05_idea4_negative_prompt\idea4_fgvc_aircraft_b16_r16_qkvo_hide50_k4.yaml
+
+# Optional inference-only reruns from each selected checkpoint
+python scripts\infer_idea4_unknown_prompts.py --config configs\05_idea4_negative_prompt\idea4_fgvc_aircraft_b16_r16_qkvo_hide25_k1.yaml
+python scripts\infer_idea4_unknown_prompts.py --config configs\05_idea4_negative_prompt\idea4_fgvc_aircraft_b16_r16_qkvo_hide50_k1.yaml
+python scripts\infer_idea4_unknown_prompts.py --config configs\05_idea4_negative_prompt\idea4_fgvc_aircraft_b16_r16_qkvo_hide25_k4.yaml
+python scripts\infer_idea4_unknown_prompts.py --config configs\05_idea4_negative_prompt\idea4_fgvc_aircraft_b16_r16_qkvo_hide50_k4.yaml

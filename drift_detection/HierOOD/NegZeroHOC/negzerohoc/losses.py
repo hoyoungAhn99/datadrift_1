@@ -642,16 +642,41 @@ def unknown_regularization(
     child_features: torch.Tensor,
     lambda_anchor: float = 0.1,
     lambda_child_sep: float = 0.1,
+    lambda_prototype_diversity: float = 0.0,
+    prototype_diversity_margin: float = 0.2,
 ) -> tuple[torch.Tensor, dict]:
+    if unknown_feature.ndim == 1:
+        unknown_feature = unknown_feature.unsqueeze(0)
+    if unknown_feature.ndim != 2:
+        raise ValueError(
+            "unknown_feature must have shape [dim] or [num_prototypes, dim]"
+        )
     unknown_feature = F.normalize(unknown_feature.float(), dim=-1)
     parent_feature = F.normalize(parent_feature.float(), dim=-1)
     child_features = F.normalize(child_features.float(), dim=-1)
 
-    anchor_loss = -torch.sum(unknown_feature * parent_feature)
-    child_sep_loss = torch.mean(child_features @ unknown_feature)
-    total = float(lambda_anchor) * anchor_loss + float(lambda_child_sep) * child_sep_loss
+    anchor_loss = -torch.mean(unknown_feature @ parent_feature)
+    child_sep_loss = torch.mean(child_features @ unknown_feature.t())
+    if unknown_feature.shape[0] > 1:
+        similarities = unknown_feature @ unknown_feature.t()
+        off_diagonal = ~torch.eye(
+            unknown_feature.shape[0],
+            dtype=torch.bool,
+            device=unknown_feature.device,
+        )
+        diversity_loss = F.relu(
+            similarities[off_diagonal] - float(prototype_diversity_margin)
+        ).mean()
+    else:
+        diversity_loss = unknown_feature.new_zeros(())
+    total = (
+        float(lambda_anchor) * anchor_loss
+        + float(lambda_child_sep) * child_sep_loss
+        + float(lambda_prototype_diversity) * diversity_loss
+    )
     return total, {
         "anchor_loss": float(anchor_loss.detach().cpu()),
         "child_sep_loss": float(child_sep_loss.detach().cpu()),
+        "prototype_diversity_loss": float(diversity_loss.detach().cpu()),
         "regularizer": float(total.detach().cpu()),
     }

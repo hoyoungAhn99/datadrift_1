@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
+from .unknown_scoring import grouped_unknown_logits
+
 from .semantic_index import LocalSemanticCandidates
 
 
@@ -86,10 +88,15 @@ def predict_one_idea3(
         names = list(local.children)
 
         if mode == "parent_unknown" and local.unknown_feature is not None:
-            feats = torch.cat([feats, local.unknown_feature.to(image_feature.device).unsqueeze(0)], dim=0)
+            logits = grouped_unknown_logits(
+                image_feature.unsqueeze(0),
+                feats,
+                local.unknown_feature.to(image_feature.device),
+                logit_scale=float(tau),
+            )[0]
             names.append(f"__unknown__:{node}")
-
-        logits = float(tau) * torch.mv(feats, image_feature)
+        else:
+            logits = float(tau) * torch.mv(feats, image_feature)
         winner_idx = int(torch.argmax(logits).item())
         winner = names[winner_idx]
 
