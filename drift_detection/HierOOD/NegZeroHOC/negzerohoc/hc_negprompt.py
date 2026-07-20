@@ -65,6 +65,7 @@ def hierarchy_constrained_negprompt_loss(
     lambda_diversity: float,
     lambda_route: float,
     lambda_balance: float,
+    safety_mode: str = "softplus",
 ) -> tuple[torch.Tensor, dict]:
     """Train hierarchy-local negative prompts without pseudo-OOD targets.
 
@@ -75,6 +76,8 @@ def hierarchy_constrained_negprompt_loss(
     """
     if float(tau) <= 0.0 or float(hierarchy_tau) <= 0.0:
         raise ValueError("tau and hierarchy_tau must be positive")
+    if safety_mode not in {"softplus", "squared_hinge"}:
+        raise ValueError(f"Unsupported safety_mode: {safety_mode!r}")
     if positive_features.ndim != 2:
         raise ValueError("positive_features must have shape [children, dim]")
     if negative_features.ndim != 3:
@@ -98,9 +101,13 @@ def hierarchy_constrained_negprompt_loss(
     positive_logits = images @ positives.t() / float(tau)
     true_positive_logits = positive_logits.gather(1, targets.unsqueeze(1)).squeeze(1)
     negative_mass = torch.logsumexp(negative_logits, dim=1)
-    safe_loss = F.softplus(
+    safety_violation = (
         negative_mass - true_positive_logits + float(safety_margin)
-    ).mean()
+    )
+    if safety_mode == "squared_hinge":
+        safe_loss = F.relu(safety_violation).square().mean()
+    else:
+        safe_loss = F.softplus(safety_violation).mean()
 
     shell_targets = _sibling_shell_targets(positives, parent_feature)
     positive_per_negative = positives.unsqueeze(1).expand_as(negatives)
@@ -141,6 +148,9 @@ def hierarchy_constrained_negprompt_loss(
         "hnis_loss": float(hnis_loss.detach().cpu()),
         "hnis_excess": float(hnis_excess.detach().cpu()),
         "safe_loss": float(safe_loss.detach().cpu()),
+        "safety_violation_rate": float(
+            (safety_violation > 0.0).float().mean().detach().cpu()
+        ),
         "shell_loss": float(shell_loss.detach().cpu()),
         "shell_target": float(shell_targets.mean().detach().cpu()),
         "negative_positive_cosine": float(

@@ -95,6 +95,9 @@ def load_config(path: str | Path) -> Namespace:
             "logsumexp" if method == "hc_negprompt" else "logmeanexp",
         )
     )
+    safety_mode = str(loss_cfg.get("safety_mode", "softplus"))
+    if safety_mode not in {"softplus", "squared_hinge"}:
+        raise ValueError(f"Unsupported negative_training.loss.safety_mode: {safety_mode!r}")
     if unknown_aggregation not in {"logmeanexp", "logsumexp"}:
         raise ValueError(
             f"Unsupported inference.unknown_aggregation: {unknown_aggregation!r}"
@@ -170,6 +173,7 @@ def load_config(path: str | Path) -> Namespace:
         lambda_balance=float(loss_cfg.get("lambda_balance", 0.1)),
         hierarchy_tau=float(loss_cfg.get("hierarchy_tau", 0.07)),
         safety_margin=float(loss_cfg.get("safety_margin", 0.0)),
+        safety_mode=safety_mode,
         depth_balanced=bool(loss_cfg.get("depth_balanced", True)),
         validation_every_n_epochs=max(
             1, int(validation_cfg.get("every_n_epochs", 1))
@@ -442,6 +446,7 @@ def main():
                         lambda_diversity=args.lambda_diversity,
                         lambda_route=args.lambda_route,
                         lambda_balance=args.lambda_balance,
+                        safety_mode=args.safety_mode,
                     )
                 else:
                     loss, stats = hierarchical_negprompt_loss(
@@ -508,6 +513,7 @@ def main():
                 f"epoch {epoch}: loss={epoch_stats.get('loss', 0.0):.6f}, "
                 f"hnis_excess={epoch_stats.get('hnis_excess', 0.0):.6f}, "
                 f"safe={epoch_stats.get('safe_loss', 0.0):.6f}, "
+                f"safe_active={epoch_stats.get('safety_violation_rate', 0.0):.6f}, "
                 f"route_acc={epoch_stats.get('route_acc', 0.0):.6f}, "
                 f"id_neg_win={epoch_stats.get('id_unknown_mass_win_rate', 0.0):.6f}"
             )

@@ -110,6 +110,57 @@ class HierarchyConstrainedLossTest(unittest.TestCase):
         near_loss, _ = hc_loss(images, positives, near, **weights)
         self.assertLess(float(far_loss), float(near_loss))
 
+    def test_squared_hinge_stops_penalizing_satisfied_id_constraint(self):
+        images = torch.tensor([[1.0, 0.0, 0.0]])
+        positives = torch.tensor([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+        safe_negatives = torch.tensor(
+            [[[-1.0, 0.0, 0.0]], [[0.0, -1.0, 0.0]]],
+            requires_grad=True,
+        )
+        violating_negatives = torch.tensor(
+            [[[1.0, 0.0, 0.0]], [[1.0, 0.0, 0.0]]],
+            requires_grad=True,
+        )
+        weights = dict(
+            safety_mode="squared_hinge",
+            lambda_hnis=0.0,
+            lambda_safe=1.0,
+            lambda_shell=0.0,
+            lambda_diversity=0.0,
+            lambda_route=0.0,
+            lambda_balance=0.0,
+        )
+
+        safe_loss, safe_stats = hc_loss(
+            images, positives, safe_negatives, **weights
+        )
+        violating_loss, violating_stats = hc_loss(
+            images, positives, violating_negatives, **weights
+        )
+
+        self.assertEqual(float(safe_loss), 0.0)
+        self.assertEqual(safe_stats["safety_violation_rate"], 0.0)
+        self.assertGreater(float(violating_loss), 0.0)
+        self.assertEqual(violating_stats["safety_violation_rate"], 1.0)
+        safe_loss.backward()
+        torch.testing.assert_close(
+            safe_negatives.grad,
+            torch.zeros_like(safe_negatives),
+        )
+
+    def test_rejects_unknown_safety_mode(self):
+        images = torch.tensor([[1.0, 0.0, 0.0]])
+        positives = torch.tensor([[1.0, 0.0, 0.0]])
+        negatives = torch.tensor([[[0.0, 1.0, 0.0]]])
+
+        with self.assertRaisesRegex(ValueError, "Unsupported safety_mode"):
+            hc_loss(
+                images,
+                positives,
+                negatives,
+                safety_mode="not-a-loss",
+            )
+
     def test_route_loss_places_negative_bank_under_correct_ancestor(self):
         images = torch.tensor([[1.0, 0.0, 0.0]])
         positives = torch.tensor([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
