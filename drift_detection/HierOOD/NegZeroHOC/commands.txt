@@ -92,6 +92,10 @@ python scripts\infer_hier_negprompt.py --config configs\07_idea6_hc_negprompt\id
 python scripts\train_hier_negprompt.py --config configs\07_idea6_hc_negprompt\idea6_fgvc_aircraft_b16_r16_qkvo_hc_negprompt_squared_hinge.yaml
 python scripts\infer_hier_negprompt.py --config configs\07_idea6_hc_negprompt\idea6_fgvc_aircraft_b16_r16_qkvo_hc_negprompt_squared_hinge.yaml
 
-# Idea 6 global decoder-aligned safety: compare all leaf and unknown terminal paths
+# Idea 6 global decoder-aligned safety: inference also saves oracle-parent diagnostics
 python scripts\train_hier_negprompt.py --config configs\07_idea6_hc_negprompt\idea6_fgvc_aircraft_b16_r16_qkvo_hc_negprompt_global_safety.yaml
 python scripts\infer_hier_negprompt.py --config configs\07_idea6_hc_negprompt\idea6_fgvc_aircraft_b16_r16_qkvo_hc_negprompt_global_safety.yaml
+
+# Idea 7: sibling virtual open-space features; only parent-local negative prompts are trainable
+python scripts\train_idea7_virtual_open_negprompt.py --config configs\08_idea7_virtual_open_negprompt\idea7_fgvc_aircraft_b16_r16_qkvo_virtual_open.yaml
+python scripts\infer_idea7_virtual_open_negprompt.py --config configs\08_idea7_virtual_open_negprompt\idea7_fgvc_aircraft_b16_r16_qkvo_virtual_open.yaml

@@ -33,6 +33,7 @@ from negzerohoc.hier_negprompt import (
 )
 from negzerohoc.idea4_inference import terminal_global_path_scores
 from negzerohoc.output_layout import resolve_experiment_artifact
+from negzerohoc.oracle_parent import oracle_parent_diagnostics
 from negzerohoc.prompt_models import HierNegativePromptLearner
 from negzerohoc.runtime import available_device, configured_device
 from negzerohoc.training_data import (
@@ -138,6 +139,13 @@ def load_config(path: str | Path) -> Namespace:
         kind="diagnostics",
         default_filename=f"{experiment_name}-diagnostics.json",
     )
+    oracle_diagnostics_path = resolve_experiment_artifact(
+        cfg.get("oracle_diagnostics", {}).get("path"),
+        output_root=output_root,
+        experiment_name=experiment_name,
+        kind="diagnostics",
+        default_filename=f"{experiment_name}-oracle-parent.json",
+    )
 
     return Namespace(
         config=str(path),
@@ -210,6 +218,7 @@ def load_config(path: str | Path) -> Namespace:
         checkpoint=str(checkpoint),
         result_path=str(result_path),
         diagnostics_path=str(diagnostics_path),
+        oracle_diagnostics_path=str(oracle_diagnostics_path),
     )
 
 
@@ -644,6 +653,16 @@ def main():
         "ood",
         mode=PRIMARY_INFERENCE_MODE,
     )
+    oracle_result = oracle_parent_diagnostics(
+        ood_payload["features"],
+        ood_payload["classes"],
+        ood_payload["targets"],
+        hierarchy,
+        semantic_index,
+        logit_scale=args.inference_tau,
+        allow_root_unknown=args.allow_root_unknown,
+        unknown_aggregation=args.unknown_aggregation,
+    )
     mixed = mixed_summary(val_result["metrics"], ood_result["metrics"])
     id_guard_passed = float(val_result["metrics"]["balanced_acc"]) >= id_bacc_floor
 
@@ -687,6 +706,7 @@ def main():
             "mixed_balanced_acc": float(mixed["mixed_balanced_acc"]),
             "mixed_balanced_hdist": float(mixed["mixed_balanced_hdist"]),
         },
+        "oracle_parent": oracle_result,
     }
     if args.greedy_ablation:
         greedy_result = ablations[GREEDY_INFERENCE_MODE]
@@ -717,21 +737,35 @@ def main():
         "hierarchy_id_node_list": list(hierarchy.id_node_list),
         "val": val_result,
         "ood": ood_result,
+        "oracle_parent": oracle_result,
         "mixed": mixed,
         "ablations": ablations,
     }
     ensure_dir(Path(args.result_path).parent)
     torch.save(result, args.result_path)
     save_json(args.diagnostics_path, final_metrics)
+    save_json(args.oracle_diagnostics_path, {
+        "diagnostic_only": True,
+        "used_for_checkpoint_selection": False,
+        "checkpoint": args.checkpoint,
+        "oracle_parent": oracle_result,
+    })
 
     print(f"fixed selected epoch: {args.epochs} (OOD was not used for selection)")
     print(f"ID guard passed: {id_guard_passed}")
     print(f"saved checkpoint: {args.checkpoint}")
     print(f"saved result: {args.result_path}")
+    print(f"saved oracle-parent diagnostics: {args.oracle_diagnostics_path}")
     print(f"ID BAcc: {float(val_result['metrics']['balanced_acc']):.6f}")
     print(f"OOD BAcc: {float(ood_result['metrics']['balanced_acc']):.6f}")
     print(f"Mixed BAcc: {float(mixed['mixed_balanced_acc']):.6f}")
     print(f"Mixed BMHD: {float(mixed['mixed_balanced_hdist']):.6f}")
+    print(
+        "Oracle-parent: "
+        f"local_unknown={oracle_result['oracle_unknown_balanced_recall']:.6f}, "
+        f"positive_route={oracle_result['positive_route_balanced_reach_rate']:.6f}, "
+        f"joint={oracle_result['joint_student_balanced_exact_rate']:.6f}"
+    )
 
 
 if __name__ == "__main__":

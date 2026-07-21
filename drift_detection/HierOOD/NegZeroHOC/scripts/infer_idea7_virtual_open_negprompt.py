@@ -14,13 +14,8 @@ sys.path.insert(0, str(REPO_ROOT))
 from negzerohoc.checkpointing import load_idea3_checkpoint
 from negzerohoc.evaluation import build_hierarchy, mixed_summary
 from negzerohoc.feature_io import ensure_dir, save_json
-from negzerohoc.hier_negprompt import build_hier_negprompt_semantic_index
 from negzerohoc.oracle_parent import oracle_parent_diagnostics
-from negzerohoc.prompt_models import (
-    HierNegativePromptLearner,
-    HierPromptConfig,
-    PositivePromptLearner,
-)
+from negzerohoc.prompt_models import HierPromptConfig, PositivePromptLearner, UnknownPromptLearner
 from negzerohoc.runtime import available_device
 from negzerohoc.soft_prompting import SoftPromptTextEncoder
 from negzerohoc.vision_lora import (
@@ -29,7 +24,6 @@ from negzerohoc.vision_lora import (
     load_vision_lora_state_dict,
     set_vision_lora_train_mode,
 )
-from scripts.train_hier_negprompt import load_config
 from scripts.train_idea3_joint_vision_lora import (
     build_eval_datasets,
     load_clip_and_tokenizer,
@@ -40,10 +34,12 @@ from scripts.train_idea4_unknown_prompts import (
     GREEDY_INFERENCE_MODE,
     PRIMARY_INFERENCE_MODE,
     build_positive_semantic_index,
+    build_unknown_semantic_index,
     encode_dataset_features,
     evaluate_feature_payload,
     freeze_module,
 )
+from scripts.train_idea7_virtual_open_negprompt import CHECKPOINT_STAGE, load_config
 
 
 def parse_args():
@@ -54,6 +50,7 @@ def parse_args():
 
 def validate_checkpoint(args, checkpoint: dict) -> None:
     expected = {
+        "stage": CHECKPOINT_STAGE,
         "dataset": args.dataset,
         "clip_model": args.clip_model,
         "hierarchy": args.hierarchy,
@@ -69,23 +66,7 @@ def validate_checkpoint(args, checkpoint: dict) -> None:
             f"{key}: checkpoint={actual!r}, config={expected_value!r}"
             for key, (actual, expected_value) in mismatches.items()
         )
-        raise ValueError(f"HierNegPrompt checkpoint/config mismatch: {details}")
-    expected_stage = (
-        "idea6_hc_negprompt_frozen_positive_lora"
-        if args.method == "hc_negprompt"
-        else "hier_negprompt_frozen_positive_lora"
-    )
-    if checkpoint.get("stage") != expected_stage:
-        raise ValueError(
-            f"Expected a {expected_stage} checkpoint, "
-            f"got {checkpoint.get('stage')!r}"
-        )
-    checkpoint_method = checkpoint.get("args", {}).get("method")
-    if checkpoint_method and checkpoint_method != args.method:
-        raise ValueError(
-            f"HierNegPrompt method mismatch: checkpoint={checkpoint_method!r}, "
-            f"config={args.method!r}"
-        )
+        raise ValueError(f"Idea7 checkpoint/config mismatch: {details}")
     for key in (
         "positive_state_dict",
         "unknown_state_dict",
@@ -94,7 +75,7 @@ def validate_checkpoint(args, checkpoint: dict) -> None:
         "prompt_config",
     ):
         if not checkpoint.get(key):
-            raise ValueError(f"HierNegPrompt checkpoint is missing {key}")
+            raise ValueError(f"Idea7 checkpoint is missing {key}")
 
 
 def main():
@@ -133,22 +114,22 @@ def main():
 
     prompt_cfg = HierPromptConfig.from_dict(checkpoint["prompt_config"])
     text_encoder = SoftPromptTextEncoder(
-        clip_model,
-        tokenizer,
-        max_length=prompt_cfg.max_length,
+        clip_model, tokenizer, max_length=prompt_cfg.max_length
     )
-    positive = PositivePromptLearner(args.dataset, hierarchy, text_encoder, prompt_cfg).to(device)
-    negative = HierNegativePromptLearner(args.dataset, hierarchy, text_encoder, prompt_cfg).to(device)
+    positive = PositivePromptLearner(
+        args.dataset, hierarchy, text_encoder, prompt_cfg
+    ).to(device)
+    unknown = UnknownPromptLearner(
+        args.dataset, hierarchy, text_encoder, prompt_cfg
+    ).to(device)
     load_prompt_only_state_dict(positive, checkpoint["positive_state_dict"])
-    load_prompt_only_state_dict(negative, checkpoint["unknown_state_dict"])
+    load_prompt_only_state_dict(unknown, checkpoint["unknown_state_dict"])
     freeze_module(positive)
-    freeze_module(negative)
+    freeze_module(unknown)
 
     positive_index = build_positive_semantic_index(hierarchy, positive)
-    semantic_index = build_hier_negprompt_semantic_index(
-        hierarchy,
-        positive_index,
-        negative,
+    semantic_index = build_unknown_semantic_index(
+        hierarchy, positive_index, unknown
     )
     val_payload = encode_dataset_features(
         args, clip_model, val_dataset, val_loader, device, "encode ID val"
@@ -156,13 +137,13 @@ def main():
     ood_payload = encode_dataset_features(
         args, clip_model, ood_dataset, ood_loader, device, "encode OOD"
     )
-
     val_result = evaluate_feature_payload(
         args, hierarchy, val_payload, semantic_index, "val", mode=PRIMARY_INFERENCE_MODE
     )
     ood_result = evaluate_feature_payload(
         args, hierarchy, ood_payload, semantic_index, "ood", mode=PRIMARY_INFERENCE_MODE
     )
+    mixed = mixed_summary(val_result["metrics"], ood_result["metrics"])
     oracle_result = oracle_parent_diagnostics(
         ood_payload["features"],
         ood_payload["classes"],
@@ -173,7 +154,7 @@ def main():
         allow_root_unknown=args.allow_root_unknown,
         unknown_aggregation=args.unknown_aggregation,
     )
-    mixed = mixed_summary(val_result["metrics"], ood_result["metrics"])
+
     ablations = {}
     if args.greedy_ablation:
         greedy_val = evaluate_feature_payload(
@@ -192,7 +173,7 @@ def main():
     result = {
         "args": vars(args),
         "mode": PRIMARY_INFERENCE_MODE,
-        "method": args.method,
+        "method": "virtual_open_negprompt",
         "checkpoint": args.checkpoint,
         "checkpoint_stage": checkpoint["stage"],
         "positive_checkpoint": checkpoint.get("positive_checkpoint"),
@@ -216,7 +197,6 @@ def main():
     })
 
     print(f"loaded checkpoint: {args.checkpoint}")
-    print(f"method: {args.method}")
     print(f"reconstructed Vision LoRA modules: {len(replaced_modules)}")
     print(f"saved result: {args.result_path}")
     print(f"saved oracle-parent diagnostics: {args.oracle_diagnostics_path}")
