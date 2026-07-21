@@ -91,3 +91,7 @@ python scripts\infer_hier_negprompt.py --config configs\07_idea6_hc_negprompt\id
 # Idea 6 constrained safety: squared hinge stops pushing after the ID margin is met
 python scripts\train_hier_negprompt.py --config configs\07_idea6_hc_negprompt\idea6_fgvc_aircraft_b16_r16_qkvo_hc_negprompt_squared_hinge.yaml
 python scripts\infer_hier_negprompt.py --config configs\07_idea6_hc_negprompt\idea6_fgvc_aircraft_b16_r16_qkvo_hc_negprompt_squared_hinge.yaml
+
+# Idea 6 global decoder-aligned safety: compare all leaf and unknown terminal paths
+python scripts\train_hier_negprompt.py --config configs\07_idea6_hc_negprompt\idea6_fgvc_aircraft_b16_r16_qkvo_hc_negprompt_global_safety.yaml
+python scripts\infer_hier_negprompt.py --config configs\07_idea6_hc_negprompt\idea6_fgvc_aircraft_b16_r16_qkvo_hc_negprompt_global_safety.yaml

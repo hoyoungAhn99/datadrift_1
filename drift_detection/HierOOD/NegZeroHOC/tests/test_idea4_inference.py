@@ -3,7 +3,10 @@ import unittest
 
 import torch
 
-from negzerohoc.idea4_inference import predict_features_terminal_global_path
+from negzerohoc.idea4_inference import (
+    predict_features_terminal_global_path,
+    terminal_global_path_scores,
+)
 from negzerohoc.semantic_index import LocalSemanticCandidates
 
 
@@ -46,6 +49,43 @@ def local_candidates(parent, children, child_scores, unknown_score=None):
 
 
 class TerminalGlobalPathTest(unittest.TestCase):
+    def test_differentiable_scores_match_decoder_and_update_unknown_feature(self):
+        hierarchy = DummyHierarchy()
+        semantic_index = {
+            "root": local_candidates("root", ["A", "B"], [0.8, -0.8]),
+            "A": local_candidates("A", ["A1", "A2"], [0.2, 0.1], unknown_score=0.95),
+            "B": local_candidates("B", ["B1", "B2"], [0.9, -0.9], unknown_score=-0.8),
+        }
+        semantic_index["A"].unknown_feature.requires_grad_(True)
+        features = torch.tensor([[1.0, 0.0]])
+
+        scores = terminal_global_path_scores(
+            features,
+            hierarchy,
+            semantic_index,
+            logit_scale=4.0,
+        )
+        prediction = predict_features_terminal_global_path(
+            features,
+            hierarchy,
+            semantic_index,
+            logit_scale=4.0,
+        )
+        winning_node = scores["candidate_nodes"][
+            int(scores["score_matrix"].argmax(dim=1)[0])
+        ]
+
+        self.assertEqual(
+            winning_node,
+            hierarchy.id_node_list[int(prediction["preds"][0])],
+        )
+        scores["score_matrix"].sum().backward()
+        self.assertIsNotNone(semantic_index["A"].unknown_feature.grad)
+        self.assertGreater(
+            float(semantic_index["A"].unknown_feature.grad.norm()),
+            0.0,
+        )
+
     def test_parent_unknown_competes_with_all_complete_leaf_paths(self):
         hierarchy = DummyHierarchy()
         semantic_index = {

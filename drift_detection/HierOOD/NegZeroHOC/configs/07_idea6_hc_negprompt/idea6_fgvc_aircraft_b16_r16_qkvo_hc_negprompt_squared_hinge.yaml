@@ -66,7 +66,7 @@ negative_training:
   validation:
     every_n_epochs: 1
     batch_size: 64
-    max_id_bacc_drop: 0.04
+    max_id_bacc_drop: 0.08
   checkpoint: outputs/experiments/idea6-hc-negprompt-squared-hinge-fgvc-aircraft-b16-r16-qkvo/checkpoints/idea6-hc-negprompt-squared-hinge-fgvc-aircraft-b16-r16-qkvo.pt
   result_path: outputs/experiments/idea6-hc-negprompt-squared-hinge-fgvc-aircraft-b16-r16-qkvo/results/idea6-hc-negprompt-squared-hinge-fgvc-aircraft-b16-r16-qkvo-global-path.result
   diagnostics_path: outputs/experiments/idea6-hc-negprompt-squared-hinge-fgvc-aircraft-b16-r16-qkvo/diagnostics/idea6-hc-negprompt-squared-hinge-fgvc-aircraft-b16-r16-qkvo-diagnostics.json

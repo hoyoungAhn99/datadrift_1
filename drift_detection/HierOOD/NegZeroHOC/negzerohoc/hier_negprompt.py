@@ -94,6 +94,43 @@ def hierarchical_negprompt_loss(
     }
 
 
+def build_differentiable_hier_negprompt_semantic_index(
+    hierarchy,
+    positive_index,
+    negative_learner,
+) -> tuple[dict, dict[str, torch.Tensor]]:
+    """Encode every unknown bank with gradients for decoder-aligned training."""
+    index = {}
+    negative_features_by_parent = {}
+    for parent, local in positive_index.items():
+        negative_features = None
+        candidate_names = list(local.children)
+        prompts = dict(local.prompts)
+        if parent != "root":
+            child_negatives = negative_learner.encode_negative_prototypes(
+                parent,
+                list(local.children),
+            )
+            negative_features_by_parent[parent] = child_negatives
+            negative_features = child_negatives.flatten(0, 1)
+            unknown_name = f"__unknown__:{parent}"
+            candidate_names.append(unknown_name)
+            prompts[unknown_name] = [
+                negative_learner.negative_text(parent, child)
+                for child in local.children
+                for _ in range(negative_learner.num_negative_prompts)
+            ]
+        index[parent] = LocalSemanticCandidates(
+            parent=parent,
+            children=list(local.children),
+            child_features=local.child_features,
+            unknown_feature=negative_features,
+            candidate_names=candidate_names,
+            prompts=prompts,
+        )
+    return index, negative_features_by_parent
+
+
 @torch.no_grad()
 def build_hier_negprompt_semantic_index(hierarchy, positive_index, negative_learner):
     was_training = negative_learner.training

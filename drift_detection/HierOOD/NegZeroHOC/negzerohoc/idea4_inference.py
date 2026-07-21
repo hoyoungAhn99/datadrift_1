@@ -8,23 +8,16 @@ import torch.nn.functional as F
 from .unknown_scoring import grouped_unknown_logits
 
 
-@torch.no_grad()
-def predict_features_terminal_global_path(
+def terminal_global_path_scores(
     features: torch.Tensor,
     hierarchy,
     semantic_index,
     logit_scale: float = 1.0,
     allow_root_unknown: bool = False,
     unknown_aggregation: str = "logmeanexp",
-    return_trace: bool = False,
+    return_local_scores: bool = False,
 ) -> dict:
-    """Decode ID leaves and parent-local unknown terminals in one path space.
-
-    Known edges and a parent's unknown terminal share one local softmax. The
-    score of a complete candidate is the sum of its root-to-terminal local log
-    probabilities. This is exact MAP decoding over every ID leaf and every
-    enabled local unknown terminal, without a threshold or beam search.
-    """
+    """Return differentiable scores for every leaf and unknown terminal."""
     if float(logit_scale) <= 0.0:
         raise ValueError("Terminal global-path logit_scale must be positive")
 
@@ -33,8 +26,8 @@ def predict_features_terminal_global_path(
     batch_size = int(features.shape[0])
     node_scores = {"root": torch.zeros(batch_size, dtype=features.dtype, device=device)}
     terminal_scores: dict[str, torch.Tensor] = {}
-    edge_log_probs = {} if return_trace else None
-    unknown_log_probs = {} if return_trace else None
+    edge_log_probs = {} if return_local_scores else None
+    unknown_log_probs = {} if return_local_scores else None
 
     ordered_parents = sorted(
         hierarchy.parent2children,
@@ -64,14 +57,14 @@ def predict_features_terminal_global_path(
 
         for child_index, child in enumerate(local.children):
             node_scores[child] = parent_score + log_probs[:, child_index]
-            if return_trace:
-                edge_log_probs[(parent, child)] = log_probs[:, child_index].detach().cpu()
+            if return_local_scores:
+                edge_log_probs[(parent, child)] = log_probs[:, child_index]
 
         if has_unknown:
             local_unknown_log_prob = log_probs[:, len(local.children)]
             terminal_scores[parent] = parent_score + local_unknown_log_prob
-            if return_trace:
-                unknown_log_probs[parent] = local_unknown_log_prob.detach().cpu()
+            if return_local_scores:
+                unknown_log_probs[parent] = local_unknown_log_prob
 
     leaves = [node for node in hierarchy.id_node_list if node not in hierarchy.parent2children]
     missing = [leaf for leaf in leaves if leaf not in node_scores]
@@ -84,7 +77,49 @@ def predict_features_terminal_global_path(
     candidate_kinds = ["leaf"] * len(leaves) + ["unknown"] * len(terminal_scores)
     candidate_scores = [node_scores[leaf] for leaf in leaves]
     candidate_scores.extend(terminal_scores[parent] for parent in terminal_scores)
-    score_matrix = torch.stack(candidate_scores, dim=1)
+    return {
+        "score_matrix": torch.stack(candidate_scores, dim=1),
+        "candidate_nodes": candidate_nodes,
+        "candidate_kinds": candidate_kinds,
+        "node_scores": node_scores,
+        "terminal_scores": terminal_scores,
+        "edge_log_probs": edge_log_probs,
+        "unknown_log_probs": unknown_log_probs,
+    }
+
+
+@torch.no_grad()
+def predict_features_terminal_global_path(
+    features: torch.Tensor,
+    hierarchy,
+    semantic_index,
+    logit_scale: float = 1.0,
+    allow_root_unknown: bool = False,
+    unknown_aggregation: str = "logmeanexp",
+    return_trace: bool = False,
+) -> dict:
+    """Decode ID leaves and parent-local unknown terminals in one path space.
+
+    Known edges and a parent's unknown terminal share one local softmax. The
+    score of a complete candidate is the sum of its root-to-terminal local log
+    probabilities. This is exact MAP decoding over every ID leaf and every
+    enabled local unknown terminal, without a threshold or beam search.
+    """
+    scores = terminal_global_path_scores(
+        features,
+        hierarchy,
+        semantic_index,
+        logit_scale=logit_scale,
+        allow_root_unknown=allow_root_unknown,
+        unknown_aggregation=unknown_aggregation,
+        return_local_scores=return_trace,
+    )
+    candidate_nodes = scores["candidate_nodes"]
+    candidate_kinds = scores["candidate_kinds"]
+    score_matrix = scores["score_matrix"]
+    edge_log_probs = scores["edge_log_probs"]
+    unknown_log_probs = scores["unknown_log_probs"]
+    batch_size = int(score_matrix.shape[0])
     winner_indices = torch.argmax(score_matrix, dim=1).detach().cpu().tolist()
     winner_nodes = [candidate_nodes[index] for index in winner_indices]
     winner_kinds = [candidate_kinds[index] for index in winner_indices]

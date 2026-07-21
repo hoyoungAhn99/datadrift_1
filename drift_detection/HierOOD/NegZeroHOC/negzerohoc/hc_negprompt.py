@@ -6,6 +6,49 @@ import torch
 import torch.nn.functional as F
 
 
+def global_decoder_safety_loss(
+    score_matrix: torch.Tensor,
+    candidate_kinds: list[str],
+    *,
+    margin: float,
+    safety_mode: str = "squared_hinge",
+) -> tuple[torch.Tensor, dict]:
+    """Keep every ID sample's best leaf above all unknown terminals."""
+    if score_matrix.ndim != 2:
+        raise ValueError("score_matrix must have shape [images, terminal candidates]")
+    if score_matrix.shape[1] != len(candidate_kinds):
+        raise ValueError("candidate_kinds must match the score matrix width")
+    if safety_mode not in {"softplus", "squared_hinge"}:
+        raise ValueError(f"Unsupported safety_mode: {safety_mode!r}")
+
+    leaf_indices = [index for index, kind in enumerate(candidate_kinds) if kind == "leaf"]
+    unknown_indices = [
+        index for index, kind in enumerate(candidate_kinds) if kind == "unknown"
+    ]
+    if not leaf_indices or not unknown_indices:
+        raise ValueError("Global decoder safety requires leaf and unknown terminals")
+
+    best_leaf_scores = score_matrix[:, leaf_indices].max(dim=1).values
+    best_unknown_scores = score_matrix[:, unknown_indices].max(dim=1).values
+    violations = best_unknown_scores - best_leaf_scores + float(margin)
+    if safety_mode == "squared_hinge":
+        loss = F.relu(violations).square().mean()
+    else:
+        loss = F.softplus(violations).mean()
+
+    score_gaps = best_leaf_scores - best_unknown_scores
+    return loss, {
+        "global_safe_loss": float(loss.detach().cpu()),
+        "global_safety_violation_rate": float(
+            (violations > 0.0).float().mean().detach().cpu()
+        ),
+        "global_unknown_win_rate": float(
+            (best_unknown_scores > best_leaf_scores).float().mean().detach().cpu()
+        ),
+        "global_leaf_unknown_gap": float(score_gaps.mean().detach().cpu()),
+    }
+
+
 def _sibling_shell_targets(
     positive_features: torch.Tensor,
     parent_feature: torch.Tensor,

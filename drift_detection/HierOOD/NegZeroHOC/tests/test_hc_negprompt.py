@@ -3,7 +3,10 @@ import unittest
 
 import torch
 
-from negzerohoc.hc_negprompt import hierarchy_constrained_negprompt_loss
+from negzerohoc.hc_negprompt import (
+    global_decoder_safety_loss,
+    hierarchy_constrained_negprompt_loss,
+)
 from negzerohoc.unknown_scoring import grouped_unknown_logits
 
 
@@ -72,6 +75,25 @@ class NegativeMassScoringTest(unittest.TestCase):
 
 
 class HierarchyConstrainedLossTest(unittest.TestCase):
+    def test_global_decoder_hinge_uses_best_leaf_and_unknown_terminals(self):
+        scores = torch.tensor(
+            [[2.0, 0.0, 1.0], [0.0, 1.0, 2.0]],
+            requires_grad=True,
+        )
+        loss, stats = global_decoder_safety_loss(
+            scores,
+            ["leaf", "leaf", "unknown"],
+            margin=0.5,
+            safety_mode="squared_hinge",
+        )
+
+        self.assertAlmostEqual(float(loss), 1.125)
+        self.assertEqual(stats["global_safety_violation_rate"], 0.5)
+        self.assertEqual(stats["global_unknown_win_rate"], 0.5)
+        loss.backward()
+        self.assertEqual(float(scores.grad[0].abs().sum()), 0.0)
+        self.assertGreater(float(scores.grad[1].abs().sum()), 0.0)
+
     def test_full_loss_is_finite_and_updates_negative_prompts(self):
         images = torch.tensor([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
         positives = torch.tensor([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])

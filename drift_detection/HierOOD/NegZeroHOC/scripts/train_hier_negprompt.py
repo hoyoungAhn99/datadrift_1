@@ -22,11 +22,16 @@ from negzerohoc.checkpointing import save_idea3_checkpoint
 from negzerohoc.config_utils import load_yaml_config
 from negzerohoc.evaluation import build_hierarchy, mixed_summary
 from negzerohoc.feature_io import ensure_dir, save_json
-from negzerohoc.hc_negprompt import hierarchy_constrained_negprompt_loss
+from negzerohoc.hc_negprompt import (
+    global_decoder_safety_loss,
+    hierarchy_constrained_negprompt_loss,
+)
 from negzerohoc.hier_negprompt import (
+    build_differentiable_hier_negprompt_semantic_index,
     build_hier_negprompt_semantic_index,
     hierarchical_negprompt_loss,
 )
+from negzerohoc.idea4_inference import terminal_global_path_scores
 from negzerohoc.output_layout import resolve_experiment_artifact
 from negzerohoc.prompt_models import HierNegativePromptLearner
 from negzerohoc.runtime import available_device, configured_device
@@ -96,8 +101,15 @@ def load_config(path: str | Path) -> Namespace:
         )
     )
     safety_mode = str(loss_cfg.get("safety_mode", "softplus"))
+    safety_scope = str(loss_cfg.get("safety_scope", "local"))
     if safety_mode not in {"softplus", "squared_hinge"}:
         raise ValueError(f"Unsupported negative_training.loss.safety_mode: {safety_mode!r}")
+    if safety_scope not in {"local", "global_decoder"}:
+        raise ValueError(
+            f"Unsupported negative_training.loss.safety_scope: {safety_scope!r}"
+        )
+    if method != "hc_negprompt" and safety_scope != "local":
+        raise ValueError("Global decoder safety is only supported by hc_negprompt")
     if unknown_aggregation not in {"logmeanexp", "logsumexp"}:
         raise ValueError(
             f"Unsupported inference.unknown_aggregation: {unknown_aggregation!r}"
@@ -174,7 +186,14 @@ def load_config(path: str | Path) -> Namespace:
         hierarchy_tau=float(loss_cfg.get("hierarchy_tau", 0.07)),
         safety_margin=float(loss_cfg.get("safety_margin", 0.0)),
         safety_mode=safety_mode,
+        safety_scope=safety_scope,
         depth_balanced=bool(loss_cfg.get("depth_balanced", True)),
+        text_gradient_checkpointing=bool(
+            train_cfg.get("text_gradient_checkpointing", False)
+        ),
+        global_safety_batch_size=max(
+            1, int(train_cfg.get("global_safety_batch_size", 64))
+        ),
         validation_every_n_epochs=max(
             1, int(validation_cfg.get("every_n_epochs", 1))
         ),
@@ -260,6 +279,10 @@ def main():
     positive_checkpoint, clip_model, text_encoder, prompt_cfg, positive, replaced_modules = (
         load_frozen_positive_stack(args, hierarchy, device)
     )
+    if args.text_gradient_checkpointing:
+        if not hasattr(clip_model, "gradient_checkpointing_enable"):
+            raise RuntimeError("This CLIP implementation does not support gradient checkpointing")
+        clip_model.gradient_checkpointing_enable()
     positive_index = build_positive_semantic_index(hierarchy, positive)
     prompt_cfg = replace(
         prompt_cfg,
@@ -330,6 +353,8 @@ def main():
         f"trainable_params={sum(parameter.numel() for parameter in trainable_params)}, "
         f"negative_prompts_per_child={args.negative_prompts}, "
         f"parents={len(parents)}, fixed_epochs={args.epochs}, "
+        f"safety_scope={args.safety_scope}, "
+        f"text_gradient_checkpointing={args.text_gradient_checkpointing}, "
         f"positive_val_bacc={positive_baseline_bacc:.6f}, "
         f"id_bacc_floor={id_bacc_floor:.6f}"
     )
@@ -341,6 +366,9 @@ def main():
         positive.eval()
         clip_model.eval()
         set_vision_lora_train_mode(clip_model, False)
+        if args.text_gradient_checkpointing:
+            # Transformers activates encoder checkpointing only in train mode.
+            text_encoder.text_model.train()
         shuffled_parents = list(parents)
         rng.shuffle(shuffled_parents)
         parent_chunks = [
@@ -372,6 +400,13 @@ def main():
                 for episode in episodes
                 for example in episode.examples
             ]
+            global_image_indices = []
+            if args.method == "hc_negprompt" and args.safety_scope == "global_decoder":
+                global_image_indices = rng.sample(
+                    range(len(train_dataset)),
+                    min(args.global_safety_batch_size, len(train_dataset)),
+                )
+                image_indices.extend(global_image_indices)
             feature_by_index = encode_selected_train_images(
                 args,
                 clip_model,
@@ -381,6 +416,17 @@ def main():
             )
 
             optimizer.zero_grad(set_to_none=True)
+            global_semantic_index = None
+            negative_features_by_parent = {}
+            if args.method == "hc_negprompt" and args.safety_scope == "global_decoder":
+                (
+                    global_semantic_index,
+                    negative_features_by_parent,
+                ) = build_differentiable_hier_negprompt_semantic_index(
+                    hierarchy,
+                    positive_index,
+                    negative,
+                )
             parent_losses = []
             loss_weights = []
             parent_stats = []
@@ -398,10 +444,13 @@ def main():
                     local.child_features[child_to_position[child]]
                     for child in model_children
                 ]).to(device)
-                negative_features = negative.encode_negative_prototypes(
-                    episode.parent,
-                    model_children,
-                )
+                if episode.parent in negative_features_by_parent:
+                    negative_features = negative_features_by_parent[episode.parent]
+                else:
+                    negative_features = negative.encode_negative_prototypes(
+                        episode.parent,
+                        model_children,
+                    )
                 child_to_target = {
                     child: index for index, child in enumerate(model_children)
                 }
@@ -441,7 +490,9 @@ def main():
                         hierarchy_tau=args.hierarchy_tau,
                         safety_margin=args.safety_margin,
                         lambda_hnis=args.lambda_hnis,
-                        lambda_safe=args.lambda_safe,
+                        lambda_safe=(
+                            args.lambda_safe if args.safety_scope == "local" else 0.0
+                        ),
                         lambda_shell=args.lambda_shell,
                         lambda_diversity=args.lambda_diversity,
                         lambda_route=args.lambda_route,
@@ -466,14 +517,37 @@ def main():
                 loss_weights.append(parent_loss_weights[episode.parent])
                 parent_stats.append(stats)
 
-            loss = torch.stack([
+            placement_loss = torch.stack([
                 parent_loss * weight
                 for parent_loss, weight in zip(parent_losses, loss_weights)
             ]).mean()
+            step_stat = average_stats(parent_stats)
+            loss = placement_loss
+            if global_semantic_index is not None:
+                global_image_features = torch.stack([
+                    feature_by_index[index] for index in global_image_indices
+                ])
+                terminal_scores = terminal_global_path_scores(
+                    global_image_features,
+                    hierarchy,
+                    global_semantic_index,
+                    logit_scale=args.inference_tau,
+                    allow_root_unknown=args.allow_root_unknown,
+                    unknown_aggregation=args.unknown_aggregation,
+                )
+                global_safe_loss, global_stats = global_decoder_safety_loss(
+                    terminal_scores["score_matrix"],
+                    terminal_scores["candidate_kinds"],
+                    margin=args.safety_margin,
+                    safety_mode=args.safety_mode,
+                )
+                loss = placement_loss + args.lambda_safe * global_safe_loss
+                step_stat.update(global_stats)
+            step_stat["loss"] = float(loss.detach().cpu())
             loss.backward()
             torch.nn.utils.clip_grad_norm_(trainable_params, args.gradient_clip_norm)
             optimizer.step()
-            step_stats.append(average_stats(parent_stats))
+            step_stats.append(step_stat)
 
         scheduler.step()
         epoch_stats = average_stats(step_stats)
@@ -509,14 +583,24 @@ def main():
             })
         history.append(epoch_stats)
         if args.method == "hc_negprompt":
-            message = (
-                f"epoch {epoch}: loss={epoch_stats.get('loss', 0.0):.6f}, "
-                f"hnis_excess={epoch_stats.get('hnis_excess', 0.0):.6f}, "
-                f"safe={epoch_stats.get('safe_loss', 0.0):.6f}, "
-                f"safe_active={epoch_stats.get('safety_violation_rate', 0.0):.6f}, "
-                f"route_acc={epoch_stats.get('route_acc', 0.0):.6f}, "
-                f"id_neg_win={epoch_stats.get('id_unknown_mass_win_rate', 0.0):.6f}"
-            )
+            if args.safety_scope == "global_decoder":
+                message = (
+                    f"epoch {epoch}: loss={epoch_stats.get('loss', 0.0):.6f}, "
+                    f"hnis_excess={epoch_stats.get('hnis_excess', 0.0):.6f}, "
+                    f"global_safe={epoch_stats.get('global_safe_loss', 0.0):.6f}, "
+                    f"global_active={epoch_stats.get('global_safety_violation_rate', 0.0):.6f}, "
+                    f"global_unk_win={epoch_stats.get('global_unknown_win_rate', 0.0):.6f}, "
+                    f"route_acc={epoch_stats.get('route_acc', 0.0):.6f}"
+                )
+            else:
+                message = (
+                    f"epoch {epoch}: loss={epoch_stats.get('loss', 0.0):.6f}, "
+                    f"hnis_excess={epoch_stats.get('hnis_excess', 0.0):.6f}, "
+                    f"safe={epoch_stats.get('safe_loss', 0.0):.6f}, "
+                    f"safe_active={epoch_stats.get('safety_violation_rate', 0.0):.6f}, "
+                    f"route_acc={epoch_stats.get('route_acc', 0.0):.6f}, "
+                    f"id_neg_win={epoch_stats.get('id_unknown_mass_win_rate', 0.0):.6f}"
+                )
         else:
             message = (
                 f"epoch {epoch}: loss={epoch_stats.get('loss', 0.0):.6f}, "
