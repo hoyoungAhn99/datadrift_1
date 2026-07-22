@@ -627,6 +627,73 @@ def depthwise_prompt_metric_loss(
     }
 
 
+def dual_weihims_positive_loss(
+    image_features: torch.Tensor,
+    image_path_labels: torch.Tensor,
+    prompt_features_by_depth: dict[int, torch.Tensor],
+    prompt_node_labels_by_depth: dict[int, torch.Tensor],
+    prompt_path_labels_by_depth: dict[int, torch.Tensor],
+    *,
+    image_weight: float = 1.0,
+    alignment_weight: float = 1.0,
+    alpha: float = 2.0,
+    beta: float = 50.0,
+    lam: float = 0.5,
+    mining_margin: float = 0.1,
+    minimum_mode: str = "sample",
+    dist_scale: float = 2.0,
+    dist_pow: float = 1.0,
+) -> tuple[torch.Tensor, dict]:
+    """Image-image WeiHiMS plus image-prompt WeiHiMS, without CE.
+
+    The image term shapes the Vision-LoRA representation according to the
+    label tree.  The alignment term places learned positive node prompts in
+    that same hierarchy-aware space.  No path/classification CE is evaluated
+    or added here.
+    """
+    if float(image_weight) < 0.0 or float(alignment_weight) < 0.0:
+        raise ValueError("Dual WeiHiMS weights must be non-negative")
+    if float(image_weight) == 0.0 and float(alignment_weight) == 0.0:
+        raise ValueError("At least one Dual WeiHiMS weight must be positive")
+
+    image_loss = hierarchical_ms_min_loss(
+        image_features,
+        image_path_labels,
+        alpha=alpha,
+        beta=beta,
+        lam=lam,
+        mining_margin=mining_margin,
+        minimum_mode=minimum_mode,
+        use_distance_weights=True,
+        dist_scale=dist_scale,
+        dist_pow=dist_pow,
+    )
+    alignment_loss, alignment_stats = depthwise_prompt_metric_loss(
+        image_features,
+        prompt_features_by_depth,
+        image_path_labels,
+        prompt_node_labels_by_depth,
+        prompt_path_labels_by_depth,
+        loss_name="weihims",
+        alpha=alpha,
+        beta=beta,
+        lam=lam,
+        mining_margin=mining_margin,
+        minimum_mode=minimum_mode,
+        dist_scale=dist_scale,
+        dist_pow=dist_pow,
+    )
+    total = float(image_weight) * image_loss + float(alignment_weight) * alignment_loss
+    return total, {
+        "loss": float(total.detach().cpu()),
+        "image_weihims_loss": float(image_loss.detach().cpu()),
+        "image_prompt_weihims_loss": float(alignment_loss.detach().cpu()),
+        "path_ce_loss": 0.0,
+        "pair_mode": "image_image_plus_depthwise_image_prompt",
+        "alignment_valid_counts": alignment_stats["valid_counts"],
+    }
+
+
 def unknown_ce_loss(
     image_features: torch.Tensor,
     candidate_features: torch.Tensor,

@@ -99,3 +99,36 @@ python scripts\infer_hier_negprompt.py --config configs\07_idea6_hc_negprompt\id
 # Idea 7: sibling virtual open-space features; only parent-local negative prompts are trainable
 python scripts\train_idea7_virtual_open_negprompt.py --config configs\08_idea7_virtual_open_negprompt\idea7_fgvc_aircraft_b16_r16_qkvo_virtual_open.yaml
 python scripts\infer_idea7_virtual_open_negprompt.py --config configs\08_idea7_virtual_open_negprompt\idea7_fgvc_aircraft_b16_r16_qkvo_virtual_open.yaml
+
+# Idea 7 refinement ablation, GPU 0: raw sibling SLERP without refinement
+python scripts\train_idea7_virtual_open_negprompt.py --config configs\08_idea7_virtual_open_negprompt\idea7_fgvc_aircraft_b16_r16_qkvo_raw_slerp.yaml
+
+# Idea 7 refinement ablation, GPU 1: one mild refinement step with step size 0.05
+python scripts\train_idea7_virtual_open_negprompt.py --config configs\08_idea7_virtual_open_negprompt\idea7_fgvc_aircraft_b16_r16_qkvo_mild_refine.yaml
+
+# Positive CLIP+LoRA feature diagnostic: leaf positive max-cosine OOD separation
+python scripts\diagnose_leaf_cosine_ood.py --config configs\08_idea7_virtual_open_negprompt\idea7_fgvc_aircraft_b16_r16_qkvo_virtual_open.yaml
+
+# Positive leaf cosine 2x2 ablation: base/LoRA image encoder x plain/learned text
+python scripts\diagnose_leaf_cosine_ood.py --config configs\08_idea7_virtual_open_negprompt\idea7_fgvc_aircraft_b16_r16_qkvo_virtual_open.yaml --vision base --text plain --gpu-id 0
+python scripts\diagnose_leaf_cosine_ood.py --config configs\08_idea7_virtual_open_negprompt\idea7_fgvc_aircraft_b16_r16_qkvo_virtual_open.yaml --vision base --text learned --gpu-id 1
+python scripts\diagnose_leaf_cosine_ood.py --config configs\08_idea7_virtual_open_negprompt\idea7_fgvc_aircraft_b16_r16_qkvo_virtual_open.yaml --vision lora --text plain --gpu-id 0
+python scripts\diagnose_leaf_cosine_ood.py --config configs\08_idea7_virtual_open_negprompt\idea7_fgvc_aircraft_b16_r16_qkvo_virtual_open.yaml --vision lora --text learned --gpu-id 1
+
+# Proper positive 2x2 training ablation: train the two previously transplanted conditions
+python scripts\train_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_prompt_only_training_ablation.yaml
+python scripts\train_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_lora_only_plain_training_ablation.yaml
+python scripts\diagnose_leaf_cosine_ood.py --config configs\08_idea7_virtual_open_negprompt\idea7_fgvc_aircraft_b16_r16_qkvo_virtual_open.yaml --vision base --text learned --gpu-id 0 --positive-checkpoint outputs\experiments\idea3-fgvc-aircraft-b16-prompt-only-training-ablation\checkpoints\idea3-fgvc-aircraft-b16-prompt-only-training-ablation-positive.pt --out outputs\experiments\ablate-positive-leaf-cosine-fgvc-aircraft-b16-r16-qkvo\diagnostics\positive-leaf-cosine-base-learned-trained-separately.json
+python scripts\diagnose_leaf_cosine_ood.py --config configs\08_idea7_virtual_open_negprompt\idea7_fgvc_aircraft_b16_r16_qkvo_virtual_open.yaml --vision lora --text plain --gpu-id 1 --positive-checkpoint outputs\experiments\idea3-fgvc-aircraft-b16-lora-only-plain-training-ablation\checkpoints\idea3-fgvc-aircraft-b16-lora-only-plain-training-ablation-positive.pt --out outputs\experiments\ablate-positive-leaf-cosine-fgvc-aircraft-b16-r16-qkvo\diagnostics\positive-leaf-cosine-lora-plain-trained-separately.json
+
+# Idea 8: image-only metric Vision LoRA, then frozen-vision joint positive/negative prompts
+C:\Users\user\anaconda3\envs\hoyoung\python.exe scripts\train_image_metric_vision_lora.py --config configs\09_image_metric_joint_prompts\idea8_fgvc_aircraft_b16_image_metric_lora.yaml
+C:\Users\user\anaconda3\envs\hoyoung\python.exe scripts\diagnose_leaf_cosine_ood.py --config configs\08_idea7_virtual_open_negprompt\idea7_fgvc_aircraft_b16_r16_qkvo_virtual_open.yaml --vision lora --text plain --gpu-id 0 --positive-checkpoint outputs\experiments\idea8-fgvc-aircraft-b16-image-metric-lora\checkpoints\idea8-fgvc-aircraft-b16-image-metric-lora.pt --out outputs\experiments\idea8-fgvc-aircraft-b16-image-metric-lora\diagnostics\positive-leaf-cosine-plain.json
+C:\Users\user\anaconda3\envs\hoyoung\python.exe scripts\diagnose_image_density_ood.py --config configs\09_image_metric_joint_prompts\idea8_fgvc_aircraft_b16_image_metric_lora.yaml --gpu-id 0 --knn-k 20 --out outputs\experiments\idea8-fgvc-aircraft-b16-image-metric-lora\diagnostics\image-density-ood.json
+C:\Users\user\anaconda3\envs\hoyoung\python.exe scripts\train_metric_vision_joint_prompts.py --config configs\09_image_metric_joint_prompts\idea8_fgvc_aircraft_b16_metric_lora_joint_prompts.yaml
+C:\Users\user\anaconda3\envs\hoyoung\python.exe scripts\diagnose_leaf_cosine_ood.py --config configs\08_idea7_virtual_open_negprompt\idea7_fgvc_aircraft_b16_r16_qkvo_virtual_open.yaml --vision lora --text learned --gpu-id 1 --positive-checkpoint outputs\experiments\idea8-fgvc-aircraft-b16-metric-lora-joint-prompts\checkpoints\idea8-fgvc-aircraft-b16-metric-lora-joint-prompts.pt --out outputs\experiments\idea8-fgvc-aircraft-b16-metric-lora-joint-prompts\diagnostics\positive-leaf-cosine-learned.json
+
+# Positive Stage 1: no path CE; joint image-image WeiHiMS + image-prompt WeiHiMS
+C:\Users\user\anaconda3\envs\hoyoung\python.exe scripts\train_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_r16_qkvo_dual_weihims.yaml
+C:\Users\user\anaconda3\envs\hoyoung\python.exe scripts\diagnose_leaf_cosine_ood.py --config configs\08_idea7_virtual_open_negprompt\idea7_fgvc_aircraft_b16_r16_qkvo_virtual_open.yaml --vision lora --text learned --gpu-id 0 --positive-checkpoint outputs\experiments\idea3-fgvc-aircraft-b16-joint-vision-lora-r16-qkvo-dual-weihims\checkpoints\idea3-fgvc-aircraft-b16-joint-vision-lora-r16-qkvo-dual-weihims-positive.pt --out outputs\experiments\idea3-fgvc-aircraft-b16-joint-vision-lora-r16-qkvo-dual-weihims\diagnostics\positive-leaf-cosine-learned.json
+C:\Users\user\anaconda3\envs\hoyoung\python.exe scripts\diagnose_image_density_ood.py --config configs\09_image_metric_joint_prompts\idea8_fgvc_aircraft_b16_image_metric_lora.yaml --checkpoint outputs\experiments\idea3-fgvc-aircraft-b16-joint-vision-lora-r16-qkvo-dual-weihims\checkpoints\idea3-fgvc-aircraft-b16-joint-vision-lora-r16-qkvo-dual-weihims-positive.pt --gpu-id 0 --knn-k 20 --out outputs\experiments\idea3-fgvc-aircraft-b16-joint-vision-lora-r16-qkvo-dual-weihims\diagnostics\image-density-ood.json

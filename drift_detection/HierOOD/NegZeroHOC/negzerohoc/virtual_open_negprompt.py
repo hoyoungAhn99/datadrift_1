@@ -227,3 +227,101 @@ def virtual_open_negprompt_loss(
             ).mean().detach().cpu()
         ),
     }
+
+
+def joint_virtual_open_prompt_loss(
+    id_features: torch.Tensor,
+    targets: torch.Tensor,
+    child_features: torch.Tensor,
+    unknown_features: torch.Tensor,
+    virtual_features: torch.Tensor,
+    *,
+    tau: float,
+    lambda_id: float,
+    lambda_virtual: float,
+    lambda_coverage: float,
+    lambda_diversity: float,
+    lambda_separation: float,
+    diversity_margin: float,
+    separation_margin: float,
+) -> tuple[torch.Tensor, dict]:
+    """Jointly fit positive and unknown prompts to a frozen image space."""
+    if float(tau) <= 0.0:
+        raise ValueError("tau must be positive")
+    images = F.normalize(id_features.detach().float(), dim=-1)
+    children = F.normalize(child_features.float(), dim=-1)
+    unknowns = F.normalize(unknown_features.float(), dim=-1)
+    virtual = F.normalize(virtual_features.detach().float(), dim=-1)
+    targets = targets.long().to(images.device)
+    logit_scale = 1.0 / float(tau)
+    unknown_index = int(children.shape[0])
+
+    id_logits = grouped_unknown_logits(
+        images,
+        children,
+        unknowns,
+        logit_scale=logit_scale,
+        aggregation="logmeanexp",
+    )
+    id_loss = F.cross_entropy(id_logits, targets)
+
+    virtual_logits = grouped_unknown_logits(
+        virtual,
+        children,
+        unknowns,
+        logit_scale=logit_scale,
+        aggregation="logmeanexp",
+    )
+    virtual_targets = torch.full(
+        (virtual.shape[0],), unknown_index, dtype=torch.long, device=virtual.device
+    )
+    virtual_loss = F.cross_entropy(virtual_logits, virtual_targets)
+
+    similarities = virtual @ unknowns.t()
+    virtual_coverage = similarities.max(dim=1).values.mean()
+    prototype_coverage = similarities.max(dim=0).values.mean()
+    coverage_loss = 1.0 - 0.5 * (virtual_coverage + prototype_coverage)
+    diversity_loss = _prototype_diversity(unknowns, diversity_margin)
+    child_unknown_cosines = children @ unknowns.t()
+    separation_loss = F.relu(
+        child_unknown_cosines - float(separation_margin)
+    ).square().mean()
+
+    open_objective = (
+        float(lambda_virtual) * virtual_loss
+        + float(lambda_coverage) * coverage_loss
+        + float(lambda_diversity) * diversity_loss
+        + float(lambda_separation) * separation_loss
+    )
+    total = float(lambda_id) * id_loss + open_objective
+    id_predictions = id_logits.argmax(dim=1)
+    virtual_predictions = virtual_logits.argmax(dim=1)
+    return total, {
+        "loss": float(total.detach().cpu()),
+        "id_loss": float(id_loss.detach().cpu()),
+        "id_acc": float((id_predictions == targets).float().mean().detach().cpu()),
+        "id_unknown_selection_rate": float(
+            (id_predictions == unknown_index).float().mean().detach().cpu()
+        ),
+        "open_objective": float(open_objective.detach().cpu()),
+        "virtual_loss": float(virtual_loss.detach().cpu()),
+        "virtual_unknown_recall": float(
+            (virtual_predictions == unknown_index).float().mean().detach().cpu()
+        ),
+        "coverage_loss": float(coverage_loss.detach().cpu()),
+        "diversity_loss": float(diversity_loss.detach().cpu()),
+        "separation_loss": float(separation_loss.detach().cpu()),
+        "positive_negative_cosine": float(child_unknown_cosines.mean().detach().cpu()),
+        "virtual_unknown_margin": float(
+            (
+                virtual_logits[:, unknown_index]
+                - virtual_logits[:, :unknown_index].max(dim=1).values
+            ).mean().detach().cpu()
+        ),
+        "id_child_unknown_margin": float(
+            (
+                id_logits[:, :unknown_index].max(dim=1).values
+                - id_logits[:, unknown_index]
+            ).mean().detach().cpu()
+        ),
+    }

@@ -25,6 +25,8 @@ from negzerohoc.config_utils import load_yaml_config
 from negzerohoc.evaluation import build_hierarchy, evaluate_split, make_distance_mats, mixed_summary
 from negzerohoc.feature_io import ensure_dir, save_json
 from negzerohoc.idea3_inference import build_idea3_semantic_index, predict_features_idea3
+from negzerohoc.image_metric import HierarchyPKBatchSampler
+from negzerohoc.losses import dual_weihims_positive_loss
 from negzerohoc.output_layout import resolve_experiment_artifact
 from negzerohoc.prompt_models import HierPromptConfig, PositivePromptLearner
 from negzerohoc.runtime import available_device, configured_device
@@ -37,7 +39,13 @@ from negzerohoc.vision_lora import (
     vision_lora_parameters,
     vision_lora_state_dict,
 )
-from scripts.train_idea3_positive_prompts import backward_sparse_path_bottleneck_streaming
+from scripts.train_idea3_positive_prompts import (
+    backward_sparse_path_bottleneck_streaming,
+    build_depth_prompt_metadata,
+    build_depth_prompt_sets,
+    compute_sparse_path_positive_loss,
+    encode_depth_prompts,
+)
 
 
 CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
@@ -103,15 +111,30 @@ def load_config(path: str | Path) -> Namespace:
         epochs=int(train_cfg.get("epochs", 50)),
         prompt_lr=float(train_cfg.get("prompt_lr", 1e-3)),
         vision_lora_lr=float(train_cfg.get("vision_lora_lr", 1e-4)),
+        train_prompt=bool(train_cfg.get("train_prompt", True)),
+        train_vision_lora=bool(train_cfg.get("train_vision_lora", True)),
+        positive_text_variant=str(train_cfg.get("positive_text_variant", "learned")).lower(),
         weight_decay=float(train_cfg.get("weight_decay", 1e-4)),
         tau=float(train_cfg.get("tau", 0.07)),
         precision=str(train_cfg.get("precision", "fp16")).lower(),
         gradient_clip_norm=float(train_cfg.get("gradient_clip_norm", 1.0)),
         gradient_checkpointing=bool(train_cfg.get("gradient_checkpointing", True)),
+        loss_name=str(loss_cfg.get("name", "sparse_path_bottleneck")).lower(),
         loss_bottleneck_weight=float(loss_cfg.get("bottleneck_weight", 0.5)),
         loss_bottleneck_temperature=float(loss_cfg.get("bottleneck_temperature", 0.5)),
         loss_route_margin=float(loss_cfg.get("route_margin", 0.05)),
         loss_margin_weight=float(loss_cfg.get("margin_weight", 0.25)),
+        loss_classes_per_batch=int(loss_cfg.get("classes_per_batch", 4)),
+        loss_examples_per_class=int(loss_cfg.get("examples_per_class", 4)),
+        loss_image_weight=float(loss_cfg.get("image_weight", 1.0)),
+        loss_alignment_weight=float(loss_cfg.get("alignment_weight", 1.0)),
+        loss_alpha=float(loss_cfg.get("alpha", 2.0)),
+        loss_beta=float(loss_cfg.get("beta", 50.0)),
+        loss_lam=float(loss_cfg.get("lam", 0.5)),
+        loss_mining_margin=float(loss_cfg.get("mining_margin", 0.1)),
+        loss_minimum_mode=str(loss_cfg.get("minimum_mode", "sample")).lower(),
+        loss_dist_scale=float(loss_cfg.get("dist_scale", 2.0)),
+        loss_dist_pow=float(loss_cfg.get("dist_pow", 1.0)),
         validation_enabled=bool(validation_cfg.get("enabled", True)),
         validation_every_n_epochs=max(1, int(validation_cfg.get("every_n_epochs", 1))),
         validation_start_epoch=max(1, int(validation_cfg.get("start_epoch", 1))),
@@ -258,6 +281,105 @@ def make_loader(dataset, batch_size: int, num_workers: int, shuffle: bool, seed:
     )
 
 
+def class_paths_by_dataset_target(hierarchy, classes: list[str]) -> dict[int, tuple[str, ...]]:
+    paths = {}
+    for target, class_name in enumerate(classes):
+        node = class_name
+        while node not in hierarchy.id_node_list:
+            node = hierarchy.child2parent[node]
+        paths[target] = tuple(
+            [hierarchy.id_node_list[index] for index in hierarchy.node_ancestors.get(node, [])]
+            + [node]
+        )
+    return paths
+
+
+def make_hierarchy_metric_loader(dataset, hierarchy, args):
+    expected_batch_size = args.loss_classes_per_batch * args.loss_examples_per_class
+    if expected_batch_size != args.train_batch_size:
+        raise ValueError(
+            "Dual WeiHiMS requires batch_size == classes_per_batch * examples_per_class; "
+            f"got {args.train_batch_size} != {expected_batch_size}"
+        )
+    batch_sampler = HierarchyPKBatchSampler(
+        dataset.targets,
+        class_paths=class_paths_by_dataset_target(hierarchy, list(dataset.classes)),
+        classes_per_batch=args.loss_classes_per_batch,
+        examples_per_class=args.loss_examples_per_class,
+        seed=args.seed,
+    )
+    generator = torch.Generator()
+    generator.manual_seed(args.seed)
+    return DataLoader(
+        dataset,
+        batch_sampler=batch_sampler,
+        num_workers=args.num_workers,
+        pin_memory=torch.cuda.is_available(),
+        persistent_workers=args.num_workers > 0,
+        generator=generator,
+    )
+
+
+def leaf_path_label_tensor(hierarchy, leaf_nodes: list[str], device) -> torch.Tensor:
+    node_to_index = {node: index for index, node in enumerate(hierarchy.id_node_list)}
+    max_length = hierarchy.max_depth + 1
+    rows = []
+    for leaf in leaf_nodes:
+        path = [
+            hierarchy.id_node_list[index]
+            for index in hierarchy.node_ancestors.get(leaf, [])
+        ] + [leaf]
+        row = [-1] * max_length
+        for depth, node in enumerate(path[:max_length]):
+            row[depth] = node_to_index[node]
+        rows.append(row)
+    return torch.tensor(rows, dtype=torch.long, device=device)
+
+
+@torch.no_grad()
+def depthwise_alignment_accuracy(
+    image_features: torch.Tensor,
+    image_path_labels: torch.Tensor,
+    prompt_features_by_depth: dict[int, torch.Tensor],
+    prompt_node_labels_by_depth: dict[int, torch.Tensor],
+) -> tuple[float, float]:
+    images = torch.nn.functional.normalize(image_features.float(), dim=-1)
+    sample_correct = torch.ones(images.shape[0], dtype=torch.bool, device=images.device)
+    sample_active = torch.zeros_like(sample_correct)
+    local_correct = 0
+    local_total = 0
+    for depth in sorted(prompt_features_by_depth):
+        if depth <= 0 or depth >= image_path_labels.shape[1]:
+            continue
+        labels = image_path_labels[:, depth]
+        valid = labels >= 0
+        if not bool(valid.any()):
+            continue
+        prompt_labels = prompt_node_labels_by_depth[depth].to(images.device)
+        label_to_position = {
+            int(label): position
+            for position, label in enumerate(prompt_labels.detach().cpu().tolist())
+        }
+        targets = torch.tensor(
+            [label_to_position[int(label)] for label in labels[valid].detach().cpu().tolist()],
+            dtype=torch.long,
+            device=images.device,
+        )
+        prompts = torch.nn.functional.normalize(
+            prompt_features_by_depth[depth].detach().float(), dim=-1
+        )
+        predictions = (images[valid] @ prompts.t()).argmax(dim=1)
+        correct = predictions == targets
+        valid_indices = torch.nonzero(valid, as_tuple=False).flatten()
+        sample_correct[valid_indices] &= correct
+        sample_active[valid_indices] = True
+        local_correct += int(correct.sum().cpu())
+        local_total += int(correct.numel())
+    path_mask = sample_active
+    path_acc = float(sample_correct[path_mask].float().mean().cpu()) if bool(path_mask.any()) else 0.0
+    return local_correct / max(1, local_total), path_acc
+
+
 def load_clip_and_tokenizer(args, device):
     from transformers import CLIPModel, CLIPTokenizerFast
 
@@ -301,10 +423,10 @@ def target_leaf_nodes(hierarchy, classes: list[str], targets: torch.Tensor) -> l
     return [hierarchy.id_node_list[int(index)] for index in node_indices.tolist()]
 
 
-def set_joint_train_mode(clip_model, learner):
-    learner.train()
+def set_joint_train_mode(clip_model, learner, train_prompt: bool = True, train_vision_lora: bool = True):
+    learner.train(train_prompt)
     clip_model.eval()
-    set_vision_lora_train_mode(clip_model, True)
+    set_vision_lora_train_mode(clip_model, train_vision_lora)
 
 
 def autocast_context(args, device):
@@ -390,17 +512,28 @@ def save_joint_checkpoint(
     clip_model,
     metrics,
 ):
+    stage = (
+        "positive_joint_vision_lora_dual_weihims"
+        if args.loss_name == "dual_weihims"
+        else "positive_joint_vision_lora"
+        if args.train_prompt and args.train_vision_lora
+        else "positive_prompt_only_base_vision"
+        if args.train_prompt
+        else "positive_vision_lora_plain_text"
+    )
     return save_idea3_checkpoint(
         path,
-        stage="positive_joint_vision_lora",
+        stage=stage,
         dataset=args.dataset,
         clip_model=args.clip_model,
         hierarchy=args.hierarchy,
         id_split=args.id_split,
         prompt_config=prompt_cfg.to_dict(),
         positive_state_dict=prompt_only_state_dict(learner),
-        vision_lora_config=lora_cfg.to_dict(),
-        vision_lora_state_dict=vision_lora_state_dict(clip_model),
+        vision_lora_config=lora_cfg.to_dict() if args.train_vision_lora else None,
+        vision_lora_state_dict=(
+            vision_lora_state_dict(clip_model) if args.train_vision_lora else None
+        ),
         metrics=metrics,
         args=vars(args),
     )
@@ -408,6 +541,25 @@ def save_joint_checkpoint(
 
 def main():
     args = parse_args()
+    supported_losses = {"sparse_path_bottleneck", "dual_weihims"}
+    if args.loss_name not in supported_losses:
+        raise ValueError(
+            f"Unsupported joint_training.loss.name: {args.loss_name}. "
+            f"Expected one of {sorted(supported_losses)}"
+        )
+    if args.positive_text_variant not in {"learned", "plain"}:
+        raise ValueError(
+            "joint_training.positive_text_variant must be one of: learned, plain"
+        )
+    if args.train_prompt != (args.positive_text_variant == "learned"):
+        raise ValueError(
+            "A proper training ablation requires train_prompt=true with learned text "
+            "or train_prompt=false with plain text"
+        )
+    if not args.train_prompt and not args.train_vision_lora:
+        raise ValueError("At least one of train_prompt or train_vision_lora must be true")
+    if args.loss_name == "dual_weihims" and not (args.train_prompt and args.train_vision_lora):
+        raise ValueError("dual_weihims requires both positive prompts and Vision LoRA to train")
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
@@ -416,13 +568,16 @@ def main():
 
     hierarchy, _ = build_hierarchy(REPO_ROOT, args.id_split, args.hierarchy)
     train_dataset, val_dataset, ood_dataset = build_datasets(args, hierarchy)
-    train_loader = make_loader(
-        train_dataset,
-        args.train_batch_size,
-        args.num_workers,
-        shuffle=True,
-        seed=args.seed,
-    )
+    if args.loss_name == "dual_weihims":
+        train_loader = make_hierarchy_metric_loader(train_dataset, hierarchy, args)
+    else:
+        train_loader = make_loader(
+            train_dataset,
+            args.train_batch_size,
+            args.num_workers,
+            shuffle=True,
+            seed=args.seed,
+        )
     val_loader = make_loader(
         val_dataset,
         args.eval_batch_size,
@@ -443,7 +598,12 @@ def main():
         clip_model.gradient_checkpointing_enable()
 
     lora_cfg = VisionLoRAConfig.from_dict(args.vision_lora)
-    replaced_modules = inject_clip_vision_lora(clip_model, lora_cfg)
+    if args.train_vision_lora:
+        replaced_modules = inject_clip_vision_lora(clip_model, lora_cfg)
+    else:
+        for parameter in clip_model.parameters():
+            parameter.requires_grad_(False)
+        replaced_modules = []
     text_encoder = SoftPromptTextEncoder(
         clip_model,
         tokenizer,
@@ -456,16 +616,30 @@ def main():
         text_encoder,
         prompt_cfg,
     ).to(device)
-
-    prompt_params = prompt_parameters(learner)
-    lora_params = vision_lora_parameters(clip_model)
-    optimizer = torch.optim.AdamW(
-        [
-            {"params": prompt_params, "lr": args.prompt_lr},
-            {"params": lora_params, "lr": args.vision_lora_lr},
-        ],
-        weight_decay=args.weight_decay,
+    learner.set_text_variant(args.positive_text_variant)
+    depth_nodes = build_depth_prompt_sets(hierarchy) if args.loss_name == "dual_weihims" else None
+    depth_prompt_metadata = (
+        build_depth_prompt_metadata(hierarchy, depth_nodes, device)
+        if depth_nodes is not None
+        else None
     )
+
+    prompt_params = prompt_parameters(learner) if args.train_prompt else []
+    if not args.train_prompt:
+        for name, parameter in learner.named_parameters():
+            if not name.startswith("text_encoder."):
+                parameter.requires_grad_(False)
+    lora_params = vision_lora_parameters(clip_model) if args.train_vision_lora else []
+    parameter_groups = []
+    if prompt_params:
+        parameter_groups.append({"params": prompt_params, "lr": args.prompt_lr, "group_name": "prompt"})
+    if lora_params:
+        parameter_groups.append({
+            "params": lora_params,
+            "lr": args.vision_lora_lr,
+            "group_name": "vision_lora",
+        })
+    optimizer = torch.optim.AdamW(parameter_groups, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
         T_max=max(1, args.epochs),
@@ -475,11 +649,14 @@ def main():
     identity_adapter = nn.Identity()
 
     print(
-        "joint Vision LoRA training: "
+        "positive vision/text training: "
+        f"text_variant={args.positive_text_variant}, "
+        f"train_prompt={args.train_prompt}, train_vision_lora={args.train_vision_lora}, "
         f"replaced_modules={len(replaced_modules)}, "
         f"prompt_params={sum(parameter.numel() for parameter in prompt_params)}, "
         f"vision_lora_params={sum(parameter.numel() for parameter in lora_params)}, "
-        f"batch_size={args.train_batch_size}, precision={args.precision}"
+        f"batch_size={args.train_batch_size}, precision={args.precision}, "
+        f"loss={args.loss_name}"
     )
 
     history = []
@@ -489,10 +666,19 @@ def main():
     best_lora_state = None
 
     for epoch in range(1, args.epochs + 1):
-        set_joint_train_mode(clip_model, learner)
+        if hasattr(train_loader.batch_sampler, "set_epoch"):
+            train_loader.batch_sampler.set_epoch(epoch)
+        set_joint_train_mode(
+            clip_model,
+            learner,
+            train_prompt=args.train_prompt,
+            train_vision_lora=args.train_vision_lora,
+        )
         epoch_loss = 0.0
         epoch_path_acc = 0.0
         epoch_local_acc = 0.0
+        epoch_image_weihims = 0.0
+        epoch_image_prompt_weihims = 0.0
         steps = 0
         iterator = tqdm(
             train_loader,
@@ -507,15 +693,62 @@ def main():
 
             with autocast_context(args, device):
                 image_features = clip_model.get_image_features(pixel_values=images)
-            stats = backward_sparse_path_bottleneck_streaming(
-                args,
-                hierarchy,
-                learner,
-                identity_adapter,
-                image_features,
-                leaf_nodes,
-                grad_scaler=scaler,
-            )
+                if args.loss_name == "dual_weihims":
+                    image_path_labels = leaf_path_label_tensor(hierarchy, leaf_nodes, device)
+                    prompt_features_by_depth = encode_depth_prompts(
+                        learner, hierarchy, depth_nodes
+                    )
+                    loss, stats = dual_weihims_positive_loss(
+                        image_features,
+                        image_path_labels,
+                        prompt_features_by_depth,
+                        depth_prompt_metadata["node_labels"],
+                        depth_prompt_metadata["path_labels"],
+                        image_weight=args.loss_image_weight,
+                        alignment_weight=args.loss_alignment_weight,
+                        alpha=args.loss_alpha,
+                        beta=args.loss_beta,
+                        lam=args.loss_lam,
+                        mining_margin=args.loss_mining_margin,
+                        minimum_mode=args.loss_minimum_mode,
+                        dist_scale=args.loss_dist_scale,
+                        dist_pow=args.loss_dist_pow,
+                    )
+            if args.loss_name == "dual_weihims":
+                local_acc, path_acc = depthwise_alignment_accuracy(
+                    image_features.detach(),
+                    image_path_labels,
+                    prompt_features_by_depth,
+                    depth_prompt_metadata["node_labels"],
+                )
+                stats["local_acc"] = local_acc
+                stats["path_acc"] = path_acc
+                if scaler.is_enabled():
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+            elif args.train_prompt and args.train_vision_lora:
+                stats = backward_sparse_path_bottleneck_streaming(
+                    args,
+                    hierarchy,
+                    learner,
+                    identity_adapter,
+                    image_features,
+                    leaf_nodes,
+                    grad_scaler=scaler,
+                )
+            else:
+                loss, stats = compute_sparse_path_positive_loss(
+                    args,
+                    hierarchy,
+                    learner,
+                    image_features,
+                    leaf_nodes,
+                )
+                if scaler.is_enabled():
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
 
             if scaler.is_enabled():
                 scaler.unscale_(optimizer)
@@ -529,6 +762,8 @@ def main():
             epoch_loss += stats["loss"]
             epoch_path_acc += stats["path_acc"]
             epoch_local_acc += stats["local_acc"]
+            epoch_image_weihims += stats.get("image_weihims_loss", 0.0)
+            epoch_image_prompt_weihims += stats.get("image_prompt_weihims_loss", 0.0)
             steps += 1
 
         scheduler.step()
@@ -537,10 +772,16 @@ def main():
             "loss": epoch_loss / max(1, steps),
             "path_acc": epoch_path_acc / max(1, steps),
             "local_acc": epoch_local_acc / max(1, steps),
-            "prompt_lr": optimizer.param_groups[0]["lr"],
-            "vision_lora_lr": optimizer.param_groups[1]["lr"],
             "steps": steps,
         }
+        if args.loss_name == "dual_weihims":
+            epoch_stats["image_weihims_loss"] = epoch_image_weihims / max(1, steps)
+            epoch_stats["image_prompt_weihims_loss"] = (
+                epoch_image_prompt_weihims / max(1, steps)
+            )
+            epoch_stats["path_ce_loss"] = 0.0
+        for group in optimizer.param_groups:
+            epoch_stats[f"{group['group_name']}_lr"] = group["lr"]
 
         validation_due = (
             args.validation_enabled
@@ -577,6 +818,12 @@ def main():
             f"path_acc={epoch_stats['path_acc']:.6f}, "
             f"local_acc={epoch_stats['local_acc']:.6f}"
         )
+        if args.loss_name == "dual_weihims":
+            message += (
+                f", image_weihims={epoch_stats['image_weihims_loss']:.6f}, "
+                f"image_prompt_weihims={epoch_stats['image_prompt_weihims_loss']:.6f}, "
+                "path_ce=0.000000"
+            )
         if validation_due:
             message += (
                 f", val_bacc={epoch_stats['val_balanced_acc']:.6f}, "
@@ -654,7 +901,15 @@ def main():
         "args": vars(args),
         "mode": args.inference_mode,
         "checkpoint": args.checkpoint,
-        "checkpoint_stage": "positive_joint_vision_lora",
+        "checkpoint_stage": (
+            "positive_joint_vision_lora_dual_weihims"
+            if args.loss_name == "dual_weihims"
+            else "positive_joint_vision_lora"
+            if args.train_prompt and args.train_vision_lora
+            else "positive_prompt_only_base_vision"
+            if args.train_prompt
+            else "positive_vision_lora_plain_text"
+        ),
         "hierarchy_id_node_list": list(hierarchy.id_node_list),
         "val": val_result,
         "ood": ood_result,
