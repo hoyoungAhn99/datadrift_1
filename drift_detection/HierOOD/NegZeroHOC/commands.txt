@@ -138,5 +138,10 @@ C:\Users\user\anaconda3\envs\hoyoung\python.exe scripts\diagnose_image_density_o
 # Negative-ready global metric-terminal decoder, positive-only ID inference
 C:\Users\user\anaconda3\envs\hoyoung\python.exe scripts\infer_metric_terminal_positive.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_r16_qkvo_dual_weihims.yaml --checkpoint outputs\experiments\idea3-fgvc-aircraft-b16-joint-vision-lora-r16-qkvo-dual-weihims\checkpoints\idea3-fgvc-aircraft-b16-joint-vision-lora-r16-qkvo-dual-weihims-positive-last.pt --gpu-id 0
 
-# Dual WeiHiMS logical batch 128: GPU 0+1 DataParallel, automatic GradCache fallback
+# Dual WeiHiMS logical batch 128: GPU 0+1 DataParallel with GradCache on 8 GB GPUs
 C:\Users\user\anaconda3\envs\hoyoung\python.exe scripts\train_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_r16_qkvo_dual_weihims_b128_2gpu_gradcache.yaml
+C:\Users\user\anaconda3\envs\hoyoung\python.exe scripts\diagnose_leaf_cosine_ood.py --config configs\08_idea7_virtual_open_negprompt\idea7_fgvc_aircraft_b16_r16_qkvo_virtual_open.yaml --vision lora --text learned --gpu-id 0 --positive-checkpoint outputs\experiments\idea3-fgvc-aircraft-b16-dual-weihims-b128-2gpu-gc\checkpoints\positive.pt --out outputs\experiments\idea3-fgvc-aircraft-b16-dual-weihims-b128-2gpu-gc\diagnostics\positive-leaf-cosine.json
+C:\Users\user\anaconda3\envs\hoyoung\python.exe scripts\diagnose_image_density_ood.py --config configs\09_image_metric_joint_prompts\idea8_fgvc_aircraft_b16_image_metric_lora.yaml --checkpoint outputs\experiments\idea3-fgvc-aircraft-b16-dual-weihims-b128-2gpu-gc\checkpoints\positive.pt --gpu-id 1 --knn-k 20 --out outputs\experiments\idea3-fgvc-aircraft-b16-dual-weihims-b128-2gpu-gc\diagnostics\image-density-ood.json
+
+# Dual WeiHiMS logical batch 256 (P64 K4), max 100 epochs, val-BAcc early stopping
+C:\Users\user\anaconda3\envs\hoyoung\python.exe scripts\train_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_r16_qkvo_dual_weihims_b256_p64k4_e100_2gpu_gradcache_earlystop.yaml

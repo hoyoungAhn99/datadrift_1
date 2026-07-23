@@ -76,6 +76,7 @@ def load_config(path: str | Path) -> Namespace:
     loss_cfg = train_cfg.get("loss", {})
     grad_cache_cfg = train_cfg.get("grad_cache", {})
     validation_cfg = train_cfg.get("validation", {})
+    early_stopping_cfg = validation_cfg.get("early_stopping", {})
     inference_cfg = cfg.get("inference", {})
     runtime_gpu_ids = runtime_cfg.get("gpu_ids")
     if runtime_gpu_ids is None:
@@ -163,6 +164,9 @@ def load_config(path: str | Path) -> Namespace:
         validation_every_n_epochs=max(1, int(validation_cfg.get("every_n_epochs", 1))),
         validation_start_epoch=max(1, int(validation_cfg.get("start_epoch", 1))),
         validation_mode=validation_cfg.get("mode", "positive_global_path"),
+        early_stopping_enabled=bool(early_stopping_cfg.get("enabled", False)),
+        early_stopping_patience=max(1, int(early_stopping_cfg.get("patience", 10))),
+        early_stopping_min_delta=max(0.0, float(early_stopping_cfg.get("min_delta", 0.0))),
         inference_mode=inference_cfg.get("mode", "positive_global_path"),
         inference_tau=float(inference_cfg.get("tau", 1.0 / float(train_cfg.get("tau", 0.07)))),
         metric_terminal_weight=float(
@@ -801,6 +805,7 @@ def main():
     best_epoch = None
     best_prompt_state = None
     best_lora_state = None
+    validations_without_improvement = 0
 
     for epoch in range(1, args.epochs + 1):
         if hasattr(train_loader.batch_sampler, "set_epoch"):
@@ -959,6 +964,7 @@ def main():
             and (epoch - args.validation_start_epoch) % args.validation_every_n_epochs == 0
         )
         is_best = False
+        should_stop = False
         if validation_due:
             val_result = evaluate_split_raw(
                 args,
@@ -976,12 +982,23 @@ def main():
             val_bmhd = float(val_result["metrics"]["balanced_hdist"])
             epoch_stats["val_balanced_acc"] = val_bacc
             epoch_stats["val_balanced_hdist"] = val_bmhd
-            if val_bacc > best_bacc:
+            if val_bacc > best_bacc + args.early_stopping_min_delta:
                 best_bacc = val_bacc
                 best_epoch = epoch
                 best_prompt_state = prompt_only_state_dict(learner)
                 best_lora_state = vision_lora_state_dict(clip_model)
+                validations_without_improvement = 0
                 is_best = True
+            else:
+                validations_without_improvement += 1
+            epoch_stats["early_stopping_bad_validations"] = (
+                validations_without_improvement
+            )
+            should_stop = (
+                args.early_stopping_enabled
+                and validations_without_improvement >= args.early_stopping_patience
+            )
+            epoch_stats["early_stopping_triggered"] = should_stop
 
         history.append(epoch_stats)
         message = (
@@ -1023,6 +1040,15 @@ def main():
                     },
                 },
             )
+        if should_stop:
+            print(
+                "early stopping: "
+                f"no val_bacc improvement greater than "
+                f"{args.early_stopping_min_delta:g} for "
+                f"{validations_without_improvement} validation runs; "
+                f"best epoch={best_epoch}, best val_bacc={best_bacc:.6f}"
+            )
+            break
 
     last_metrics = {
         "train_history": history,
