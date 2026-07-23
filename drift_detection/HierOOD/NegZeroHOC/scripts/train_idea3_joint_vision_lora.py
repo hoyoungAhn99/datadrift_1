@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from argparse import Namespace
+import gc
 import math
 import random
 import sys
@@ -24,9 +25,18 @@ from negzerohoc.checkpointing import save_idea3_checkpoint
 from negzerohoc.config_utils import load_yaml_config
 from negzerohoc.evaluation import build_hierarchy, evaluate_split, make_distance_mats, mixed_summary
 from negzerohoc.feature_io import ensure_dir, save_json
+from negzerohoc.grad_cache import (
+    build_parallel_image_encoder,
+    grad_cache_forward_backward,
+    is_cuda_out_of_memory,
+)
 from negzerohoc.idea3_inference import build_idea3_semantic_index, predict_features_idea3
 from negzerohoc.image_metric import HierarchyPKBatchSampler
 from negzerohoc.losses import dual_weihims_positive_loss
+from negzerohoc.metric_terminal import (
+    build_metric_terminal_specs,
+    predict_features_metric_terminal,
+)
 from negzerohoc.output_layout import resolve_experiment_artifact
 from negzerohoc.prompt_models import HierPromptConfig, PositivePromptLearner
 from negzerohoc.runtime import available_device, configured_device
@@ -64,8 +74,19 @@ def load_config(path: str | Path) -> Namespace:
     lora_cfg = cfg.get("vision_lora", {})
     train_cfg = cfg.get("joint_training", {})
     loss_cfg = train_cfg.get("loss", {})
+    grad_cache_cfg = train_cfg.get("grad_cache", {})
     validation_cfg = train_cfg.get("validation", {})
     inference_cfg = cfg.get("inference", {})
+    runtime_gpu_ids = runtime_cfg.get("gpu_ids")
+    if runtime_gpu_ids is None:
+        configured = configured_device(runtime_cfg)
+        runtime_gpu_ids = (
+            [int(configured.split(":", 1)[1])]
+            if configured.startswith("cuda:")
+            else [0]
+            if configured == "cuda"
+            else []
+        )
 
     experiment_name = experiment_cfg.get("name", "idea3-joint-vision-lora")
     output_root = Path(experiment_cfg.get("output_root", "outputs"))
@@ -101,6 +122,7 @@ def load_config(path: str | Path) -> Namespace:
         tokenizer_model=clip_cfg.get("tokenizer_model", clip_cfg.get("model", "openai/clip-vit-base-patch16")),
         local_files_only=bool(clip_cfg.get("local_files_only", True)),
         device=configured_device(runtime_cfg),
+        gpu_ids=tuple(int(gpu_id) for gpu_id in runtime_gpu_ids),
         seed=int(runtime_cfg.get("seed", 0)),
         prompt=prompt_cfg,
         vision_lora=lora_cfg,
@@ -119,6 +141,8 @@ def load_config(path: str | Path) -> Namespace:
         precision=str(train_cfg.get("precision", "fp16")).lower(),
         gradient_clip_norm=float(train_cfg.get("gradient_clip_norm", 1.0)),
         gradient_checkpointing=bool(train_cfg.get("gradient_checkpointing", True)),
+        grad_cache_mode=str(grad_cache_cfg.get("mode", "never")).lower(),
+        grad_cache_micro_batch_size=int(grad_cache_cfg.get("micro_batch_size", 16)),
         loss_name=str(loss_cfg.get("name", "sparse_path_bottleneck")).lower(),
         loss_bottleneck_weight=float(loss_cfg.get("bottleneck_weight", 0.5)),
         loss_bottleneck_temperature=float(loss_cfg.get("bottleneck_temperature", 0.5)),
@@ -141,6 +165,18 @@ def load_config(path: str | Path) -> Namespace:
         validation_mode=validation_cfg.get("mode", "positive_global_path"),
         inference_mode=inference_cfg.get("mode", "positive_global_path"),
         inference_tau=float(inference_cfg.get("tau", 1.0 / float(train_cfg.get("tau", 0.07)))),
+        metric_terminal_weight=float(
+            validation_cfg.get(
+                "terminal_weight",
+                inference_cfg.get("terminal_weight", 1.0),
+            )
+        ),
+        metric_terminal_temperature=float(
+            validation_cfg.get(
+                "bottleneck_temperature",
+                inference_cfg.get("bottleneck_temperature", 0.5),
+            )
+        ),
         checkpoint=str(checkpoint),
         last_checkpoint=str(last_checkpoint),
         result_path=str(resolve_experiment_artifact(
@@ -444,6 +480,59 @@ def make_grad_scaler(enabled: bool):
         return torch.cuda.amp.GradScaler(enabled=enabled)
 
 
+def compute_dual_weihims_batch(
+    args,
+    hierarchy,
+    learner,
+    depth_nodes,
+    depth_prompt_metadata,
+    image_features: torch.Tensor,
+    leaf_nodes: list[str],
+) -> tuple[torch.Tensor, dict]:
+    image_path_labels = leaf_path_label_tensor(
+        hierarchy,
+        leaf_nodes,
+        image_features.device,
+    )
+    prompt_features_by_depth = encode_depth_prompts(
+        learner,
+        hierarchy,
+        depth_nodes,
+    )
+    loss, stats = dual_weihims_positive_loss(
+        image_features,
+        image_path_labels,
+        prompt_features_by_depth,
+        depth_prompt_metadata["node_labels"],
+        depth_prompt_metadata["path_labels"],
+        image_weight=args.loss_image_weight,
+        alignment_weight=args.loss_alignment_weight,
+        alpha=args.loss_alpha,
+        beta=args.loss_beta,
+        lam=args.loss_lam,
+        mining_margin=args.loss_mining_margin,
+        minimum_mode=args.loss_minimum_mode,
+        dist_scale=args.loss_dist_scale,
+        dist_pow=args.loss_dist_pow,
+    )
+    local_acc, path_acc = depthwise_alignment_accuracy(
+        image_features.detach(),
+        image_path_labels,
+        prompt_features_by_depth,
+        depth_prompt_metadata["node_labels"],
+    )
+    stats["local_acc"] = local_acc
+    stats["path_acc"] = path_acc
+    return loss, stats
+
+
+def release_cuda_cache(optimizer) -> None:
+    optimizer.zero_grad(set_to_none=True)
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 @torch.no_grad()
 def evaluate_split_raw(
     args,
@@ -455,30 +544,59 @@ def evaluate_split_raw(
     device,
     split_name: str,
     inference_mode: str | None = None,
+    image_encoder=None,
 ):
     inference_mode = inference_mode or args.inference_mode
     clip_model.eval()
     learner.eval()
     set_vision_lora_train_mode(clip_model, False)
-    semantic_index = build_idea3_semantic_index(
-        hierarchy,
-        learner,
-        mode=inference_mode,
-    )
+    if inference_mode == "positive_metric_terminal":
+        terminal_specs = build_metric_terminal_specs(hierarchy)
+        edge_pairs = list(dict.fromkeys(
+            edge for spec in terminal_specs for edge in spec.route_edges
+        ))
+        encoded_edges = learner.encode_edges(edge_pairs).detach()
+        positive_edge_features = {
+            edge: encoded_edges[index]
+            for index, edge in enumerate(edge_pairs)
+        }
+        semantic_index = None
+    else:
+        terminal_specs = None
+        positive_edge_features = None
+        semantic_index = build_idea3_semantic_index(
+            hierarchy,
+            learner,
+            mode=inference_mode,
+        )
 
     predictions = []
     targets = []
     for images, batch_targets in loader:
         images = images.to(device, non_blocking=True)
         with autocast_context(args, device):
-            image_features = clip_model.get_image_features(pixel_values=images)
-        output = predict_features_idea3(
-            image_features,
-            hierarchy,
-            semantic_index,
-            mode=inference_mode,
-            tau=args.inference_tau,
-        )
+            image_features = (
+                image_encoder(images)
+                if image_encoder is not None
+                else clip_model.get_image_features(pixel_values=images)
+            )
+        if inference_mode == "positive_metric_terminal":
+            output = predict_features_metric_terminal(
+                image_features,
+                hierarchy,
+                positive_edge_features,
+                terminal_specs,
+                terminal_weight=args.metric_terminal_weight,
+                bottleneck_temperature=args.metric_terminal_temperature,
+            )
+        else:
+            output = predict_features_idea3(
+                image_features,
+                hierarchy,
+                semantic_index,
+                mode=inference_mode,
+                tau=args.inference_tau,
+            )
         predictions.append(output["preds"].cpu())
         targets.append(batch_targets.cpu())
 
@@ -560,6 +678,12 @@ def main():
         raise ValueError("At least one of train_prompt or train_vision_lora must be true")
     if args.loss_name == "dual_weihims" and not (args.train_prompt and args.train_vision_lora):
         raise ValueError("dual_weihims requires both positive prompts and Vision LoRA to train")
+    if args.grad_cache_mode not in {"never", "auto", "always"}:
+        raise ValueError("joint_training.grad_cache.mode must be never, auto, or always")
+    if args.grad_cache_micro_batch_size <= 0:
+        raise ValueError("joint_training.grad_cache.micro_batch_size must be positive")
+    if args.grad_cache_mode != "never" and args.loss_name != "dual_weihims":
+        raise ValueError("GradCache is currently supported only for dual_weihims")
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
@@ -617,6 +741,11 @@ def main():
         prompt_cfg,
     ).to(device)
     learner.set_text_variant(args.positive_text_variant)
+    image_encoder, active_gpu_ids = build_parallel_image_encoder(
+        clip_model,
+        device,
+        args.gpu_ids,
+    )
     depth_nodes = build_depth_prompt_sets(hierarchy) if args.loss_name == "dual_weihims" else None
     depth_prompt_metadata = (
         build_depth_prompt_metadata(hierarchy, depth_nodes, device)
@@ -647,6 +776,11 @@ def main():
     use_scaler = device.startswith("cuda") and args.precision in {"fp16", "float16"}
     scaler = make_grad_scaler(use_scaler)
     identity_adapter = nn.Identity()
+    grad_cache_active = args.grad_cache_mode == "always"
+    active_micro_batch_size = min(
+        args.train_batch_size,
+        args.grad_cache_micro_batch_size,
+    )
 
     print(
         "positive vision/text training: "
@@ -656,7 +790,10 @@ def main():
         f"prompt_params={sum(parameter.numel() for parameter in prompt_params)}, "
         f"vision_lora_params={sum(parameter.numel() for parameter in lora_params)}, "
         f"batch_size={args.train_batch_size}, precision={args.precision}, "
-        f"loss={args.loss_name}"
+        f"loss={args.loss_name}, gpu_ids={list(active_gpu_ids)}, "
+        f"data_parallel={len(active_gpu_ids) > 1}, "
+        f"grad_cache={args.grad_cache_mode}, "
+        f"grad_cache_micro_batch={active_micro_batch_size}"
     )
 
     history = []
@@ -691,64 +828,93 @@ def main():
             leaf_nodes = target_leaf_nodes(hierarchy, train_dataset.classes, batch_targets)
             optimizer.zero_grad(set_to_none=True)
 
-            with autocast_context(args, device):
-                image_features = clip_model.get_image_features(pixel_values=images)
-                if args.loss_name == "dual_weihims":
-                    image_path_labels = leaf_path_label_tensor(hierarchy, leaf_nodes, device)
-                    prompt_features_by_depth = encode_depth_prompts(
-                        learner, hierarchy, depth_nodes
-                    )
-                    loss, stats = dual_weihims_positive_loss(
-                        image_features,
-                        image_path_labels,
-                        prompt_features_by_depth,
-                        depth_prompt_metadata["node_labels"],
-                        depth_prompt_metadata["path_labels"],
-                        image_weight=args.loss_image_weight,
-                        alignment_weight=args.loss_alignment_weight,
-                        alpha=args.loss_alpha,
-                        beta=args.loss_beta,
-                        lam=args.loss_lam,
-                        mining_margin=args.loss_mining_margin,
-                        minimum_mode=args.loss_minimum_mode,
-                        dist_scale=args.loss_dist_scale,
-                        dist_pow=args.loss_dist_pow,
-                    )
             if args.loss_name == "dual_weihims":
-                local_acc, path_acc = depthwise_alignment_accuracy(
-                    image_features.detach(),
-                    image_path_labels,
-                    prompt_features_by_depth,
-                    depth_prompt_metadata["node_labels"],
-                )
-                stats["local_acc"] = local_acc
-                stats["path_acc"] = path_acc
-                if scaler.is_enabled():
-                    scaler.scale(loss).backward()
-                else:
-                    loss.backward()
-            elif args.train_prompt and args.train_vision_lora:
-                stats = backward_sparse_path_bottleneck_streaming(
-                    args,
-                    hierarchy,
-                    learner,
-                    identity_adapter,
-                    image_features,
-                    leaf_nodes,
-                    grad_scaler=scaler,
-                )
+                def loss_closure(cached_image_features):
+                    return compute_dual_weihims_batch(
+                        args,
+                        hierarchy,
+                        learner,
+                        depth_nodes,
+                        depth_prompt_metadata,
+                        cached_image_features,
+                        leaf_nodes,
+                    )
+
+                direct_completed = False
+                if not grad_cache_active:
+                    try:
+                        with autocast_context(args, device):
+                            image_features = image_encoder(images)
+                            loss, stats = loss_closure(image_features)
+                        if scaler.is_enabled():
+                            scaler.scale(loss).backward()
+                        else:
+                            loss.backward()
+                        direct_completed = True
+                    except RuntimeError as error:
+                        if args.grad_cache_mode != "auto" or not is_cuda_out_of_memory(error):
+                            raise
+                        print(
+                            "direct logical batch ran out of CUDA memory; "
+                            f"switching permanently to GradCache with micro-batch "
+                            f"{active_micro_batch_size}"
+                        )
+                        grad_cache_active = True
+                        release_cuda_cache(optimizer)
+
+                if not direct_completed:
+                    while True:
+                        try:
+                            _, stats = grad_cache_forward_backward(
+                                images,
+                                image_encoder,
+                                loss_closure,
+                                micro_batch_size=active_micro_batch_size,
+                                scaler=scaler,
+                                autocast_factory=lambda: autocast_context(args, device),
+                                cuda_devices=active_gpu_ids,
+                            )
+                            break
+                        except RuntimeError as error:
+                            if (
+                                not is_cuda_out_of_memory(error)
+                                or active_micro_batch_size <= max(1, len(active_gpu_ids))
+                            ):
+                                raise
+                            release_cuda_cache(optimizer)
+                            active_micro_batch_size = max(
+                                max(1, len(active_gpu_ids)),
+                                active_micro_batch_size // 2,
+                            )
+                            print(
+                                "GradCache micro-batch ran out of CUDA memory; "
+                                f"retrying with micro-batch {active_micro_batch_size}"
+                            )
             else:
-                loss, stats = compute_sparse_path_positive_loss(
-                    args,
-                    hierarchy,
-                    learner,
-                    image_features,
-                    leaf_nodes,
-                )
-                if scaler.is_enabled():
-                    scaler.scale(loss).backward()
+                with autocast_context(args, device):
+                    image_features = image_encoder(images)
+                if args.train_prompt and args.train_vision_lora:
+                    stats = backward_sparse_path_bottleneck_streaming(
+                        args,
+                        hierarchy,
+                        learner,
+                        identity_adapter,
+                        image_features,
+                        leaf_nodes,
+                        grad_scaler=scaler,
+                    )
                 else:
-                    loss.backward()
+                    loss, stats = compute_sparse_path_positive_loss(
+                        args,
+                        hierarchy,
+                        learner,
+                        image_features,
+                        leaf_nodes,
+                    )
+                    if scaler.is_enabled():
+                        scaler.scale(loss).backward()
+                    else:
+                        loss.backward()
 
             if scaler.is_enabled():
                 scaler.unscale_(optimizer)
@@ -780,6 +946,10 @@ def main():
                 epoch_image_prompt_weihims / max(1, steps)
             )
             epoch_stats["path_ce_loss"] = 0.0
+            epoch_stats["grad_cache_active"] = bool(grad_cache_active)
+            epoch_stats["grad_cache_micro_batch_size"] = int(
+                active_micro_batch_size
+            )
         for group in optimizer.param_groups:
             epoch_stats[f"{group['group_name']}_lr"] = group["lr"]
 
@@ -800,6 +970,7 @@ def main():
                 device,
                 "val",
                 inference_mode=args.validation_mode,
+                image_encoder=image_encoder,
             )
             val_bacc = float(val_result["metrics"]["balanced_acc"])
             val_bmhd = float(val_result["metrics"]["balanced_hdist"])
@@ -822,7 +993,9 @@ def main():
             message += (
                 f", image_weihims={epoch_stats['image_weihims_loss']:.6f}, "
                 f"image_prompt_weihims={epoch_stats['image_prompt_weihims_loss']:.6f}, "
-                "path_ce=0.000000"
+                "path_ce=0.000000, "
+                f"grad_cache={epoch_stats['grad_cache_active']}, "
+                f"micro_batch={epoch_stats['grad_cache_micro_batch_size']}"
             )
         if validation_due:
             message += (
@@ -885,6 +1058,7 @@ def main():
         val_loader,
         device,
         "val",
+        image_encoder=image_encoder,
     )
     ood_result = evaluate_split_raw(
         args,
@@ -895,6 +1069,7 @@ def main():
         ood_loader,
         device,
         "ood",
+        image_encoder=image_encoder,
     )
     mixed = mixed_summary(val_result["metrics"], ood_result["metrics"])
     result = {
