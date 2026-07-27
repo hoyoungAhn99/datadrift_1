@@ -152,6 +152,264 @@ class HierarchyPKBatchSampler(PKBatchSampler):
             yield batch
 
 
+def _exposure_stats(
+    sample_counts: Sequence[int],
+    class_counts: dict[int, int],
+) -> dict[str, float | int]:
+    def summarize(values: Sequence[int], prefix: str) -> dict[str, float | int]:
+        mean = sum(values) / max(1, len(values))
+        variance = sum((value - mean) ** 2 for value in values) / max(1, len(values))
+        return {
+            f"{prefix}_min": min(values, default=0),
+            f"{prefix}_max": max(values, default=0),
+            f"{prefix}_mean": mean,
+            f"{prefix}_std": math.sqrt(variance),
+            f"{prefix}_unseen": sum(value == 0 for value in values),
+        }
+
+    return {
+        **summarize(sample_counts, "sample"),
+        **summarize(list(class_counts.values()), "class_slots"),
+    }
+
+
+class MSLossPKBatchSampler(PKBatchSampler):
+    """The queue sampler released with the Multi-Similarity loss.
+
+    This follows ``random_identity_sampler.py`` from the official MS Loss
+    repository: shuffle each class queue, pad only classes shorter than K by
+    sampling with replacement, split into K-sized chunks (dropping a remainder
+    shorter than K), sample P available
+    classes per batch, and rebuild every queue once fewer than P classes remain.
+    Queue and RNG state persist across DataLoader epochs so an epoch boundary
+    does not silently discard the partially consumed official queue.
+    """
+
+    def __init__(
+        self,
+        targets: Sequence[int],
+        *,
+        classes_per_batch: int,
+        examples_per_class: int,
+        seed: int = 0,
+    ):
+        super().__init__(
+            targets,
+            classes_per_batch=classes_per_batch,
+            examples_per_class=examples_per_class,
+            seed=seed,
+        )
+        self._rng = random.Random(self.seed)
+        self._batch_chunks: dict[int, list[list[int]]] = {}
+        self._available_classes: list[int] = []
+        self.sample_counts = [0] * len(targets)
+        self.class_counts = {target: 0 for target in self.classes}
+        self._scheduled_epoch: int | None = None
+        self._epoch_batches: list[list[int]] = []
+
+    def _prepare_cycle(self) -> None:
+        self._batch_chunks = {}
+        for target in self.classes:
+            indices = list(self.groups[target])
+            if len(indices) < self.examples_per_class:
+                indices = self._rng.choices(
+                    indices,
+                    k=self.examples_per_class,
+                )
+            self._rng.shuffle(indices)
+            self._batch_chunks[target] = [
+                indices[start:start + self.examples_per_class]
+                for start in range(
+                    0,
+                    len(indices) - self.examples_per_class + 1,
+                    self.examples_per_class,
+                )
+            ]
+        self._available_classes = list(self.classes)
+
+    def _next_batch(self) -> list[int]:
+        if len(self._available_classes) < self.classes_per_batch:
+            self._prepare_cycle()
+        selected_classes = self._rng.sample(
+            self._available_classes,
+            self.classes_per_batch,
+        )
+        batch = []
+        for target in selected_classes:
+            chunk = self._batch_chunks[target].pop(0)
+            batch.extend(chunk)
+            self.class_counts[target] += 1
+            for index in chunk:
+                self.sample_counts[index] += 1
+            if not self._batch_chunks[target]:
+                self._available_classes.remove(target)
+        return batch
+
+    def _schedule_epoch(self) -> None:
+        if self._scheduled_epoch == self.epoch:
+            return
+        self._epoch_batches = [
+            self._next_batch() for _ in range(self.num_batches)
+        ]
+        self._scheduled_epoch = self.epoch
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+        self._schedule_epoch()
+
+    def __iter__(self) -> Iterator[list[int]]:
+        self._schedule_epoch()
+        yield from (list(batch) for batch in self._epoch_batches)
+
+    def state_dict(self) -> dict:
+        return {
+            "version": 1,
+            "rng_state": self._rng.getstate(),
+            "batch_chunks": {
+                target: [list(chunk) for chunk in chunks]
+                for target, chunks in self._batch_chunks.items()
+            },
+            "available_classes": list(self._available_classes),
+            "sample_counts": list(self.sample_counts),
+            "class_counts": dict(self.class_counts),
+            "epoch": self.epoch,
+            "scheduled_epoch": self._scheduled_epoch,
+            "epoch_batches": [list(batch) for batch in self._epoch_batches],
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        self._rng.setstate(state["rng_state"])
+        self._batch_chunks = {
+            int(target): [list(chunk) for chunk in chunks]
+            for target, chunks in state["batch_chunks"].items()
+        }
+        self._available_classes = [
+            int(target) for target in state["available_classes"]
+        ]
+        self.sample_counts = [int(count) for count in state["sample_counts"]]
+        self.class_counts = {
+            int(target): int(count)
+            for target, count in state["class_counts"].items()
+        }
+        self.epoch = int(state.get("epoch", 0))
+        self._scheduled_epoch = state.get("scheduled_epoch")
+        self._epoch_batches = [
+            list(batch) for batch in state.get("epoch_batches", [])
+        ]
+
+    def exposure_stats(self) -> dict[str, float | int]:
+        return _exposure_stats(self.sample_counts, self.class_counts)
+
+
+class GloballyBalancedPKBatchSampler(PKBatchSampler):
+    """Greedy P/K sampler balancing cumulative exposure across the whole run.
+
+    P distinct classes with the lowest mean per-sample exposure are chosen for
+    every batch. Within each selected class, the K least-used samples are used.
+    Random tie-breaking prevents a fixed index bias. Counts and RNG state are
+    checkpointable, so the balance guarantee continues after resume.
+    """
+
+    def __init__(
+        self,
+        targets: Sequence[int],
+        *,
+        classes_per_batch: int,
+        examples_per_class: int,
+        seed: int = 0,
+    ):
+        super().__init__(
+            targets,
+            classes_per_batch=classes_per_batch,
+            examples_per_class=examples_per_class,
+            seed=seed,
+        )
+        self._rng = random.Random(self.seed)
+        self.sample_counts = [0] * len(targets)
+        self.class_counts = {target: 0 for target in self.classes}
+        self._scheduled_epoch: int | None = None
+        self._epoch_batches: list[list[int]] = []
+
+    def _select_classes(self) -> list[int]:
+        tie_breaks = {target: self._rng.random() for target in self.classes}
+        ranked = sorted(
+            self.classes,
+            key=lambda target: (
+                sum(self.sample_counts[index] for index in self.groups[target])
+                / len(self.groups[target]),
+                tie_breaks[target],
+            ),
+        )
+        return ranked[:self.classes_per_batch]
+
+    def _select_examples(self, target: int) -> list[int]:
+        selected = []
+        while len(selected) < self.examples_per_class:
+            candidates = [
+                index for index in self.groups[target] if index not in selected
+            ]
+            if not candidates:
+                candidates = list(self.groups[target])
+            minimum = min(self.sample_counts[index] for index in candidates)
+            least_used = [
+                index for index in candidates
+                if self.sample_counts[index] == minimum
+            ]
+            index = self._rng.choice(least_used)
+            selected.append(index)
+            self.sample_counts[index] += 1
+        return selected
+
+    def _schedule_epoch(self) -> None:
+        if self._scheduled_epoch == self.epoch:
+            return
+        self._epoch_batches = []
+        for _ in range(self.num_batches):
+            selected_classes = self._select_classes()
+            batch = []
+            for target in selected_classes:
+                batch.extend(self._select_examples(target))
+                self.class_counts[target] += 1
+            self._rng.shuffle(batch)
+            self._epoch_batches.append(batch)
+        self._scheduled_epoch = self.epoch
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+        self._schedule_epoch()
+
+    def __iter__(self) -> Iterator[list[int]]:
+        self._schedule_epoch()
+        yield from (list(batch) for batch in self._epoch_batches)
+
+    def state_dict(self) -> dict:
+        return {
+            "version": 1,
+            "rng_state": self._rng.getstate(),
+            "sample_counts": list(self.sample_counts),
+            "class_counts": dict(self.class_counts),
+            "epoch": self.epoch,
+            "scheduled_epoch": self._scheduled_epoch,
+            "epoch_batches": [list(batch) for batch in self._epoch_batches],
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        self._rng.setstate(state["rng_state"])
+        self.sample_counts = [int(count) for count in state["sample_counts"]]
+        self.class_counts = {
+            int(target): int(count)
+            for target, count in state["class_counts"].items()
+        }
+        self.epoch = int(state.get("epoch", 0))
+        self._scheduled_epoch = state.get("scheduled_epoch")
+        self._epoch_batches = [
+            list(batch) for batch in state.get("epoch_batches", [])
+        ]
+
+    def exposure_stats(self) -> dict[str, float | int]:
+        return _exposure_stats(self.sample_counts, self.class_counts)
+
+
 def supervised_contrastive_loss(
     features: torch.Tensor,
     targets: torch.Tensor,

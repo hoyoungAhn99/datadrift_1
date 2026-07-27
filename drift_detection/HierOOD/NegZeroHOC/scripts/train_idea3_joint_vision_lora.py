@@ -21,7 +21,7 @@ except ImportError:  # pragma: no cover
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from negzerohoc.checkpointing import save_idea3_checkpoint
+from negzerohoc.checkpointing import load_idea3_checkpoint, save_idea3_checkpoint
 from negzerohoc.config_utils import load_yaml_config
 from negzerohoc.evaluation import build_hierarchy, evaluate_split, make_distance_mats, mixed_summary
 from negzerohoc.feature_io import ensure_dir, save_json
@@ -31,7 +31,11 @@ from negzerohoc.grad_cache import (
     is_cuda_out_of_memory,
 )
 from negzerohoc.idea3_inference import build_idea3_semantic_index, predict_features_idea3
-from negzerohoc.image_metric import HierarchyPKBatchSampler
+from negzerohoc.image_metric import (
+    GloballyBalancedPKBatchSampler,
+    HierarchyPKBatchSampler,
+    MSLossPKBatchSampler,
+)
 from negzerohoc.losses import dual_weihims_positive_loss
 from negzerohoc.metric_terminal import (
     build_metric_terminal_specs,
@@ -77,6 +81,7 @@ def load_config(path: str | Path) -> Namespace:
     grad_cache_cfg = train_cfg.get("grad_cache", {})
     validation_cfg = train_cfg.get("validation", {})
     early_stopping_cfg = validation_cfg.get("early_stopping", {})
+    resume_cfg = train_cfg.get("resume", {})
     inference_cfg = cfg.get("inference", {})
     runtime_gpu_ids = runtime_cfg.get("gpu_ids")
     if runtime_gpu_ids is None:
@@ -105,6 +110,7 @@ def load_config(path: str | Path) -> Namespace:
         kind="checkpoints",
         default_filename=f"{checkpoint.stem}-last{checkpoint.suffix}",
     )
+    resume_checkpoint = resume_cfg.get("checkpoint") or last_checkpoint
 
     datadir = dataset_cfg.get("datadir")
     if not datadir:
@@ -151,6 +157,7 @@ def load_config(path: str | Path) -> Namespace:
         loss_margin_weight=float(loss_cfg.get("margin_weight", 0.25)),
         loss_classes_per_batch=int(loss_cfg.get("classes_per_batch", 4)),
         loss_examples_per_class=int(loss_cfg.get("examples_per_class", 4)),
+        loss_sampler=str(loss_cfg.get("sampler", "hierarchy_independent")).lower(),
         loss_image_weight=float(loss_cfg.get("image_weight", 1.0)),
         loss_alignment_weight=float(loss_cfg.get("alignment_weight", 1.0)),
         loss_alpha=float(loss_cfg.get("alpha", 2.0)),
@@ -167,6 +174,8 @@ def load_config(path: str | Path) -> Namespace:
         early_stopping_enabled=bool(early_stopping_cfg.get("enabled", False)),
         early_stopping_patience=max(1, int(early_stopping_cfg.get("patience", 10))),
         early_stopping_min_delta=max(0.0, float(early_stopping_cfg.get("min_delta", 0.0))),
+        resume_enabled=bool(resume_cfg.get("enabled", False)),
+        resume_checkpoint=str(resume_checkpoint),
         inference_mode=inference_cfg.get("mode", "positive_global_path"),
         inference_tau=float(inference_cfg.get("tau", 1.0 / float(train_cfg.get("tau", 0.07)))),
         metric_terminal_weight=float(
@@ -341,13 +350,29 @@ def make_hierarchy_metric_loader(dataset, hierarchy, args):
             "Dual WeiHiMS requires batch_size == classes_per_batch * examples_per_class; "
             f"got {args.train_batch_size} != {expected_batch_size}"
         )
-    batch_sampler = HierarchyPKBatchSampler(
-        dataset.targets,
-        class_paths=class_paths_by_dataset_target(hierarchy, list(dataset.classes)),
-        classes_per_batch=args.loss_classes_per_batch,
-        examples_per_class=args.loss_examples_per_class,
-        seed=args.seed,
-    )
+    sampler_kwargs = {
+        "targets": dataset.targets,
+        "classes_per_batch": args.loss_classes_per_batch,
+        "examples_per_class": args.loss_examples_per_class,
+        "seed": args.seed,
+    }
+    if args.loss_sampler == "hierarchy_independent":
+        batch_sampler = HierarchyPKBatchSampler(
+            **sampler_kwargs,
+            class_paths=class_paths_by_dataset_target(
+                hierarchy,
+                list(dataset.classes),
+            ),
+        )
+    elif args.loss_sampler == "ms_loss":
+        batch_sampler = MSLossPKBatchSampler(**sampler_kwargs)
+    elif args.loss_sampler == "globally_balanced":
+        batch_sampler = GloballyBalancedPKBatchSampler(**sampler_kwargs)
+    else:
+        raise ValueError(
+            "joint_training.loss.sampler must be one of: "
+            "hierarchy_independent, ms_loss, globally_balanced"
+        )
     generator = torch.Generator()
     generator.manual_seed(args.seed)
     return DataLoader(
@@ -537,6 +562,95 @@ def release_cuda_cache(optimizer) -> None:
         torch.cuda.empty_cache()
 
 
+def resume_signature(args) -> dict:
+    return {
+        "experiment_name": args.experiment_name,
+        "dataset": args.dataset,
+        "hierarchy": args.hierarchy,
+        "id_split": args.id_split,
+        "clip_model": args.clip_model,
+        "loss_name": args.loss_name,
+        "batch_size": args.train_batch_size,
+        "classes_per_batch": args.loss_classes_per_batch,
+        "examples_per_class": args.loss_examples_per_class,
+        "sampler": args.loss_sampler,
+        "prompt_lr": args.prompt_lr,
+        "vision_lora_lr": args.vision_lora_lr,
+    }
+
+
+def capture_rng_state(train_loader) -> dict:
+    state = {
+        "python": random.getstate(),
+        "torch": torch.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        state["cuda"] = [value.cpu() for value in torch.cuda.get_rng_state_all()]
+    loader_generator = getattr(train_loader, "generator", None)
+    if loader_generator is not None:
+        state["train_loader_generator"] = loader_generator.get_state()
+    return state
+
+
+def restore_rng_state(state: dict | None, train_loader) -> None:
+    if not state:
+        return
+    if state.get("python") is not None:
+        random.setstate(state["python"])
+    if state.get("torch") is not None:
+        torch.set_rng_state(state["torch"])
+    if torch.cuda.is_available() and state.get("cuda") is not None:
+        torch.cuda.set_rng_state_all(state["cuda"])
+    loader_generator = getattr(train_loader, "generator", None)
+    if loader_generator is not None and state.get("train_loader_generator") is not None:
+        loader_generator.set_state(state["train_loader_generator"])
+
+
+def make_training_state(
+    args,
+    *,
+    epoch,
+    optimizer,
+    scheduler,
+    scaler,
+    train_loader,
+    history,
+    best_epoch,
+    best_bacc,
+    best_prompt_state,
+    best_lora_state,
+    validations_without_improvement,
+    grad_cache_active,
+    active_micro_batch_size,
+    training_loop_complete,
+) -> dict:
+    batch_sampler = getattr(train_loader, "batch_sampler", None)
+    sampler_state = (
+        batch_sampler.state_dict()
+        if batch_sampler is not None and hasattr(batch_sampler, "state_dict")
+        else None
+    )
+    return {
+        "version": 1,
+        "epoch": int(epoch),
+        "resume_signature": resume_signature(args),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict(),
+        "scaler_state_dict": scaler.state_dict(),
+        "rng_state": capture_rng_state(train_loader),
+        "sampler_state_dict": sampler_state,
+        "history": history,
+        "best_epoch": best_epoch,
+        "best_bacc": best_bacc if math.isfinite(best_bacc) else None,
+        "best_prompt_state_dict": best_prompt_state,
+        "best_vision_lora_state_dict": best_lora_state,
+        "validations_without_improvement": int(validations_without_improvement),
+        "grad_cache_active": bool(grad_cache_active),
+        "active_micro_batch_size": int(active_micro_batch_size),
+        "training_loop_complete": bool(training_loop_complete),
+    }
+
+
 @torch.no_grad()
 def evaluate_split_raw(
     args,
@@ -633,6 +747,7 @@ def save_joint_checkpoint(
     learner,
     clip_model,
     metrics,
+    training_state=None,
 ):
     stage = (
         "positive_joint_vision_lora_dual_weihims"
@@ -658,6 +773,7 @@ def save_joint_checkpoint(
         ),
         metrics=metrics,
         args=vars(args),
+        training_state=training_state,
     )
 
 
@@ -688,6 +804,15 @@ def main():
         raise ValueError("joint_training.grad_cache.micro_batch_size must be positive")
     if args.grad_cache_mode != "never" and args.loss_name != "dual_weihims":
         raise ValueError("GradCache is currently supported only for dual_weihims")
+    if args.loss_sampler not in {
+        "hierarchy_independent",
+        "ms_loss",
+        "globally_balanced",
+    }:
+        raise ValueError(
+            "joint_training.loss.sampler must be one of: "
+            "hierarchy_independent, ms_loss, globally_balanced"
+        )
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
@@ -794,7 +919,8 @@ def main():
         f"prompt_params={sum(parameter.numel() for parameter in prompt_params)}, "
         f"vision_lora_params={sum(parameter.numel() for parameter in lora_params)}, "
         f"batch_size={args.train_batch_size}, precision={args.precision}, "
-        f"loss={args.loss_name}, gpu_ids={list(active_gpu_ids)}, "
+        f"loss={args.loss_name}, sampler={args.loss_sampler}, "
+        f"gpu_ids={list(active_gpu_ids)}, "
         f"data_parallel={len(active_gpu_ids) > 1}, "
         f"grad_cache={args.grad_cache_mode}, "
         f"grad_cache_micro_batch={active_micro_batch_size}"
@@ -806,8 +932,81 @@ def main():
     best_prompt_state = None
     best_lora_state = None
     validations_without_improvement = 0
+    start_epoch = 1
+    last_completed_epoch = 0
 
-    for epoch in range(1, args.epochs + 1):
+    resume_path = Path(args.resume_checkpoint)
+    if args.resume_enabled and resume_path.exists():
+        resume_checkpoint = load_idea3_checkpoint(resume_path, map_location="cpu")
+        training_state = resume_checkpoint.get("training_state")
+        if not training_state:
+            raise ValueError(
+                f"Resume checkpoint has no training_state: {resume_path}"
+            )
+        saved_signature = training_state.get("resume_signature")
+        current_signature = resume_signature(args)
+        if saved_signature is not None and "sampler" not in saved_signature:
+            saved_signature = {
+                **saved_signature,
+                "sampler": "hierarchy_independent",
+            }
+        if saved_signature != current_signature:
+            raise ValueError(
+                "Resume checkpoint configuration mismatch: "
+                f"saved={saved_signature}, current={current_signature}"
+            )
+        load_prompt_only_state_dict(
+            learner,
+            resume_checkpoint["positive_state_dict"],
+        )
+        load_vision_lora_state_dict(
+            clip_model,
+            resume_checkpoint["vision_lora_state_dict"],
+        )
+        optimizer.load_state_dict(training_state["optimizer_state_dict"])
+        scheduler.load_state_dict(training_state["scheduler_state_dict"])
+        scaler.load_state_dict(training_state.get("scaler_state_dict", {}))
+        history = list(training_state.get("history", []))
+        best_epoch = training_state.get("best_epoch")
+        saved_best_bacc = training_state.get("best_bacc")
+        best_bacc = (
+            float(saved_best_bacc)
+            if saved_best_bacc is not None
+            else float("-inf")
+        )
+        best_prompt_state = training_state.get("best_prompt_state_dict")
+        best_lora_state = training_state.get("best_vision_lora_state_dict")
+        validations_without_improvement = int(
+            training_state.get("validations_without_improvement", 0)
+        )
+        grad_cache_active = bool(
+            training_state.get("grad_cache_active", grad_cache_active)
+        )
+        active_micro_batch_size = int(
+            training_state.get(
+                "active_micro_batch_size",
+                active_micro_batch_size,
+            )
+        )
+        last_completed_epoch = int(training_state["epoch"])
+        start_epoch = last_completed_epoch + 1
+        if training_state.get("training_loop_complete", False):
+            start_epoch = args.epochs + 1
+        sampler_state = training_state.get("sampler_state_dict")
+        batch_sampler = getattr(train_loader, "batch_sampler", None)
+        if sampler_state is not None and hasattr(batch_sampler, "load_state_dict"):
+            batch_sampler.load_state_dict(sampler_state)
+        restore_rng_state(training_state.get("rng_state"), train_loader)
+        print(
+            f"resumed checkpoint: {resume_path}, "
+            f"completed_epoch={last_completed_epoch}, "
+            f"next_epoch={start_epoch if start_epoch <= args.epochs else 'finalize'}, "
+            f"best_epoch={best_epoch}, best_val_bacc={best_bacc:.6f}"
+        )
+    elif args.resume_enabled:
+        print(f"resume checkpoint not found; starting fresh: {resume_path}")
+
+    for epoch in range(start_epoch, args.epochs + 1):
         if hasattr(train_loader.batch_sampler, "set_epoch"):
             train_loader.batch_sampler.set_epoch(epoch)
         set_joint_train_mode(
@@ -955,6 +1154,11 @@ def main():
             epoch_stats["grad_cache_micro_batch_size"] = int(
                 active_micro_batch_size
             )
+            epoch_stats["sampler"] = args.loss_sampler
+            if hasattr(train_loader.batch_sampler, "exposure_stats"):
+                epoch_stats["sampler_exposure"] = (
+                    train_loader.batch_sampler.exposure_stats()
+                )
         for group in optimizer.param_groups:
             epoch_stats[f"{group['group_name']}_lr"] = group["lr"]
 
@@ -1040,6 +1244,44 @@ def main():
                     },
                 },
             )
+        last_completed_epoch = epoch
+        last_metrics = {
+            "train_history": history,
+            "best_validation": {
+                "epoch": best_epoch,
+                "val_balanced_acc": (
+                    best_bacc if math.isfinite(best_bacc) else None
+                ),
+            },
+        }
+        resume_training_state = make_training_state(
+            args,
+            epoch=last_completed_epoch,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            scaler=scaler,
+            train_loader=train_loader,
+            history=history,
+            best_epoch=best_epoch,
+            best_bacc=best_bacc,
+            best_prompt_state=best_prompt_state,
+            best_lora_state=best_lora_state,
+            validations_without_improvement=validations_without_improvement,
+            grad_cache_active=grad_cache_active,
+            active_micro_batch_size=active_micro_batch_size,
+            training_loop_complete=should_stop or epoch >= args.epochs,
+        )
+        save_joint_checkpoint(
+            args,
+            args.last_checkpoint,
+            hierarchy,
+            prompt_cfg,
+            lora_cfg,
+            learner,
+            clip_model,
+            last_metrics,
+            training_state=resume_training_state,
+        )
         if should_stop:
             print(
                 "early stopping: "
@@ -1057,19 +1299,9 @@ def main():
             "val_balanced_acc": best_bacc if math.isfinite(best_bacc) else None,
         },
     }
-    save_joint_checkpoint(
-        args,
-        args.last_checkpoint,
-        hierarchy,
-        prompt_cfg,
-        lora_cfg,
-        learner,
-        clip_model,
-        last_metrics,
-    )
 
     if best_prompt_state is None or best_lora_state is None:
-        best_epoch = args.epochs
+        best_epoch = last_completed_epoch
         best_prompt_state = prompt_only_state_dict(learner)
         best_lora_state = vision_lora_state_dict(clip_model)
     load_prompt_only_state_dict(learner, best_prompt_state)

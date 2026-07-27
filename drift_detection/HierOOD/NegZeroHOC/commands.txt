@@ -145,3 +145,24 @@ C:\Users\user\anaconda3\envs\hoyoung\python.exe scripts\diagnose_image_density_o
 
 # Dual WeiHiMS logical batch 256 (P64 K4), max 100 epochs, val-BAcc early stopping
 C:\Users\user\anaconda3\envs\hoyoung\python.exe scripts\train_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_r16_qkvo_dual_weihims_b256_p64k4_e100_2gpu_gradcache_earlystop.yaml
+
+# Dual WeiHiMS logical batch 256 (P32 K8), max 100 epochs, automatic resume and val-BAcc early stopping
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_r16_qkvo_dual_weihims_b256_p32k8_e100_2gpu_gradcache_earlystop.yaml
+
+# P32 K8 sampler ablation 1/2: official Multi-Similarity queue policy
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_r16_qkvo_dual_weihims_b256_p32k8_ms_sampler_e100_2gpu_gradcache_earlystop.yaml
+
+# P32 K8 sampler ablation 2/2: globally balanced cumulative sample exposure
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_r16_qkvo_dual_weihims_b256_p32k8_globally_balanced_e100_2gpu_gradcache_earlystop.yaml
+
+# P32 K8 sampler ablation diagnostics
+C:\Users\user\anaconda3\envs\hoyoung\python.exe scripts\diagnose_leaf_cosine_ood.py --config configs\08_idea7_virtual_open_negprompt\idea7_fgvc_aircraft_b16_r16_qkvo_virtual_open.yaml --vision lora --text learned --gpu-id 0 --positive-checkpoint outputs\experiments\idea3-fgvc-aircraft-b16-dual-weihims-b256-p32k8-ms-sampler\checkpoints\positive.pt --out outputs\experiments\idea3-fgvc-aircraft-b16-dual-weihims-b256-p32k8-ms-sampler\diagnostics\positive-leaf-cosine.json
+C:\Users\user\anaconda3\envs\hoyoung\python.exe scripts\diagnose_image_density_ood.py --config configs\09_image_metric_joint_prompts\idea8_fgvc_aircraft_b16_image_metric_lora.yaml --checkpoint outputs\experiments\idea3-fgvc-aircraft-b16-dual-weihims-b256-p32k8-ms-sampler\checkpoints\positive.pt --gpu-id 0 --knn-k 20 --out outputs\experiments\idea3-fgvc-aircraft-b16-dual-weihims-b256-p32k8-ms-sampler\diagnostics\image-density-ood.json
+C:\Users\user\anaconda3\envs\hoyoung\python.exe scripts\diagnose_leaf_cosine_ood.py --config configs\08_idea7_virtual_open_negprompt\idea7_fgvc_aircraft_b16_r16_qkvo_virtual_open.yaml --vision lora --text learned --gpu-id 0 --positive-checkpoint outputs\experiments\idea3-fgvc-aircraft-b16-dual-weihims-b256-p32k8-globally-balanced\checkpoints\positive.pt --out outputs\experiments\idea3-fgvc-aircraft-b16-dual-weihims-b256-p32k8-globally-balanced\diagnostics\positive-leaf-cosine.json
+C:\Users\user\anaconda3\envs\hoyoung\python.exe scripts\diagnose_image_density_ood.py --config configs\09_image_metric_joint_prompts\idea8_fgvc_aircraft_b16_image_metric_lora.yaml --checkpoint outputs\experiments\idea3-fgvc-aircraft-b16-dual-weihims-b256-p32k8-globally-balanced\checkpoints\positive.pt --gpu-id 0 --knn-k 20 --out outputs\experiments\idea3-fgvc-aircraft-b16-dual-weihims-b256-p32k8-globally-balanced\diagnostics\image-density-ood.json
+
+# Maximum leaf-class diversity ablation 1/2: all 80 ID leaves, K4, logical batch 320
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_r16_qkvo_dual_weihims_b320_p80k4_e100_2gpu_gradcache_earlystop.yaml
+
+# Maximum leaf-class diversity ablation 2/2: all 80 ID leaves, K3, logical batch 240
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_r16_qkvo_dual_weihims_b240_p80k3_e100_2gpu_gradcache_earlystop.yaml
