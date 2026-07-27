@@ -9,6 +9,8 @@ import torch
 
 from negzerohoc.checkpointing import (
     load_idea3_checkpoint,
+    load_idea3_checkpoint_with_fallback,
+    previous_checkpoint_path,
     save_idea3_checkpoint,
 )
 
@@ -58,6 +60,33 @@ class AtomicCheckpointTest(unittest.TestCase):
 
             self.assertEqual(path.read_bytes(), b"previous-checkpoint")
             self.assertFalse(path.with_name(".last.pt.tmp").exists())
+
+    def test_resumable_checkpoint_keeps_one_previous_generation(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "last.pt"
+
+            save_test_checkpoint(path, training_state={"epoch": 1})
+            save_test_checkpoint(path, training_state={"epoch": 2})
+
+            self.assertEqual(load_idea3_checkpoint(path)["training_state"]["epoch"], 2)
+            previous_path = previous_checkpoint_path(path)
+            self.assertEqual(
+                load_idea3_checkpoint(previous_path)["training_state"]["epoch"],
+                1,
+            )
+
+    def test_corrupt_primary_falls_back_to_previous_generation(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "last.pt"
+
+            save_test_checkpoint(path, training_state={"epoch": 1})
+            save_test_checkpoint(path, training_state={"epoch": 2})
+            path.write_bytes(b"interrupted-checkpoint")
+
+            payload, loaded_path = load_idea3_checkpoint_with_fallback(path)
+
+            self.assertEqual(payload["training_state"]["epoch"], 1)
+            self.assertEqual(loaded_path, previous_checkpoint_path(path))
 
 
 if __name__ == "__main__":

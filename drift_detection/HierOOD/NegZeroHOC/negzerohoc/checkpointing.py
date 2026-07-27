@@ -51,9 +51,39 @@ def save_idea3_checkpoint(
         "training_state": training_state,
     }
     temporary_path = path.with_name(f".{path.name}.tmp")
+    previous_path = path.with_name(f"{path.stem}-previous{path.suffix}")
     try:
-        torch.save(payload, temporary_path)
-        os.replace(temporary_path, path)
+        with temporary_path.open("wb") as checkpoint_file:
+            torch.save(payload, checkpoint_file)
+            checkpoint_file.flush()
+            os.fsync(checkpoint_file.fileno())
+
+        validated_payload = load_idea3_checkpoint(temporary_path)
+        if validated_payload.get("stage") != stage:
+            raise RuntimeError(
+                "Checkpoint validation failed: "
+                f"expected stage={stage}, got {validated_payload.get('stage')}"
+            )
+        if training_state is not None:
+            validated_state = validated_payload.get("training_state")
+            if not validated_state:
+                raise RuntimeError(
+                    "Checkpoint validation failed: resumable training state is missing"
+                )
+            if validated_state.get("epoch") != training_state.get("epoch"):
+                raise RuntimeError(
+                    "Checkpoint validation failed: training epoch mismatch"
+                )
+
+        keep_previous = training_state is not None
+        if keep_previous and path.exists():
+            os.replace(path, previous_path)
+        try:
+            os.replace(temporary_path, path)
+        except BaseException:
+            if keep_previous and not path.exists() and previous_path.exists():
+                os.replace(previous_path, path)
+            raise
     finally:
         temporary_path.unlink(missing_ok=True)
     return path
@@ -65,3 +95,35 @@ def load_idea3_checkpoint(path: str | Path, map_location: str | torch.device = "
         return torch.load(path, map_location=map_location, weights_only=False)
     except TypeError:
         return torch.load(path, map_location=map_location)
+
+
+def previous_checkpoint_path(path: str | Path) -> Path:
+    path = Path(path)
+    return path.with_name(f"{path.stem}-previous{path.suffix}")
+
+
+def load_idea3_checkpoint_with_fallback(
+    path: str | Path,
+    map_location: str | torch.device = "cpu",
+) -> tuple[dict, Path]:
+    path = Path(path)
+    candidates = [path, previous_checkpoint_path(path)]
+    errors = []
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        try:
+            payload = load_idea3_checkpoint(candidate, map_location=map_location)
+            if not payload.get("training_state"):
+                raise ValueError("resumable training state is missing")
+            return payload, candidate
+        except Exception as error:
+            errors.append(f"{candidate}: {type(error).__name__}: {error}")
+    if errors:
+        raise RuntimeError(
+            "No valid resumable checkpoint was found. " + " | ".join(errors)
+        )
+    raise FileNotFoundError(
+        "No resumable checkpoint was found at "
+        + " or ".join(str(candidate) for candidate in candidates)
+    )

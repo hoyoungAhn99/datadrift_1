@@ -30,7 +30,11 @@ from negzerohoc.prompt_models import (
     PositivePromptLearner,
     UnknownPromptLearner,
 )
-from negzerohoc.runtime import available_device, configured_device
+from negzerohoc.runtime import (
+    available_device,
+    configure_reproducibility,
+    configured_device,
+)
 from negzerohoc.soft_prompting import SoftPromptTextEncoder
 from negzerohoc.training_data import (
     build_positive_edge_examples,
@@ -265,10 +269,7 @@ def main():
         raise ValueError(f"Primary inference must be {PRIMARY_INFERENCE_MODE!r}")
     if args.allow_root_unknown:
         raise ValueError("Root unknown must remain disabled")
-    random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
+    configure_reproducibility(args.seed)
     device = available_device(args.device)
 
     hierarchy, _ = build_hierarchy(REPO_ROOT, args.id_split, args.hierarchy)

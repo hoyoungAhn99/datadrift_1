@@ -32,7 +32,12 @@ from negzerohoc.image_metric import (
     supervised_contrastive_loss,
 )
 from negzerohoc.output_layout import resolve_experiment_artifact
-from negzerohoc.runtime import available_device, configured_device
+from negzerohoc.runtime import (
+    available_device,
+    configure_reproducibility,
+    configured_device,
+    seed_data_loader_worker,
+)
 from negzerohoc.vision_lora import (
     VisionLoRAConfig,
     inject_clip_vision_lora,
@@ -217,10 +222,7 @@ def main():
     args = parse_args()
     if not args.datadir:
         raise ValueError("Missing dataset.datadir")
-    random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
+    configure_reproducibility(args.seed)
     device = available_device(args.device)
 
     hierarchy, _ = build_hierarchy(REPO_ROOT, args.id_split, args.hierarchy)
@@ -237,6 +239,8 @@ def main():
         num_workers=args.num_workers,
         pin_memory=torch.cuda.is_available(),
         persistent_workers=args.num_workers > 0,
+        generator=torch.Generator().manual_seed(args.seed),
+        worker_init_fn=seed_data_loader_worker,
     )
     proxy_init_loader = make_loader(
         train_dataset,
