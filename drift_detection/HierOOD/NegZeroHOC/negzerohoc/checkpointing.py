@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import torch
@@ -26,6 +27,7 @@ def save_idea3_checkpoint(
     positive_checkpoint: str | None = None,
     metrics: dict | None = None,
     args: dict | None = None,
+    training_state: dict | None = None,
 ) -> Path:
     path = Path(path)
     ensure_dir(path.parent)
@@ -46,8 +48,14 @@ def save_idea3_checkpoint(
         "text_templates_version": TEXT_TEMPLATES_VERSION,
         "metrics": metrics or {},
         "args": args or {},
+        "training_state": training_state,
     }
-    torch.save(payload, path)
+    temporary_path = path.with_name(f".{path.name}.tmp")
+    try:
+        torch.save(payload, temporary_path)
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
     return path
 
 

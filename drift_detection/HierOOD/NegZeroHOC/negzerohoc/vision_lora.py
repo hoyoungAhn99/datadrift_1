@@ -54,14 +54,25 @@ class LoRALinear(nn.Module):
 
         self.rank = min(int(rank), base_layer.in_features, base_layer.out_features)
         self.scaling = float(alpha) / float(self.rank)
+        self.enabled = True
         self.dropout = nn.Dropout(float(dropout))
         self.lora_a = nn.Linear(base_layer.in_features, self.rank, bias=False)
         self.lora_b = nn.Linear(self.rank, base_layer.out_features, bias=False)
+        self.lora_a.to(
+            device=base_layer.weight.device,
+            dtype=base_layer.weight.dtype,
+        )
+        self.lora_b.to(
+            device=base_layer.weight.device,
+            dtype=base_layer.weight.dtype,
+        )
         nn.init.kaiming_uniform_(self.lora_a.weight, a=5**0.5)
         nn.init.zeros_(self.lora_b.weight)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         base = self.base_layer(inputs)
+        if not self.enabled:
+            return base
         delta = self.lora_b(self.lora_a(self.dropout(inputs))) * self.scaling
         return base + delta
 
@@ -150,3 +161,8 @@ def load_vision_lora_state_dict(module: nn.Module, state_dict: dict[str, torch.T
 def set_vision_lora_train_mode(module: nn.Module, training: bool) -> None:
     for lora_module in iter_vision_lora_modules(module):
         lora_module.train(training)
+
+
+def set_vision_lora_enabled(module: nn.Module, enabled: bool) -> None:
+    for lora_module in iter_vision_lora_modules(module):
+        lora_module.enabled = bool(enabled)

@@ -134,6 +134,15 @@ class _BasePromptLearner(nn.Module):
 class PositivePromptLearner(_BasePromptLearner):
     def __init__(self, dataset_name: str, hierarchy, text_encoder, cfg: HierPromptConfig):
         super().__init__(dataset_name, hierarchy, text_encoder, cfg, prefix="positive")
+        self.text_variant = "learned"
+        self._plain_edge_cache: dict[tuple[tuple[str, str], ...], torch.Tensor] = {}
+
+    def set_text_variant(self, variant: str) -> None:
+        if variant not in {"learned", "plain"}:
+            raise ValueError(f"Unsupported positive text variant: {variant!r}")
+        self.text_variant = variant
+        if variant != "plain":
+            self._plain_edge_cache.clear()
 
     def edge_text(self, parent: str, child: str) -> str:
         return build_edge_text(self.dataset_name, self.hierarchy, parent, child)
@@ -143,6 +152,13 @@ class PositivePromptLearner(_BasePromptLearner):
             return torch.empty(0, self.projection_dim, device=self.device)
         parents = [p for p, _ in parent_child_pairs]
         texts = [self.edge_text(p, c) for p, c in parent_child_pairs]
+        if self.text_variant == "plain":
+            cache_key = tuple(parent_child_pairs)
+            if cache_key not in self._plain_edge_cache:
+                self._plain_edge_cache[cache_key] = (
+                    self.text_encoder.encode_plain_texts(texts).detach()
+                )
+            return self._plain_edge_cache[cache_key]
         context = self._context_for_parents(parents)
         return self.text_encoder.encode_with_context(texts, context)
 
