@@ -208,10 +208,11 @@ def validate_positive_checkpoint(args, checkpoint: dict) -> None:
             for key, (actual, expected_value) in mismatches.items()
         )
         raise ValueError(f"Idea 4 positive checkpoint/config mismatch: {details}")
-    if checkpoint.get("stage") != "positive_joint_vision_lora":
+    stage = str(checkpoint.get("stage", ""))
+    if not stage.startswith("positive_joint_vision_lora"):
         raise ValueError(
-            "Idea 4 requires a positive_joint_vision_lora checkpoint, "
-            f"got {checkpoint.get('stage')!r}"
+            "Frozen-positive training requires a positive_joint_vision_lora "
+            f"checkpoint family, got {checkpoint.get('stage')!r}"
         )
     for key in (
         "positive_state_dict",

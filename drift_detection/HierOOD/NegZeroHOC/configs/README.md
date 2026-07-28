@@ -11,6 +11,12 @@ configs/
   03_sparse_path/           Sparse-path loss and Global Path MAP experiments
   04_joint_vision_lora/     Raw-image true Vision LoRA + prompt joint training
   05_idea4_negative_prompt/ Frozen positive/LoRA + parent-local unknown prompts
+  06_idea5_hier_negprompt/  Hierarchical NegPrompt paper/stop ablations
+  07_idea6_hc_negprompt/    Hierarchy-constrained negative prompts
+  08_idea7_virtual_open_negprompt/ Sibling virtual open-space experiments
+  09_image_metric_joint_prompts/ Image-metric and staged prompt experiments
+  10_negative_text_metric_terminal/ Negative text/global terminal ablations
+  11_paper_negprompt/       Published NegPrompt vs repulsive-NPD control
   references/               External/reference experiment configs
 ```
 

@@ -26,6 +26,7 @@ class HierPromptConfig:
     ablation: str = "global_depth_parent"
     unknown_prompts: int = 1
     unknown_prototype_ctx_tokens: int = 1
+    unknown_text_variant: str = "parent_conditioned"
     negative_prompts: int = 2
     negative_prototype_ctx_tokens: int = 2
 
@@ -185,7 +186,12 @@ class UnknownPromptLearner(_BasePromptLearner):
             self.register_parameter("prototype_ctx", None)
 
     def unknown_text(self, parent: str) -> str:
-        return build_parent_unknown_text(self.dataset_name, self.hierarchy, parent)
+        return build_parent_unknown_text(
+            self.dataset_name,
+            self.hierarchy,
+            parent,
+            variant=self.cfg.unknown_text_variant,
+        )
 
     def encode_unknown_prototypes(self, parents: list[str]) -> torch.Tensor:
         if not parents:
