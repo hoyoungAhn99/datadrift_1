@@ -323,13 +323,20 @@ def tree_complement_terminal_scores(
     terminal_specs: list[MetricTerminalSpec],
     unknown_features_by_parent: dict[str, torch.Tensor],
     *,
+    excluded_children_by_parent: dict[str, set[str]] | None = None,
     terminal_weight: float = 0.75,
     bottleneck_temperature: float = 0.1,
     unknown_temperature: float = 0.07,
     child_temperature: float = 0.07,
     complement_weight: float = 0.5,
 ) -> dict:
-    """Score leaves and virtual unknown children in one augmented-tree space."""
+    """Score leaves and virtual unknown children in one augmented-tree space.
+
+    ``excluded_children_by_parent`` is used only for leave-one-child-out
+    episodes. It removes the held-out child from the corresponding parent's
+    known-child support while the caller supplies terminal specs pruned by the
+    same hidden subtree.
+    """
     if image_features.ndim != 2:
         raise ValueError("image_features must have shape [B,D]")
     if not 0.0 <= float(terminal_weight) <= 1.0:
@@ -364,6 +371,7 @@ def tree_complement_terminal_scores(
         edge: index for index, edge in enumerate(needed_edges)
     }
 
+    excluded_children_by_parent = excluded_children_by_parent or {}
     unknown_affinities = {}
     child_supports = {}
     for spec in terminal_specs:
@@ -377,9 +385,19 @@ def tree_complement_terminal_scores(
             unknown_features_by_parent[parent],
             unknown_temperature,
         )
+        excluded = excluded_children_by_parent.get(parent, set())
+        visible_children = [
+            child
+            for child in hierarchy.parent2children[parent]
+            if child not in excluded
+        ]
+        if not visible_children:
+            raise ValueError(
+                f"Parent {parent!r} has no visible child support"
+            )
         child_columns = [
             edge_to_column[(parent, child)]
-            for child in hierarchy.parent2children[parent]
+            for child in visible_children
         ]
         child_supports[parent] = _normalized_logmeanexp(
             edge_affinities[:, child_columns],
@@ -594,6 +612,7 @@ def predict_tree_complement_terminals(
     positive_edge_features: dict[tuple[str, str], torch.Tensor],
     terminal_specs: list[MetricTerminalSpec],
     unknown_features_by_parent: dict[str, torch.Tensor],
+    unknown_threshold: float = 0.0,
     **score_kwargs,
 ) -> dict:
     scores = tree_complement_terminal_scores(
@@ -604,7 +623,42 @@ def predict_tree_complement_terminals(
         unknown_features_by_parent,
         **score_kwargs,
     )
-    winner_indices = scores["score_matrix"].argmax(dim=1).cpu().tolist()
+    leaf_indices = [
+        index
+        for index, spec in enumerate(terminal_specs)
+        if spec.unknown_parent is None
+    ]
+    unknown_indices = [
+        index
+        for index, spec in enumerate(terminal_specs)
+        if spec.unknown_parent is not None
+    ]
+    if not leaf_indices or not unknown_indices:
+        raise ValueError(
+            "Tree-complement prediction needs leaves and unknown terminals"
+        )
+    score_matrix = scores["score_matrix"]
+    leaf_scores, leaf_local = score_matrix[:, leaf_indices].max(dim=1)
+    unknown_scores, unknown_local = score_matrix[
+        :, unknown_indices
+    ].max(dim=1)
+    leaf_winners = torch.tensor(
+        leaf_indices,
+        dtype=torch.long,
+        device=score_matrix.device,
+    )[leaf_local]
+    unknown_winners = torch.tensor(
+        unknown_indices,
+        dtype=torch.long,
+        device=score_matrix.device,
+    )[unknown_local]
+    unknown_gap = unknown_scores - leaf_scores
+    choose_unknown = unknown_gap >= float(unknown_threshold)
+    winner_indices = torch.where(
+        choose_unknown,
+        unknown_winners,
+        leaf_winners,
+    ).cpu().tolist()
     nodes = [
         scores["candidate_nodes"][index] for index in winner_indices
     ]
@@ -627,6 +681,24 @@ def predict_tree_complement_terminals(
             "unknown_selection_rate": (
                 kind_counts.get("unknown", 0) / max(1, len(nodes))
             ),
+            "unknown_threshold": float(unknown_threshold),
+            "unknown_gap": unknown_gap.detach().cpu(),
             "stop_node_counts": dict(Counter(nodes).most_common()),
         },
     }
+
+
+def calibrate_unknown_gap_threshold(
+    id_unknown_gaps: torch.Tensor,
+    *,
+    id_acceptance: float = 0.95,
+) -> float:
+    """Set an unknown-gap threshold using ID validation only."""
+    if id_unknown_gaps.ndim != 1 or int(id_unknown_gaps.numel()) == 0:
+        raise ValueError("ID unknown gaps must be a non-empty vector")
+    if not 0.0 < float(id_acceptance) < 1.0:
+        raise ValueError("id_acceptance must lie strictly between 0 and 1")
+    return float(torch.quantile(
+        id_unknown_gaps.float(),
+        float(id_acceptance),
+    ))

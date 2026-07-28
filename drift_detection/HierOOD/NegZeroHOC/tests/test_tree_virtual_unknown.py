@@ -3,8 +3,14 @@ from types import SimpleNamespace
 import torch
 
 from negzerohoc.metric_terminal import build_metric_terminal_specs
+from negzerohoc.tree_loco import (
+    balanced_slot_assignment_loss,
+    loco_pseudo_unknown_loss,
+    prune_terminal_specs_for_hidden_child,
+)
 from negzerohoc.tree_virtual_unknown import (
     augmented_unknown_distance_matrix,
+    calibrate_unknown_gap_threshold,
     decoder_aligned_hierarchical_id_loss,
     leaf_unknown_distance_matrix,
     predict_tree_complement_terminals,
@@ -143,6 +149,17 @@ def test_tree_complement_decoder_can_select_leaf_and_parent_unknown():
     assert predicted[1] == "a"
 
 
+def test_id_only_unknown_gap_calibration_matches_acceptance_quantile():
+    gaps = torch.tensor([-0.3, -0.2, -0.1, 0.0, 0.1])
+    threshold = calibrate_unknown_gap_threshold(
+        gaps,
+        id_acceptance=0.8,
+    )
+    rejected = (gaps >= threshold).float().mean()
+    assert abs(threshold - 0.02) < 1e-6
+    assert rejected <= 0.2 + 1e-6
+
+
 def test_decoder_aligned_id_loss_backpropagates_to_unknown():
     hierarchy, positive, unknown, specs = decoder_fixture()
     unknown_parameter = torch.nn.Parameter(unknown["a"].clone())
@@ -174,3 +191,94 @@ def test_decoder_aligned_id_loss_backpropagates_to_unknown():
     assert unknown_parameter.grad is not None
     assert torch.isfinite(unknown_parameter.grad).all()
     assert stats["decoder_id_loss"] >= 0.0
+
+
+def test_loco_pruning_removes_hidden_subtree_but_keeps_parent_unknown():
+    hierarchy = toy_hierarchy()
+    specs = build_metric_terminal_specs(
+        hierarchy,
+        unknown_parents=["a", "b"],
+    )
+    pruned = prune_terminal_specs_for_hidden_child(
+        hierarchy,
+        specs,
+        "a",
+        "a1",
+    )
+    assert not any(
+        spec.unknown_parent is None and spec.node == "a1"
+        for spec in pruned
+    )
+    assert any(spec.unknown_parent == "a" for spec in pruned)
+    assert any(
+        spec.unknown_parent is None and spec.node == "a2"
+        for spec in pruned
+    )
+
+
+def test_loco_pseudo_loss_prefers_correct_parent_unknown_terminal():
+    hierarchy = toy_hierarchy()
+    specs = build_metric_terminal_specs(
+        hierarchy,
+        unknown_parents=["a", "b"],
+    )
+    pruned = prune_terminal_specs_for_hidden_child(
+        hierarchy,
+        specs,
+        "a",
+        "a1",
+    )
+    target_index = next(
+        index
+        for index, spec in enumerate(pruned)
+        if spec.unknown_parent == "a"
+    )
+    winning_scores = torch.zeros(2, len(pruned))
+    losing_scores = torch.zeros(2, len(pruned))
+    winning_scores[:, target_index] = 1.0
+    losing_scores[:, target_index] = -1.0
+    winning_loss, winning_stats = loco_pseudo_unknown_loss(
+        {"score_matrix": winning_scores},
+        hierarchy,
+        pruned,
+        "a",
+    )
+    losing_loss, _ = loco_pseudo_unknown_loss(
+        {"score_matrix": losing_scores},
+        hierarchy,
+        pruned,
+        "a",
+    )
+    assert winning_loss < losing_loss
+    assert winning_stats["loco_target_win_rate"] == 1.0
+
+
+def test_balanced_slot_assignment_rewards_specialized_balanced_slots():
+    images = torch.tensor([
+        [1.0, 0.0],
+        [1.0, 0.0],
+        [0.0, 1.0],
+        [0.0, 1.0],
+    ])
+    specialized = torch.tensor([
+        [1.0, 0.0],
+        [0.0, 1.0],
+    ])
+    collapsed = torch.tensor([
+        [1.0, 0.0],
+        [1.0, 0.0],
+    ])
+    specialized_loss, specialized_stats = (
+        balanced_slot_assignment_loss(
+            images,
+            specialized,
+            temperature=0.05,
+        )
+    )
+    collapsed_loss, _ = balanced_slot_assignment_loss(
+        images,
+        collapsed,
+        temperature=0.05,
+    )
+    assert specialized_loss < collapsed_loss
+    assert specialized_stats["slot_effective_count"] > 1.9

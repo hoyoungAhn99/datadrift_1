@@ -28,6 +28,7 @@ def save_idea3_checkpoint(
     metrics: dict | None = None,
     args: dict | None = None,
     training_state: dict | None = None,
+    extra_payload: dict | None = None,
 ) -> Path:
     path = Path(path)
     ensure_dir(path.parent)
@@ -50,6 +51,14 @@ def save_idea3_checkpoint(
         "args": args or {},
         "training_state": training_state,
     }
+    if extra_payload:
+        reserved_keys = sorted(set(payload) & set(extra_payload))
+        if reserved_keys:
+            raise ValueError(
+                "extra_payload cannot replace checkpoint fields: "
+                + ", ".join(reserved_keys)
+            )
+        payload.update(extra_payload)
     temporary_path = path.with_name(f".{path.name}.tmp")
     previous_path = path.with_name(f"{path.stem}-previous{path.suffix}")
     try:
