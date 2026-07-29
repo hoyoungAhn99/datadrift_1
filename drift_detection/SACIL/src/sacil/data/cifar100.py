@@ -15,11 +15,18 @@ CIFAR100_MEAN = (0.5071, 0.4867, 0.4408)
 CIFAR100_STD = (0.2675, 0.2565, 0.2761)
 
 
-def cifar100_train_transform() -> transforms.Compose:
+def cifar100_train_transform(
+    *, color_jitter: bool = False
+) -> transforms.Compose:
+    augmentations = [
+        transforms.RandomCrop(32, padding=4),
+        transforms.RandomHorizontalFlip(),
+    ]
+    if color_jitter:
+        augmentations.append(transforms.ColorJitter(brightness=63 / 255))
     return transforms.Compose(
         [
-            transforms.RandomCrop(32, padding=4),
-            transforms.RandomHorizontalFlip(),
+            *augmentations,
             transforms.ToTensor(),
             transforms.Normalize(CIFAR100_MEAN, CIFAR100_STD),
         ]
@@ -73,13 +80,14 @@ class CIFAR100DataModule:
         root: str | Path,
         protocol: ClassOrderProtocol,
         download: bool = False,
+        color_jitter: bool = False,
     ) -> None:
         self.root = Path(root).expanduser().resolve()
         self.protocol = protocol
         self.train_aug = CIFAR100(
             root=str(self.root),
             train=True,
-            transform=cifar100_train_transform(),
+            transform=cifar100_train_transform(color_jitter=color_jitter),
             download=download,
         )
         self.train_eval = CIFAR100(
@@ -188,4 +196,3 @@ class CIFAR100DataModule:
             return new_dataset
         replay_dataset = self.replay_dataset(memory_indices, augment=True)
         return ConcatDataset([new_dataset, replay_dataset])
-

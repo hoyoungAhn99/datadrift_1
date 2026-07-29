@@ -9,8 +9,8 @@ The current implementation supports the representative CIFAR-100 protocol:
 - class order: PODNet/AFC order 1
 - sessions: `B50 + 10x5`
 - memory: 20 exemplars per class, herding
-- backbone: CIFAR ResNet-32
-- classifier: expandable cosine classifier
+- backbones: standard CIFAR ResNet-32 and AFC Rebuffi-style ResNet-32
+- classifiers: single-proxy cosine and AFC 10-proxy cosine
 
 ## Implemented methods
 
@@ -23,6 +23,19 @@ The current implementation supports the representative CIFAR-100 protocol:
 
 All four methods share the same dataset pipeline, class order, memory,
 backbone, classifier, and evaluator.
+
+The primary strong-substrate comparison is:
+
+| Method | Configuration |
+|---|---|
+| AFC | `configs/cifar100/afc_b50_inc5.yaml` |
+| AFC + Global-HAP | `configs/cifar100/afc_global_hap_b50_inc5.yaml` |
+| AFC + Flat-LRHAP | `configs/cifar100/afc_flat_lrhap_b50_inc5.yaml` |
+| AFC + SACIL | `configs/cifar100/afc_sacil_v0_b50_inc5.yaml` |
+
+These configurations reproduce the main AFC training ingredients: multi-proxy
+NCA, adaptive feature-map distillation, KMeans proxy imprinting, iCaRL
+herding, and balanced classifier fine-tuning.
 
 ## Validation
 
@@ -49,6 +62,16 @@ Run the two-session end-to-end smoke experiment:
 ```
 
 ## Full CIFAR-100 run
+
+Run the strong AFC-substrate SACIL experiment:
+
+```powershell
+& 'C:\Users\user\anaconda3\envs\hoyoung\python.exe' `
+  scripts\train_cifar100.py `
+  configs\cifar100\afc_sacil_v0_b50_inc5.yaml
+```
+
+The earlier Replay-CE substrate can still be run with:
 
 ```powershell
 & 'C:\Users\user\anaconda3\envs\hoyoung\python.exe' `
@@ -80,4 +103,3 @@ Each run records:
 
 The implementation plan and mathematical contract are in
 `mds/imp_plan/sacil_v0_core_hypothesis_implementation_plan.md`.
-
