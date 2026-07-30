@@ -28,14 +28,14 @@ training:
   persistent_workers: true
   base:
     epochs: 80
-    lr: 0.001
+    lr: 0.1
     momentum: 0.9
     weight_decay: 0.0002
     nesterov: false
     scheduler: cosine
   incremental:
     epochs: 80
-    lr: 0.001
+    lr: 0.1
     momentum: 0.9
     weight_decay: 0.0002
     nesterov: false
@@ -43,4 +43,4 @@ training:
 
 output:
   directory: outputs
-  run_name: takp_base_cifar100_b0_inc10_cifarstem
+  run_name: takp_base_cifar100_b0_inc10_cifarstem_public_lr

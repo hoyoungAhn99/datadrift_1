@@ -274,6 +274,7 @@ class SACILTrainer:
             return TaKPIncrementalNet(
                 num_classes=num_classes,
                 mix_scale=float(model_config.get("mix_scale", 2.0)),
+                stem=str(model_config.get("stem", "imagenet")),
             )
         if self.is_afc:
             if str(model_config.get("backbone")) != "afc_resnet32":
@@ -835,6 +836,10 @@ class SACILTrainer:
         if not isinstance(self.model, TaKPIncrementalNet):
             raise TypeError("TaKP training requires TaKPIncrementalNet")
         phase = self._phase_training_config(session_id)
+        if session_id == 0 and bool(phase.get("plain_ce", False)):
+            if teacher is not None:
+                raise ValueError("initial plain-CE training cannot use a teacher")
+            return self._train_takp_initial_ce(loader, phase)
         optimizer = SGD(
             self.model.parameters(),
             lr=float(phase["lr"]),
@@ -1003,6 +1008,85 @@ class SACILTrainer:
                 "uniform sample within class"
             ),
             "rebalancing_schedule": "1-(epoch/epochs)^2",
+            "evaluation_alpha": 0.5,
+            "mix_scale": self.model.mix_scale,
+            "epoch_logs": epoch_logs,
+        }
+
+    def _train_takp_initial_ce(
+        self,
+        loader: DataLoader,
+        phase: dict[str, Any],
+    ) -> dict:
+        """Train the balanced initial task without incremental rebalancing."""
+        if not isinstance(self.model, TaKPIncrementalNet):
+            raise TypeError("TaKP initial training requires TaKPIncrementalNet")
+        optimizer = SGD(
+            self.model.parameters(),
+            lr=float(phase["lr"]),
+            momentum=float(phase.get("momentum", 0.9)),
+            weight_decay=float(phase.get("weight_decay", 2e-4)),
+            nesterov=bool(phase.get("nesterov", False)),
+        )
+        epochs = int(phase["epochs"])
+        scheduler = self._scheduler(optimizer, phase, epochs)
+        max_batches = self.config.get("debug", {}).get(
+            "max_batches_per_epoch"
+        )
+        max_batches = None if max_batches is None else int(max_batches)
+        epoch_logs: list[dict[str, Any]] = []
+        self.model.train()
+        for epoch in range(epochs):
+            total_loss = 0.0
+            sample_count = 0
+            batch_count = 0
+            for batch_index, batch in enumerate(loader):
+                if max_batches is not None and batch_index >= max_batches:
+                    break
+                images = batch["image"].to(
+                    self.device, non_blocking=True
+                )
+                targets = batch["target"].to(
+                    self.device, non_blocking=True
+                ).long()
+                logits = self.model(images, alpha=0.5)
+                classification = F.cross_entropy(logits, targets)
+                optimizer.zero_grad(set_to_none=True)
+                classification.backward()
+                optimizer.step()
+                batch_size = targets.numel()
+                total_loss += (
+                    float(classification.detach().item()) * batch_size
+                )
+                sample_count += batch_size
+                batch_count += 1
+            scheduler.step()
+            if sample_count == 0:
+                raise RuntimeError(
+                    "TaKP initial training loop processed no samples"
+                )
+            epoch_logs.append(
+                {
+                    "epoch": epoch,
+                    "lr": float(optimizer.param_groups[0]["lr"]),
+                    "batches": batch_count,
+                    "loss": total_loss / sample_count,
+                    "classification": total_loss / sample_count,
+                    "distillation": 0.0,
+                    "topology": 0.0,
+                }
+            )
+        return {
+            "epochs": epochs,
+            "samples_in_dataset": len(loader.dataset),
+            "initial_objective": "cross_entropy",
+            "kd_temperature": None,
+            "lambda_kd": 0.0,
+            "lambda_topology": 0.0,
+            "topology_cloud_size": None,
+            "dual_rebalancing": False,
+            "rebalancing_sampler": None,
+            "rebalancing_schedule": None,
             "evaluation_alpha": 0.5,
             "mix_scale": self.model.mix_scale,
             "epoch_logs": epoch_logs,

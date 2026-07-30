@@ -11,6 +11,7 @@ data:
 
 model:
   backbone: takp_resnet18
+  stem: cifar
   mix_scale: 2.0
 
 memory:
@@ -23,7 +24,7 @@ method:
     temperature: 4.0
     weight: 1.0
   topology:
-    ripsnet_checkpoint: outputs/ripsnet_takp_cifar100_b0_inc10/seed_1/best.pt
+    ripsnet_checkpoint: outputs/ripsnet_takp_cifar100_b0_inc10_cifarstem/seed_1/best.pt
     cloud_size: 64
     weight: 1.0
 
@@ -49,4 +50,4 @@ training:
 
 output:
   directory: outputs
-  run_name: takp_cifar100_b0_inc10
+  run_name: takp_cifar100_b0_inc10_cifarstem

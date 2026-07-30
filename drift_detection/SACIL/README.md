@@ -103,3 +103,22 @@ Each run records:
 
 The implementation plan and mathematical contract are in
 `mds/imp_plan/sacil_v0_core_hypothesis_implementation_plan.md`.
+
+## Official PyCIL integration
+
+The original `SACILTrainer` is retained for reproducing the early prototype
+experiments. New controlled CIL experiments can run SACIL as a plug-in on the
+official PyCIL toolbox:
+
+```powershell
+.\scripts\setup_pycil.ps1
+
+& 'C:\Users\user\anaconda3\envs\hoyoung\python.exe' `
+  scripts\train_pycil.py `
+  --config configs\pycil\cifar100\sacil_b50_inc5.json
+```
+
+The adapter uses PyCIL's `DataManager`, `BaseLearner`, `IncrementalNet`,
+classifier expansion, iCaRL herding, and evaluator. See
+`mds/experiments/pycil_integration.md` for the pinned framework revision,
+matched baselines, and protocol details.

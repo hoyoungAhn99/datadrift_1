@@ -11,6 +11,7 @@ data:
 
 model:
   backbone: takp_resnet18
+  stem: cifar
   mix_scale: 2.0
 
 memory:

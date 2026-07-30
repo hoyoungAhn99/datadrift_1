@@ -19,20 +19,25 @@ memory:
   selection: icarl_herding
 
 method:
+  # Session 0 has no teacher, so the TaKP/TopKD terms are inactive.  This
+  # checkpoint is shared by every experiment in the TaKP model family.
   name: takp_base
 
 training:
-  batch_size: 64
+  batch_size: 128
   num_workers: 4
   pin_memory: true
   persistent_workers: true
   base:
-    epochs: 80
-    lr: 0.001
+    epochs: 200
+    lr: 0.1
     momentum: 0.9
     weight_decay: 0.0002
     nesterov: false
     scheduler: cosine
+    plain_ce: true
+  # Unused by the --max-sessions 1 initial-task run.  Incremental experiments
+  # provide their own paper-faithful schedule when resuming this checkpoint.
   incremental:
     epochs: 80
     lr: 0.001
@@ -43,4 +48,4 @@ training:
 
 output:
   directory: outputs
-  run_name: takp_base_cifar100_b0_inc10_cifarstem
+  run_name: takp_shared_initial_ce_cifar100_b0_inc10_20260730

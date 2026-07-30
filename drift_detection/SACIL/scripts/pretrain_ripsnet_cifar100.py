@@ -332,6 +332,7 @@ def main() -> int:
         model = TaKPIncrementalNet(
             num_classes=int(checkpoint["num_classes"]),
             mix_scale=float(model_config.get("mix_scale", 2.0)),
+            stem=str(model_config.get("stem", "imagenet")),
         )
     else:
         model_config = (

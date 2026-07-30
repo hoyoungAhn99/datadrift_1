@@ -59,22 +59,35 @@ class BasicBlock(nn.Module):
 class TaKPResNet18Backbone(nn.Module):
     """The released TaKP/BBN dual-branch layout adapted to ResNet-18.
 
-    The ImageNet stem and the first seven residual blocks are shared.  The
-    conventional and rebalancing branches each own the final 512-channel
-    residual block, exactly as in the public ``BBN_ResNet`` implementation.
+    TaKP publishes both an ImageNet-stem ResNet-18 and a CIFAR-stem
+    ResNet-18, but no ResNet-18 dual-branch class.  ``stem`` makes that
+    otherwise undocumented choice explicit while keeping the public BBN
+    split: the first seven residual blocks are shared and each branch owns
+    the final 512-channel residual block.
     """
 
     branch_feature_dim = 512
     output_dim = 1024
 
-    def __init__(self) -> None:
+    def __init__(self, *, stem: str = "imagenet") -> None:
         super().__init__()
-        self.conv1 = nn.Conv2d(
-            3, 64, kernel_size=7, stride=2, padding=3, bias=False
-        )
+        if stem not in {"cifar", "imagenet"}:
+            raise ValueError(f"unknown TaKP ResNet-18 stem: {stem}")
+        self.stem = stem
+        if stem == "cifar":
+            self.conv1 = nn.Conv2d(
+                3, 64, kernel_size=3, stride=1, padding=1, bias=False
+            )
+            self.pool: nn.Module = nn.Identity()
+        else:
+            self.conv1 = nn.Conv2d(
+                3, 64, kernel_size=7, stride=2, padding=3, bias=False
+            )
+            self.pool = nn.MaxPool2d(
+                kernel_size=3, stride=2, padding=1
+            )
         self.bn1 = nn.BatchNorm2d(64)
         self.relu = nn.ReLU(inplace=True)
-        self.pool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
         self.layer1 = self._make_stage(64, 64, blocks=2, stride=1)
         self.layer2 = self._make_stage(64, 128, blocks=2, stride=2)
         self.layer3 = self._make_stage(128, 256, blocks=2, stride=2)
@@ -151,10 +164,17 @@ class TaKPForwardOutput:
 class TaKPIncrementalNet(nn.Module):
     """Paper-faithful TaKP classifier with the released BBN mixing rule."""
 
-    def __init__(self, num_classes: int, mix_scale: float = 2.0) -> None:
+    def __init__(
+        self,
+        num_classes: int,
+        mix_scale: float = 2.0,
+        *,
+        stem: str = "imagenet",
+    ) -> None:
         super().__init__()
         self.backbone_name = "takp_resnet18"
-        self.backbone = TaKPResNet18Backbone()
+        self.backbone = TaKPResNet18Backbone(stem=stem)
+        self.stem = stem
         self.feature_dim = self.backbone.output_dim
         self.mix_scale = float(mix_scale)
         self.classifier = nn.Linear(
@@ -260,4 +280,3 @@ class TaKPIncrementalNet(nn.Module):
                     old_classifier.bias
                 )
         self.classifier = expanded
-
