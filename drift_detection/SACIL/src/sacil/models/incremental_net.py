@@ -3,6 +3,7 @@ from __future__ import annotations
 from torch import Tensor, nn
 
 from .cosine_classifier import CosineClassifier
+from .resnet18 import resnet18
 from .resnet32 import resnet32
 
 
@@ -15,10 +16,12 @@ class IncrementalNet(nn.Module):
         learnable_scale: bool = True,
     ) -> None:
         super().__init__()
-        if backbone != "resnet32":
+        if backbone not in {"resnet18", "resnet32"}:
             raise ValueError(f"unsupported backbone: {backbone}")
         self.backbone_name = backbone
-        self.backbone = resnet32()
+        self.backbone = (
+            resnet18() if backbone == "resnet18" else resnet32()
+        )
         self.feature_dim = self.backbone.output_dim
         self.classifier = CosineClassifier(
             self.feature_dim,
@@ -45,4 +48,3 @@ class IncrementalNet(nn.Module):
 
     def expand_classes(self, num_classes: int) -> None:
         self.classifier = self.classifier.expanded(num_classes)
-

@@ -13,7 +13,7 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 from torch.optim import SGD
 from torch.optim.lr_scheduler import CosineAnnealingLR, MultiStepLR
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from sacil.anchors import (
     HierarchicalAnchorBank,
@@ -43,14 +43,23 @@ from sacil.methods import (
     afc_pod_loss,
     compute_conflict_weights,
     global_preservation_weights,
+    load_frozen_ripsnet,
     method_uses_afc,
+    method_uses_dual_rebalancing,
     method_uses_geometry,
+    method_uses_logit_kd,
+    method_uses_takp,
+    method_uses_topkd,
+    old_logit_kl_loss,
     scheduled_afc_factor,
+    takp_mixed_classification_loss,
+    TopologyDistillationLoss,
 )
 from sacil.metrics import CILMetricsTracker, summarize_geometry_drift
 from sacil.models import (
     AFCIncrementalNet,
     IncrementalNet,
+    TaKPIncrementalNet,
     kmeans_imprinted_weights,
 )
 from sacil.utils import (
@@ -69,6 +78,31 @@ class SessionArtifacts:
     tree: HierarchyTree
     prototypes: PrototypeBank
     anchors: HierarchicalAnchorBank
+
+
+def inverse_class_sample_weights(targets: list[int]) -> Tensor:
+    """Per-sample weights implementing TaKP's inverse-class sampler.
+
+    TaKP first samples class ``i`` with probability proportional to
+    ``N_max / N_i`` and then samples uniformly inside that class.  A
+    ``WeightedRandomSampler`` therefore needs sample weight
+    ``N_max / N_i**2`` rather than the usual class-balanced ``1 / N_i``.
+    """
+    if not targets:
+        raise ValueError("cannot sample an empty target list")
+    class_counts: dict[int, int] = {}
+    for target in targets:
+        class_counts[int(target)] = (
+            class_counts.get(int(target), 0) + 1
+        )
+    max_count = max(class_counts.values())
+    return torch.tensor(
+        [
+            max_count / (class_counts[int(target)] ** 2)
+            for target in targets
+        ],
+        dtype=torch.double,
+    )
 
 
 class SACILTrainer:
@@ -94,6 +128,12 @@ class SACILTrainer:
         self.method_name = str(get_required(self.config, "method.name"))
         method_uses_geometry(self.method_name)
         self.is_afc = method_uses_afc(self.method_name)
+        self.is_takp = method_uses_takp(self.method_name)
+        self.uses_logit_kd = method_uses_logit_kd(self.method_name)
+        self.uses_topkd = method_uses_topkd(self.method_name)
+        self.uses_dual_rebalancing = method_uses_dual_rebalancing(
+            self.method_name
+        )
         self.data = build_data_module(
             str(self.config["data"].get("name", "cifar100")),
             self._project_path(get_required(self.config, "data.root")),
@@ -109,7 +149,13 @@ class SACILTrainer:
         self.memory = ExemplarMemory(self.exemplars_per_class)
         self.metrics = CILMetricsTracker()
         self.artifacts: SessionArtifacts | None = None
-        self.model: IncrementalNet | AFCIncrementalNet | None = None
+        self.model: (
+            IncrementalNet
+            | AFCIncrementalNet
+            | TaKPIncrementalNet
+            | None
+        ) = None
+        self.topology_loss: TopologyDistillationLoss | None = None
         self.start_session = 0
         self.max_sessions = (
             self.protocol.num_sessions
@@ -123,6 +169,36 @@ class SACILTrainer:
         )
         self.checkpoint_dir = ensure_dir(self.run_dir / "checkpoints")
         self._write_run_metadata()
+        if self.uses_topkd:
+            topology_config = get_required(
+                self.config, "method.topology"
+            )
+            checkpoint_path = self._project_path(
+                get_required(topology_config, "ripsnet_checkpoint")
+            )
+            feature_dimensions = {
+                "afc_resnet32": 64,
+                "resnet32": 64,
+                "resnet18": 512,
+                "takp_resnet18": 1024,
+            }
+            backbone_name = str(
+                self.config.get("model", {}).get("backbone", "resnet32")
+            )
+            if backbone_name not in feature_dimensions:
+                raise ValueError(
+                    f"unknown topology feature dimension: {backbone_name}"
+                )
+            ripsnet, metadata = load_frozen_ripsnet(
+                checkpoint_path,
+                expected_feature_dim=feature_dimensions[backbone_name],
+            )
+            self.topology_loss = TopologyDistillationLoss(
+                ripsnet.to(self.device)
+            ).to(self.device)
+            self.topology_metadata = metadata
+        else:
+            self.topology_metadata = None
         if resume is not None:
             self._resume(resume)
 
@@ -153,8 +229,20 @@ class SACILTrainer:
         )
         if method_uses_afc(checkpoint_method) != self.is_afc:
             raise ValueError("checkpoint model family does not match configuration")
+        if method_uses_takp(checkpoint_method) != self.is_takp:
+            raise ValueError(
+                "checkpoint TaKP model family does not match configuration"
+            )
         num_classes = int(checkpoint["num_classes"])
         self.model = self._new_model(num_classes)
+        if (
+            isinstance(self.model, AFCIncrementalNet)
+            and any(
+                key.startswith("backbone.rebalancing_stage4.")
+                for key in checkpoint["model"]
+            )
+        ):
+            self.model.enable_rebalancing_branch()
         self.model.load_state_dict(checkpoint["model"])
         self.model.to(self.device)
         self.memory = ExemplarMemory.from_state_dict(checkpoint["memory"])
@@ -176,8 +264,17 @@ class SACILTrainer:
 
     def _new_model(
         self, num_classes: int
-    ) -> IncrementalNet | AFCIncrementalNet:
+    ) -> IncrementalNet | AFCIncrementalNet | TaKPIncrementalNet:
         model_config = self.config["model"]
+        if self.is_takp:
+            if str(model_config.get("backbone")) != "takp_resnet18":
+                raise ValueError(
+                    "TaKP methods require backbone=takp_resnet18"
+                )
+            return TaKPIncrementalNet(
+                num_classes=num_classes,
+                mix_scale=float(model_config.get("mix_scale", 2.0)),
+            )
         if self.is_afc:
             if str(model_config.get("backbone")) != "afc_resnet32":
                 raise ValueError("AFC methods require backbone=afc_resnet32")
@@ -208,12 +305,15 @@ class SACILTrainer:
         shuffle: bool,
         session_id: int,
         batch_size: int | None = None,
+        drop_last: bool = False,
+        sampler=None,
     ) -> DataLoader:
         training = self.config["training"]
         return DataLoader(
             dataset,
             batch_size=int(batch_size or training["batch_size"]),
-            shuffle=shuffle,
+            shuffle=shuffle if sampler is None else False,
+            sampler=sampler,
             num_workers=int(training.get("num_workers", 0)),
             pin_memory=bool(training.get("pin_memory", True)),
             persistent_workers=(
@@ -222,7 +322,92 @@ class SACILTrainer:
             ),
             worker_init_fn=seed_worker,
             generator=make_generator(self.seed * 1000 + session_id),
-            drop_last=False,
+            drop_last=bool(drop_last),
+        )
+
+    def _topology_memory_loader(self, session_id: int) -> DataLoader:
+        topology_config = self.config["method"].get("topology", {})
+        cloud_size = int(topology_config.get("cloud_size", 64))
+        memory_indices = self.memory.all_indices(self.protocol.class_order)
+        if len(memory_indices) < cloud_size:
+            raise ValueError(
+                "topology memory contains fewer samples than cloud_size"
+            )
+        dataset = self.data.replay_dataset(memory_indices, augment=True)
+        return self._loader(
+            dataset,
+            shuffle=True,
+            session_id=session_id + 20_000,
+            batch_size=cloud_size,
+            drop_last=True,
+        )
+
+    @staticmethod
+    def _dataset_incremental_targets(dataset) -> list[int]:
+        if hasattr(dataset, "datasets"):
+            targets: list[int] = []
+            for child in dataset.datasets:
+                targets.extend(
+                    SACILTrainer._dataset_incremental_targets(child)
+                )
+            return targets
+        if all(
+            hasattr(dataset, name)
+            for name in ("indices", "dataset", "protocol")
+        ) and hasattr(dataset.dataset, "targets"):
+            original = dataset.dataset.targets
+            return [
+                dataset.protocol.incremental_label(original[int(index)])
+                for index in dataset.indices
+            ]
+        raise TypeError(
+            "reverse sampling requires an indexed CIL dataset"
+        )
+
+    def _reverse_frequency_loader(
+        self, dataset, session_id: int
+    ) -> DataLoader:
+        targets = self._dataset_incremental_targets(dataset)
+        class_counts: dict[int, int] = {}
+        for target in targets:
+            class_counts[target] = class_counts.get(target, 0) + 1
+        max_count = max(class_counts.values())
+        weights = torch.tensor(
+            [max_count / class_counts[target] for target in targets],
+            dtype=torch.double,
+        )
+        sampler = WeightedRandomSampler(
+            weights,
+            num_samples=len(targets),
+            replacement=True,
+            generator=make_generator(
+                self.seed * 1000 + session_id + 30_000
+            ),
+        )
+        return self._loader(
+            dataset,
+            shuffle=False,
+            session_id=session_id + 30_000,
+            sampler=sampler,
+        )
+
+    def _inverse_class_frequency_loader(
+        self, dataset, session_id: int
+    ) -> DataLoader:
+        targets = self._dataset_incremental_targets(dataset)
+        sampler = WeightedRandomSampler(
+            inverse_class_sample_weights(targets),
+            num_samples=len(targets),
+            replacement=True,
+            generator=make_generator(
+                self.seed * 1000 + session_id + 40_000
+            ),
+        )
+        return self._loader(
+            dataset,
+            shuffle=False,
+            session_id=session_id + 40_000,
+            sampler=sampler,
         )
 
     @property
@@ -260,7 +445,12 @@ class SACILTrainer:
         old_memory_indices = self.memory.all_indices(
             self.protocol.class_order
         )
-        teacher: IncrementalNet | AFCIncrementalNet | None = None
+        teacher: (
+            IncrementalNet
+            | AFCIncrementalNet
+            | TaKPIncrementalNet
+            | None
+        ) = None
         geometry_loss: AnchorGeometryLoss | None = None
         conflict_weights: ConflictWeights | None = None
         incoming_prototypes: Tensor | None = None
@@ -270,6 +460,12 @@ class SACILTrainer:
         else:
             if self.model is None or self.artifacts is None:
                 raise RuntimeError("incremental session requires previous state")
+            if (
+                self.uses_dual_rebalancing
+                and isinstance(self.model, AFCIncrementalNet)
+                and not self.model.has_rebalancing_branch
+            ):
+                self.model.enable_rebalancing_branch()
             teacher = copy.deepcopy(self.model).to(self.device).eval()
             for parameter in teacher.parameters():
                 parameter.requires_grad_(False)
@@ -281,7 +477,13 @@ class SACILTrainer:
                 incoming_collection.original_targets,
                 self.protocol.classes_for_session(session_id),
             )
-            if self.is_afc:
+            if self.is_takp:
+                if not isinstance(self.model, TaKPIncrementalNet):
+                    raise TypeError(
+                        "TaKP method requires TaKPIncrementalNet"
+                    )
+                self.model.expand_classes(seen_class_count)
+            elif self.is_afc:
                 if not isinstance(self.model, AFCIncrementalNet):
                     raise TypeError("AFC method requires AFCIncrementalNet")
                 class_features = [
@@ -310,7 +512,11 @@ class SACILTrainer:
                 )
             self.model.to(self.device)
             if method_uses_geometry(self.method_name):
-                if self.method_name in {"global_hap", "afc_global_hap"}:
+                if self.method_name in {
+                    "global_hap",
+                    "logit_kd_global_hap",
+                    "afc_global_hap",
+                }:
                     conflict_weights = global_preservation_weights(
                         self.artifacts.anchors
                     )
@@ -397,11 +603,26 @@ class SACILTrainer:
         self,
         session_id: int,
         loader: DataLoader,
-        teacher: IncrementalNet | AFCIncrementalNet | None,
+        teacher: (
+            IncrementalNet
+            | AFCIncrementalNet
+            | TaKPIncrementalNet
+            | None
+        ),
         geometry_loss: AnchorGeometryLoss | None,
     ) -> dict:
         if self.model is None:
             raise RuntimeError("model has not been initialized")
+        if self.is_takp:
+            if not isinstance(self.model, TaKPIncrementalNet):
+                raise TypeError("TaKP method requires TaKPIncrementalNet")
+            if teacher is not None and not isinstance(
+                teacher, TaKPIncrementalNet
+            ):
+                raise TypeError("TaKP teacher has the wrong model type")
+            return self._train_takp_session(
+                session_id, loader, teacher
+            )
         if self.is_afc:
             if not isinstance(self.model, AFCIncrementalNet):
                 raise TypeError("AFC method requires AFCIncrementalNet")
@@ -431,12 +652,31 @@ class SACILTrainer:
         )
         max_batches = None if max_batches is None else int(max_batches)
         lambda_geo = float(self.config["method"].get("lambda_geo", 1.0))
+        kd_config = self.config["method"].get("logit_kd", {})
+        kd_temperature = float(kd_config.get("temperature", 4.0))
+        lambda_kd = float(kd_config.get("weight", 1.0))
+        topology_config = self.config["method"].get("topology", {})
+        lambda_topology = float(topology_config.get("weight", 1.0))
+        topology_loader = (
+            self._topology_memory_loader(session_id)
+            if teacher is not None and self.uses_topkd
+            else None
+        )
         epoch_logs = []
         self.model.train()
         for epoch in range(epochs):
-            totals = {"loss": 0.0, "classification": 0.0, "geometry": 0.0}
+            totals = {
+                "loss": 0.0,
+                "classification": 0.0,
+                "distillation": 0.0,
+                "topology": 0.0,
+                "geometry": 0.0,
+            }
             sample_count = 0
             batch_count = 0
+            topology_iterator = (
+                None if topology_loader is None else iter(topology_loader)
+            )
             for batch_index, batch in enumerate(loader):
                 if max_batches is not None and batch_index >= max_batches:
                     break
@@ -453,20 +693,79 @@ class SACILTrainer:
                     images, return_features=True
                 )
                 classification = F.cross_entropy(logits, targets)
+                distillation = features.sum() * 0.0
+                topology = features.sum() * 0.0
                 geometry = features.sum() * 0.0
-                if (
-                    teacher is not None
-                    and geometry_loss is not None
-                    and bool(replay_mask.any())
+                reference_logits = None
+                reference_features = None
+                if teacher is not None and (
+                    self.uses_logit_kd
+                    or geometry_loss is not None
                 ):
                     with torch.no_grad():
-                        reference_features = teacher.extract_features(
-                            images[replay_mask]
+                        reference_logits, reference_features = teacher(
+                            images, return_features=True
                         )
-                    geometry = geometry_loss(
-                        features[replay_mask], reference_features
+                if (
+                    self.uses_logit_kd
+                    and reference_logits is not None
+                    and bool(replay_mask.any())
+                ):
+                    distillation = old_logit_kl_loss(
+                        logits[replay_mask],
+                        reference_logits[replay_mask],
+                        temperature=kd_temperature,
                     )
-                loss = classification + lambda_geo * geometry
+                if topology_iterator is not None:
+                    try:
+                        topology_batch = next(topology_iterator)
+                    except StopIteration:
+                        topology_iterator = iter(topology_loader)
+                        topology_batch = next(topology_iterator)
+                    topology_images = topology_batch["image"].to(
+                        self.device, non_blocking=True
+                    )
+                    # The topology cloud is an additional old-memory batch,
+                    # not a second classification batch.  Letting it update
+                    # BatchNorm running statistics would overweight old data
+                    # once per optimization step and confound TopKD with a
+                    # hidden BN-rebalancing method.  Evaluation mode freezes
+                    # those statistics while preserving autograd through the
+                    # current model and the topology loss.
+                    self.model.eval()
+                    try:
+                        _, topology_current_features = self.model(
+                            topology_images, return_features=True
+                        )
+                    finally:
+                        self.model.train()
+                    with torch.no_grad():
+                        _, topology_reference_features = teacher(
+                            topology_images, return_features=True
+                        )
+                    if self.topology_loss is None:
+                        raise RuntimeError(
+                            "TopKD method has no topology loss"
+                        )
+                    topology = self.topology_loss(
+                        topology_current_features,
+                        topology_reference_features,
+                    )
+                if (
+                    geometry_loss is not None
+                    and reference_features is not None
+                    and bool(replay_mask.any())
+                ):
+                    geometry = geometry_loss(
+                        features[replay_mask],
+                        reference_features[replay_mask],
+                    )
+                loss = (
+                    classification
+                    + lambda_kd * distillation
+                    + lambda_topology * topology
+                    + lambda_geo * geometry
+                )
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 optimizer.step()
@@ -476,6 +775,12 @@ class SACILTrainer:
                 totals["loss"] += float(loss.detach().item()) * batch_size
                 totals["classification"] += (
                     float(classification.detach().item()) * batch_size
+                )
+                totals["distillation"] += (
+                    float(distillation.detach().item()) * batch_size
+                )
+                totals["topology"] += (
+                    float(topology.detach().item()) * batch_size
                 )
                 totals["geometry"] += (
                     float(geometry.detach().item()) * batch_size
@@ -497,6 +802,12 @@ class SACILTrainer:
         return {
             "epochs": epochs,
             "samples_in_dataset": len(loader.dataset),
+            "kd_temperature": kd_temperature,
+            "lambda_kd": lambda_kd,
+            "lambda_topology": lambda_topology,
+            "topology_cloud_size": (
+                None if topology_loader is None else topology_loader.batch_size
+            ),
             "epoch_logs": epoch_logs,
         }
 
@@ -514,6 +825,188 @@ class SACILTrainer:
                 gamma=float(phase.get("gamma", 0.1)),
             )
         raise ValueError(f"unknown scheduler: {scheduler_name}")
+
+    def _train_takp_session(
+        self,
+        session_id: int,
+        loader: DataLoader,
+        teacher: TaKPIncrementalNet | None,
+    ) -> dict:
+        if not isinstance(self.model, TaKPIncrementalNet):
+            raise TypeError("TaKP training requires TaKPIncrementalNet")
+        phase = self._phase_training_config(session_id)
+        optimizer = SGD(
+            self.model.parameters(),
+            lr=float(phase["lr"]),
+            momentum=float(phase.get("momentum", 0.9)),
+            weight_decay=float(phase.get("weight_decay", 2e-4)),
+            nesterov=bool(phase.get("nesterov", False)),
+        )
+        epochs = int(phase["epochs"])
+        scheduler = self._scheduler(optimizer, phase, epochs)
+        max_batches = self.config.get("debug", {}).get(
+            "max_batches_per_epoch"
+        )
+        max_batches = None if max_batches is None else int(max_batches)
+        method_config = self.config["method"]
+        kd_config = method_config.get("logit_kd", {})
+        kd_temperature = float(kd_config.get("temperature", 4.0))
+        lambda_kd = float(kd_config.get("weight", 1.0))
+        topology_config = method_config.get("topology", {})
+        lambda_topology = float(topology_config.get("weight", 1.0))
+        rebalancing_loader = self._inverse_class_frequency_loader(
+            loader.dataset, session_id
+        )
+        memory_loader = (
+            self._topology_memory_loader(session_id)
+            if teacher is not None
+            and (self.uses_logit_kd or self.uses_topkd)
+            else None
+        )
+        epoch_logs: list[dict[str, Any]] = []
+        self.model.train()
+        for epoch in range(epochs):
+            totals = {
+                "loss": 0.0,
+                "classification": 0.0,
+                "distillation": 0.0,
+                "topology": 0.0,
+            }
+            sample_count = 0
+            batch_count = 0
+            rebalancing_iterator = iter(rebalancing_loader)
+            memory_iterator = (
+                None if memory_loader is None else iter(memory_loader)
+            )
+            mixing_alpha = 1.0 - (epoch / max(epochs, 1)) ** 2
+            for batch_index, batch in enumerate(loader):
+                if max_batches is not None and batch_index >= max_batches:
+                    break
+                try:
+                    rebalancing_batch = next(rebalancing_iterator)
+                except StopIteration:
+                    rebalancing_iterator = iter(rebalancing_loader)
+                    rebalancing_batch = next(rebalancing_iterator)
+                conventional_images = batch["image"].to(
+                    self.device, non_blocking=True
+                )
+                conventional_targets = batch["target"].to(
+                    self.device, non_blocking=True
+                ).long()
+                rebalancing_images = rebalancing_batch["image"].to(
+                    self.device, non_blocking=True
+                )
+                rebalancing_targets = rebalancing_batch["target"].to(
+                    self.device, non_blocking=True
+                ).long()
+                output = self.model.forward_mixed(
+                    conventional_images,
+                    rebalancing_images,
+                    alpha=mixing_alpha,
+                )
+                classification = takp_mixed_classification_loss(
+                    output.logits,
+                    conventional_targets,
+                    rebalancing_targets,
+                    alpha=mixing_alpha,
+                )
+                distillation = output.features.sum() * 0.0
+                topology = output.features.sum() * 0.0
+                if memory_iterator is not None:
+                    try:
+                        memory_batch = next(memory_iterator)
+                    except StopIteration:
+                        memory_iterator = iter(memory_loader)
+                        memory_batch = next(memory_iterator)
+                    memory_images = memory_batch["image"].to(
+                        self.device, non_blocking=True
+                    )
+                    # Stored exemplars are an auxiliary KD/TopKD cloud.  BN
+                    # statistics must only follow the two classification
+                    # streams, while gradients still flow through the current
+                    # feature extractor.
+                    self.model.eval()
+                    try:
+                        current_logits, current_features = self.model(
+                            memory_images, return_features=True, alpha=0.5
+                        )
+                    finally:
+                        self.model.train()
+                    with torch.no_grad():
+                        reference_logits, reference_features = teacher(
+                            memory_images,
+                            return_features=True,
+                            alpha=0.5,
+                        )
+                    if self.uses_logit_kd:
+                        distillation = old_logit_kl_loss(
+                            current_logits,
+                            reference_logits,
+                            temperature=kd_temperature,
+                        )
+                    if self.uses_topkd:
+                        if self.topology_loss is None:
+                            raise RuntimeError(
+                                "TaKP has no loaded RipsNet"
+                            )
+                        topology = self.topology_loss(
+                            current_features,
+                            reference_features,
+                        )
+                loss = (
+                    classification
+                    + lambda_kd * distillation
+                    + lambda_topology * topology
+                )
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                optimizer.step()
+                batch_size = conventional_targets.numel()
+                sample_count += batch_size
+                batch_count += 1
+                for key, value in (
+                    ("loss", loss),
+                    ("classification", classification),
+                    ("distillation", distillation),
+                    ("topology", topology),
+                ):
+                    totals[key] += (
+                        float(value.detach().item()) * batch_size
+                    )
+            scheduler.step()
+            if sample_count == 0:
+                raise RuntimeError("TaKP training loop processed no samples")
+            epoch_logs.append(
+                {
+                    "epoch": epoch,
+                    "lr": float(optimizer.param_groups[0]["lr"]),
+                    "batches": batch_count,
+                    "rebalancing_alpha": mixing_alpha,
+                    **{
+                        key: value / sample_count
+                        for key, value in totals.items()
+                    },
+                }
+            )
+        return {
+            "epochs": epochs,
+            "samples_in_dataset": len(loader.dataset),
+            "kd_temperature": kd_temperature,
+            "lambda_kd": lambda_kd,
+            "lambda_topology": lambda_topology,
+            "topology_cloud_size": (
+                None if memory_loader is None else memory_loader.batch_size
+            ),
+            "dual_rebalancing": True,
+            "rebalancing_sampler": (
+                "class p_i proportional to N_max/N_i; "
+                "uniform sample within class"
+            ),
+            "rebalancing_schedule": "1-(epoch/epochs)^2",
+            "evaluation_alpha": 0.5,
+            "mix_scale": self.model.mix_scale,
+            "epoch_logs": epoch_logs,
+        }
 
     def _train_afc_session(
         self,
@@ -543,6 +1036,8 @@ class SACILTrainer:
         method_config = self.config["method"]
         afc_config = method_config.get("afc", {})
         lambda_geo = float(method_config.get("lambda_geo", 1.0))
+        topology_config = method_config.get("topology", {})
+        lambda_topology = float(topology_config.get("weight", 1.0))
         nca_margin = float(afc_config.get("nca_margin", 0.6))
         pod_base_factor = float(afc_config.get("pod_base_factor", 4.0))
         seen_class_count = self.protocol.session(session_id).stop
@@ -555,16 +1050,41 @@ class SACILTrainer:
             )
         )
         epoch_logs = []
+        topology_loader = (
+            self._topology_memory_loader(session_id)
+            if teacher is not None and self.uses_topkd
+            else None
+        )
+        rebalancing_loader = (
+            self._reverse_frequency_loader(loader.dataset, session_id)
+            if teacher is not None and self.uses_dual_rebalancing
+            else None
+        )
         self.model.train()
         for epoch in range(epochs):
             totals = {
                 "loss": 0.0,
                 "classification": 0.0,
                 "distillation": 0.0,
+                "topology": 0.0,
                 "geometry": 0.0,
             }
             sample_count = 0
             batch_count = 0
+            topology_iterator = (
+                None if topology_loader is None else iter(topology_loader)
+            )
+            rebalancing_iterator = (
+                None
+                if rebalancing_loader is None
+                else iter(rebalancing_loader)
+            )
+            mixing_alpha = (
+                1.0
+                if rebalancing_loader is None
+                else 1.0
+                - (epoch / max(epochs, 1)) ** 2
+            )
             for batch_index, batch in enumerate(loader):
                 if max_batches is not None and batch_index >= max_batches:
                     break
@@ -577,14 +1097,54 @@ class SACILTrainer:
                 replay_mask = batch["is_replay"].to(
                     self.device, non_blocking=True
                 ).bool()
-                output = self.model.forward_detailed(images)
-                classification = afc_nca_loss(
-                    output.logits,
-                    targets,
-                    self.model.postprocessor_scale,
-                    margin=nca_margin,
+                output = self.model.forward_detailed(
+                    images, branch="conventional"
                 )
+                if rebalancing_iterator is None:
+                    classification = afc_nca_loss(
+                        output.logits,
+                        targets,
+                        self.model.postprocessor_scale,
+                        margin=nca_margin,
+                    )
+                else:
+                    try:
+                        rebalancing_batch = next(rebalancing_iterator)
+                    except StopIteration:
+                        rebalancing_iterator = iter(rebalancing_loader)
+                        rebalancing_batch = next(rebalancing_iterator)
+                    rebalancing_images = rebalancing_batch["image"].to(
+                        self.device, non_blocking=True
+                    )
+                    rebalancing_targets = rebalancing_batch["target"].to(
+                        self.device, non_blocking=True
+                    ).long()
+                    rebalancing_output = self.model.forward_detailed(
+                        rebalancing_images, branch="rebalancing"
+                    )
+                    mixed_logits = (
+                        mixing_alpha * output.logits
+                        + (1.0 - mixing_alpha)
+                        * rebalancing_output.logits
+                    )
+                    classification = (
+                        mixing_alpha
+                        * afc_nca_loss(
+                            mixed_logits,
+                            targets,
+                            self.model.postprocessor_scale,
+                            margin=nca_margin,
+                        )
+                        + (1.0 - mixing_alpha)
+                        * afc_nca_loss(
+                            mixed_logits,
+                            rebalancing_targets,
+                            self.model.postprocessor_scale,
+                            margin=nca_margin,
+                        )
+                    )
                 distillation = output.features.sum() * 0.0
+                topology = output.features.sum() * 0.0
                 geometry = output.features.sum() * 0.0
                 if teacher is not None:
                     with torch.no_grad():
@@ -594,6 +1154,30 @@ class SACILTrainer:
                         output.attentions,
                         reference.importance[:-1],
                     )
+                    if topology_iterator is not None:
+                        try:
+                            topology_batch = next(topology_iterator)
+                        except StopIteration:
+                            topology_iterator = iter(topology_loader)
+                            topology_batch = next(topology_iterator)
+                        topology_images = topology_batch["image"].to(
+                            self.device, non_blocking=True
+                        )
+                        topology_current = self.model.forward_detailed(
+                            topology_images
+                        )
+                        with torch.no_grad():
+                            topology_reference = teacher.forward_detailed(
+                                topology_images
+                            )
+                        if self.topology_loss is None:
+                            raise RuntimeError(
+                                "TopKD method has no topology loss"
+                            )
+                        topology = self.topology_loss(
+                            topology_current.features,
+                            topology_reference.features,
+                        )
                     if (
                         geometry_loss is not None
                         and bool(replay_mask.any())
@@ -605,6 +1189,7 @@ class SACILTrainer:
                 loss = (
                     classification
                     + distillation
+                    + lambda_topology * topology
                     + lambda_geo * geometry
                 )
                 optimizer.zero_grad(set_to_none=True)
@@ -620,6 +1205,7 @@ class SACILTrainer:
                     ("loss", loss),
                     ("classification", classification),
                     ("distillation", distillation),
+                    ("topology", topology),
                     ("geometry", geometry),
                 ):
                     totals[key] += float(value.detach().item()) * batch_size
@@ -631,6 +1217,11 @@ class SACILTrainer:
                     "epoch": epoch,
                     "lr": float(optimizer.param_groups[0]["lr"]),
                     "batches": batch_count,
+                    "rebalancing_alpha": (
+                        None
+                        if rebalancing_loader is None
+                        else mixing_alpha
+                    ),
                     **{
                         key: value / sample_count
                         for key, value in totals.items()
@@ -643,6 +1234,16 @@ class SACILTrainer:
             "epochs": epochs,
             "samples_in_dataset": len(loader.dataset),
             "pod_factor": pod_factor,
+            "lambda_topology": lambda_topology,
+            "topology_cloud_size": (
+                None if topology_loader is None else topology_loader.batch_size
+            ),
+            "dual_rebalancing": rebalancing_loader is not None,
+            "rebalancing_schedule": (
+                None
+                if rebalancing_loader is None
+                else "1-(epoch/epochs)^2"
+            ),
             "epoch_logs": epoch_logs,
         }
 

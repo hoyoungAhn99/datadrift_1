@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 
 import torch
@@ -140,6 +141,7 @@ class AFCResNet32(nn.Module):
         self.stage3_importance = ChannelImportance(64)
         self.stage4 = AFCResidualBlock(64)
         self.stage4_importance = ChannelImportance(64)
+        self.rebalancing_stage4: AFCResidualBlock | None = None
         self.raw_features_importance = ChannelImportance(64)
         self._initialize()
 
@@ -166,7 +168,21 @@ class AFCResNet32(nn.Module):
             if isinstance(module, AFCResidualBlock):
                 nn.init.zeros_(module.bn2.weight)
 
-    def forward(self, inputs: Tensor) -> AFCBackboneOutput:
+    @property
+    def has_rebalancing_branch(self) -> bool:
+        return self.rebalancing_stage4 is not None
+
+    def enable_rebalancing_branch(self) -> None:
+        """Clone the final residual block for TaKP/BBN-style rebalancing."""
+        if self.rebalancing_stage4 is None:
+            self.rebalancing_stage4 = copy.deepcopy(self.stage4)
+
+    def forward(
+        self,
+        inputs: Tensor,
+        *,
+        branch: str = "conventional",
+    ) -> AFCBackboneOutput:
         outputs = F.relu(self.bn1(self.conv1(inputs)), inplace=True)
         stage1_features, outputs = self.stage1(outputs)
         outputs = self.stage1_importance(outputs)
@@ -174,7 +190,14 @@ class AFCResNet32(nn.Module):
         outputs = self.stage2_importance(outputs)
         stage3_features, outputs = self.stage3(outputs)
         outputs = self.stage3_importance(outputs)
-        outputs = self.stage4(outputs)
+        if branch == "conventional":
+            outputs = self.stage4(outputs)
+        elif branch == "rebalancing":
+            if self.rebalancing_stage4 is None:
+                raise RuntimeError("rebalancing branch has not been enabled")
+            outputs = self.rebalancing_stage4(outputs)
+        else:
+            raise ValueError(f"unknown AFC branch: {branch}")
         outputs = self.stage4_importance(outputs)
 
         raw_features = torch.flatten(

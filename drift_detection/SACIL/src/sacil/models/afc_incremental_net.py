@@ -57,10 +57,30 @@ class AFCIncrementalNet(nn.Module):
         return self.classifier.num_classes
 
     def extract_features(self, images: Tensor) -> Tensor:
+        if self.backbone.has_rebalancing_branch:
+            conventional = self.backbone(
+                images, branch="conventional"
+            ).raw_features
+            rebalancing = self.backbone(
+                images, branch="rebalancing"
+            ).raw_features
+            return 0.5 * (conventional + rebalancing)
         return self.backbone(images).raw_features
 
-    def forward_detailed(self, images: Tensor) -> AFCForwardOutput:
-        backbone_output = self.backbone(images)
+    def enable_rebalancing_branch(self) -> None:
+        self.backbone.enable_rebalancing_branch()
+
+    @property
+    def has_rebalancing_branch(self) -> bool:
+        return self.backbone.has_rebalancing_branch
+
+    def forward_detailed(
+        self,
+        images: Tensor,
+        *,
+        branch: str = "conventional",
+    ) -> AFCForwardOutput:
+        backbone_output = self.backbone(images, branch=branch)
         logits = self.classifier(backbone_output.raw_features)
         return AFCForwardOutput(
             logits=logits,
@@ -72,7 +92,23 @@ class AFCIncrementalNet(nn.Module):
     def forward(
         self, images: Tensor, return_features: bool = False
     ) -> Tensor | tuple[Tensor, Tensor]:
-        output = self.forward_detailed(images)
+        if self.has_rebalancing_branch:
+            conventional = self.forward_detailed(
+                images, branch="conventional"
+            )
+            rebalancing = self.forward_detailed(
+                images, branch="rebalancing"
+            )
+            logits = 0.5 * (
+                conventional.logits + rebalancing.logits
+            )
+            features = 0.5 * (
+                conventional.features + rebalancing.features
+            )
+            if return_features:
+                return logits, features
+            return logits
+        output = self.forward_detailed(images, branch="conventional")
         if return_features:
             return output.logits, output.features
         return output.logits

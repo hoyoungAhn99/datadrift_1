@@ -70,3 +70,29 @@ def test_afc_importance_collection_normalizes_each_layer() -> None:
         assert torch.allclose(
             layer.importance.mean(), torch.tensor(1.0), atol=1e-5
         )
+
+
+def test_afc_dual_branch_starts_identical_and_receives_gradients() -> None:
+    model = AFCIncrementalNet(
+        4,
+        initial_size=4,
+        increment_size=2,
+        proxies_per_class=2,
+    )
+    model.eval()
+    images = torch.randn(3, 3, 32, 32)
+    conventional = model.forward_detailed(images)
+    model.enable_rebalancing_branch()
+    rebalancing = model.forward_detailed(
+        images, branch="rebalancing"
+    )
+    assert torch.allclose(
+        conventional.features, rebalancing.features, atol=1e-6
+    )
+    logits = model(images)
+    assert torch.allclose(logits, conventional.logits, atol=1e-6)
+    logits.square().mean().backward()
+    assert any(
+        parameter.grad is not None
+        for parameter in model.backbone.rebalancing_stage4.parameters()
+    )

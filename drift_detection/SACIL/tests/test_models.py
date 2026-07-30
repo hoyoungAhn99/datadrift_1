@@ -28,3 +28,10 @@ def test_resnet32_forward_shapes() -> None:
     assert features.shape == (2, 64)
     assert logits.shape == (2, 5)
 
+
+def test_cifar_resnet18_forward_shapes() -> None:
+    model = IncrementalNet(5, backbone="resnet18")
+    images = torch.randn(2, 3, 32, 32)
+    logits, features = model(images, return_features=True)
+    assert features.shape == (2, 512)
+    assert logits.shape == (2, 5)
