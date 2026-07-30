@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset
 
 from sacil.pycil.runtime import (
     activate_pycil,
@@ -98,6 +98,21 @@ def test_pycil_runtime_registers_sacil_and_explicit_order(tmp_path):
     assert resolved["shuffle"] is False
     assert resolved["_explicit_class_order"][:5] == [87, 0, 52, 58, 44]
 
+    from models import base
+
+    dataset = _TensorTripletDataset(
+        np.zeros((2, 3, 32, 32), dtype=np.float32),
+        np.zeros(2, dtype=np.int64),
+    )
+    upstream_loader = base.DataLoader(
+        dataset, batch_size=2, num_workers=4
+    )
+    ordinary_loader = DataLoader(
+        dataset, batch_size=2, num_workers=4
+    )
+    assert upstream_loader.num_workers == 0
+    assert ordinary_loader.num_workers == 4
+
 
 @pytest.mark.skipif(
     not PYCIL_ROOT.is_dir(), reason="official PyCIL checkout is unavailable"
@@ -146,3 +161,34 @@ def test_pycil_sacil_two_task_smoke(tmp_path):
     assert learner._artifacts.tree.num_leaves == 4
     assert (tmp_path / "tree_task_00.json").is_file()
     assert (tmp_path / "tree_task_01.json").is_file()
+
+
+@pytest.mark.skipif(
+    not PYCIL_ROOT.is_dir(), reason="official PyCIL checkout is unavailable"
+)
+def test_pycil_posthoc_rng_guard_restores_all_cpu_states():
+    activate_pycil(
+        {"dataset": "cifar100", "shuffle": False},
+        pycil_root=PYCIL_ROOT,
+    )
+    import random
+
+    from sacil.pycil.learner import preserve_rng_state
+
+    random.seed(31)
+    np.random.seed(31)
+    torch.manual_seed(31)
+    expected = (random.random(), np.random.rand(), torch.rand(1))
+
+    random.seed(31)
+    np.random.seed(31)
+    torch.manual_seed(31)
+    with preserve_rng_state():
+        random.random()
+        np.random.rand()
+        torch.rand(7)
+    actual = (random.random(), np.random.rand(), torch.rand(1))
+
+    assert actual[0] == expected[0]
+    assert actual[1] == expected[1]
+    assert torch.equal(actual[2], expected[2])

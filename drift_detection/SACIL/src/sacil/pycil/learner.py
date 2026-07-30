@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import copy
 import logging
+import random
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -35,6 +37,7 @@ from sacil.methods import (
     AnchorGeometryLoss,
     ConflictWeights,
     compute_conflict_weights,
+    global_preservation_weights,
 )
 from sacil.utils import dump_json, ensure_dir
 
@@ -50,6 +53,26 @@ class _SessionArtifacts:
     tree: HierarchyTree
     prototypes: PrototypeBank
     anchors: HierarchicalAnchorBank
+
+
+@contextmanager
+def preserve_rng_state():
+    """Keep SACIL's deterministic post-hoc work RNG-neutral to PyCIL."""
+
+    python_state = random.getstate()
+    numpy_state = np.random.get_state()
+    torch_state = torch.get_rng_state()
+    cuda_states = (
+        torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    )
+    try:
+        yield
+    finally:
+        random.setstate(python_state)
+        np.random.set_state(numpy_state)
+        torch.set_rng_state(torch_state)
+        if cuda_states is not None:
+            torch.cuda.set_rng_state_all(cuda_states)
 
 
 def pycil_kd_loss(pred: Tensor, soft: Tensor, temperature: float) -> Tensor:
@@ -105,7 +128,7 @@ class SACIL(BaseLearner):
         self._conflict_weights: ConflictWeights | None = None
 
         self.batch_size = int(args.get("batch_size", 128))
-        self.num_workers = int(args.get("num_workers", 4))
+        self.num_workers = int(args.get("num_workers", 0))
         self.pin_memory = bool(args.get("pin_memory", True))
 
         self.init_epochs = int(args.get("init_epochs", 200))
@@ -135,9 +158,13 @@ class SACIL(BaseLearner):
             raise ValueError("kd_scope must be 'all' or 'replay'")
 
         self.lambda_geo = float(args.get("lambda_geo", 1.0))
-        self.use_internal_anchors = bool(
-            args.get("use_internal_anchors", True)
-        )
+        self.geometry_mode = str(
+            args.get("geometry_mode", "sacil")
+        ).lower()
+        if self.geometry_mode not in {"none", "global", "flat", "sacil"}:
+            raise ValueError(
+                "geometry_mode must be none, global, flat, or sacil"
+            )
         self.taxonomy_temperature = float(
             args.get("taxonomy_temperature", 0.2)
         )
@@ -188,28 +215,44 @@ class SACIL(BaseLearner):
                 raise RuntimeError(
                     "incremental SACIL task requires teacher and anchors"
                 )
-            incoming = self._incoming_prototypes(data_manager)
-            self._conflict_weights = compute_conflict_weights(
-                incoming,
-                self._artifacts.anchors,
-                self._artifacts.tree,
-                max_neighbors=self.conflict_max_neighbors,
-                old_class_ratio=self.conflict_old_class_ratio,
-                temperature=self.conflict_temperature,
-                min_preservation_weight=self.min_preservation_weight,
-                ancestor_decay=self.ancestor_decay,
-            )
-            self._geometry_loss = AnchorGeometryLoss(
-                self._artifacts.anchors,
-                self._conflict_weights.leaf_weights,
-                self._conflict_weights.internal_weights,
-                use_internal_anchors=self.use_internal_anchors,
-            ).to(self._device)
-            logging.info(
-                "SACIL conflict weights: leaf min=%.4f mean=%.4f",
-                self._conflict_weights.leaf_weights.min().item(),
-                self._conflict_weights.leaf_weights.mean().item(),
-            )
+            # Keep this extra feature pass from perturbing PyCIL's classifier
+            # initialization and DataLoader RNG stream. It is executed for
+            # every geometry mode so the controlled variants have the same
+            # non-training lifecycle.
+            with preserve_rng_state():
+                incoming = self._incoming_prototypes(data_manager)
+            if self.geometry_mode == "global":
+                self._conflict_weights = global_preservation_weights(
+                    self._artifacts.anchors
+                )
+            elif self.geometry_mode in {"flat", "sacil"}:
+                self._conflict_weights = compute_conflict_weights(
+                    incoming,
+                    self._artifacts.anchors,
+                    self._artifacts.tree,
+                    max_neighbors=self.conflict_max_neighbors,
+                    old_class_ratio=self.conflict_old_class_ratio,
+                    temperature=self.conflict_temperature,
+                    min_preservation_weight=self.min_preservation_weight,
+                    ancestor_decay=self.ancestor_decay,
+                )
+            if (
+                self.geometry_mode != "none"
+                and self.lambda_geo != 0
+                and self._conflict_weights is not None
+            ):
+                self._geometry_loss = AnchorGeometryLoss(
+                    self._artifacts.anchors,
+                    self._conflict_weights.leaf_weights,
+                    self._conflict_weights.internal_weights,
+                    use_internal_anchors=self.geometry_mode != "flat",
+                ).to(self._device)
+                logging.info(
+                    "%s weights: leaf min=%.4f mean=%.4f",
+                    self.geometry_mode,
+                    self._conflict_weights.leaf_weights.min().item(),
+                    self._conflict_weights.leaf_weights.mean().item(),
+                )
 
         self._network.update_fc(self._total_classes)
         train_dataset = data_manager.get_dataset(
@@ -237,7 +280,10 @@ class SACIL(BaseLearner):
         self.build_rehearsal_memory(
             data_manager, self.samples_per_class
         )
-        self._artifacts = self._build_posthoc_artifacts(data_manager)
+        # Artifact construction is analysis-only and must not shift PyCIL's
+        # RNG stream before the following task.
+        with preserve_rng_state():
+            self._artifacts = self._build_posthoc_artifacts(data_manager)
         if len(self._multiple_gpus) > 1:
             self._network = self._network.module
 
@@ -362,7 +408,7 @@ class SACIL(BaseLearner):
                     + self.lambda_kd * distillation
                     + self.lambda_geo * geometry
                 )
-                optimizer.zero_grad(set_to_none=True)
+                optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
 
@@ -396,8 +442,9 @@ class SACIL(BaseLearner):
                 total_geo / total,
                 train_accuracy,
             )
-            if self.eval_interval > 0 and (
-                epoch == 0 or (epoch + 1) % self.eval_interval == 0
+            if (
+                self.eval_interval > 0
+                and epoch % self.eval_interval == 0
             ):
                 test_accuracy = self._compute_accuracy(
                     self._network, test_loader

@@ -17,7 +17,8 @@
   "aug": 1,
 
   "batch_size": 128,
-  "num_workers": 4,
+  "num_workers": 0,
+  "memory_num_workers": 0,
   "pin_memory": true,
   "init_epochs": 200,
   "init_lr": 0.1,
@@ -34,6 +35,7 @@
   "lambda_kd": 0.0,
   "kd_temperature": 2.0,
   "kd_scope": "all",
+  "geometry_mode": "sacil",
   "lambda_geo": 1.0,
   "taxonomy_temperature": 0.2,
   "use_internal_anchors": true,

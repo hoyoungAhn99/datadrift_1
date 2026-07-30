@@ -176,11 +176,75 @@ def _install_sacil_factory() -> None:
                 "sacil.pycil.learner"
             )
             return learner_module.SACIL(args)
-        return original(model_name, args)
+        model = original(model_name, args)
+        # Stock PyCIL learners keep these loader settings as module globals.
+        # Runtime overrides let matched experiments avoid Windows' expensive
+        # per-epoch worker spawning without changing the learning algorithm.
+        model_module = importlib.import_module(model.__class__.__module__)
+        for name in ("batch_size", "num_workers"):
+            if name in args and hasattr(model_module, name):
+                setattr(model_module, name, int(args[name]))
+        return model
 
     factory.get_model = get_model
     factory._sacil_factory_installed = True
     factory._sacil_original_get_model = original
+
+
+def _configure_base_memory_loader(config: dict[str, Any]) -> None:
+    """Apply the experiment worker count to PyCIL's exemplar loaders.
+
+    Upstream PyCIL hard-codes ``num_workers=4`` in BaseLearner's herding,
+    class-mean, and exemplar-evaluation loaders. On Windows those short-lived
+    loaders repeatedly spawn fresh Python processes. Keep the upstream
+    algorithms unchanged while making their worker count an experiment
+    setting.
+    """
+
+    base_module = importlib.import_module("models.base")
+    original = getattr(
+        base_module,
+        "_sacil_original_data_loader",
+        base_module.DataLoader,
+    )
+    num_workers = int(
+        config.get("memory_num_workers", config.get("num_workers", 0))
+    )
+    if num_workers < 0:
+        raise ValueError("memory_num_workers must be non-negative")
+
+    def configured_data_loader(*args, **kwargs):
+        kwargs["num_workers"] = num_workers
+        if num_workers == 0:
+            kwargs.pop("persistent_workers", None)
+        return original(*args, **kwargs)
+
+    base_module._sacil_original_data_loader = original
+    base_module.DataLoader = configured_data_loader
+
+
+def _configure_task_limit(config: dict[str, Any]) -> None:
+    data_manager_module = importlib.import_module("utils.data_manager")
+    original = getattr(
+        data_manager_module,
+        "_sacil_unlimited_data_manager",
+        data_manager_module.DataManager,
+    )
+    value = config.get("max_tasks")
+    if value is None:
+        data_manager_module.DataManager = original
+        return
+    max_tasks = int(value)
+    if max_tasks <= 0:
+        raise ValueError("max_tasks must be positive")
+
+    class LimitedDataManager(original):
+        @property
+        def nb_tasks(self):
+            return min(max_tasks, super().nb_tasks)
+
+    data_manager_module._sacil_unlimited_data_manager = original
+    data_manager_module.DataManager = LimitedDataManager
 
 
 def activate_pycil(
@@ -210,6 +274,8 @@ def activate_pycil(
     resolved = copy.deepcopy(config)
     _configure_data_root(resolved, data_module)
     _configure_class_order(resolved, data_module)
+    _configure_task_limit(resolved)
+    _configure_base_memory_loader(resolved)
     _install_sacil_factory()
     resolved["_pycil_root"] = str(root)
     return resolved
