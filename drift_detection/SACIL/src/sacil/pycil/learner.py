@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import math
 import random
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -38,6 +39,9 @@ from sacil.methods import (
     ConflictWeights,
     compute_conflict_weights,
     global_preservation_weights,
+    icarl_bce_loss,
+    prototype_cross_entropy,
+    prototype_logits,
 )
 from sacil.utils import dump_json, ensure_dir
 
@@ -126,6 +130,8 @@ class SACIL(BaseLearner):
         self._artifacts: _SessionArtifacts | None = None
         self._geometry_loss: AnchorGeometryLoss | None = None
         self._conflict_weights: ConflictWeights | None = None
+        self._prototype_loader: DataLoader | None = None
+        self._training_prototypes: Tensor | None = None
 
         self.batch_size = int(args.get("batch_size", 128))
         self.num_workers = int(args.get("num_workers", 0))
@@ -153,6 +159,28 @@ class SACIL(BaseLearner):
 
         self.lambda_kd = float(args.get("lambda_kd", 1.0))
         self.kd_temperature = float(args.get("kd_temperature", 2.0))
+        self.classification_mode = str(
+            args.get("classification_mode", "ce_kd")
+        ).lower()
+        if self.classification_mode not in {
+            "ce_kd",
+            "icarl_bce",
+            "prototype_ce",
+        }:
+            raise ValueError(
+                "classification_mode must be ce_kd, icarl_bce, "
+                "or prototype_ce"
+            )
+        self.prototype_temperature = float(
+            args.get("prototype_temperature", 0.1)
+        )
+        if self.prototype_temperature <= 0:
+            raise ValueError("prototype_temperature must be positive")
+        if self.classification_mode == "prototype_ce" and self.lambda_kd != 0:
+            raise ValueError(
+                "prototype_ce uses no parametric old-logit KD; "
+                "set lambda_kd to 0"
+            )
         self.kd_scope = str(args.get("kd_scope", "all")).lower()
         if self.kd_scope not in {"all", "replay"}:
             raise ValueError("kd_scope must be 'all' or 'replay'")
@@ -191,15 +219,44 @@ class SACIL(BaseLearner):
         self.artifact_dir = ensure_dir(
             Path(args.get("artifact_dir", "outputs/pycil/sacil"))
         )
+        self._resume_checkpoint_rng: dict[str, Any] | None = None
+        self._resume_base_pending = False
+        resume_checkpoint = args.get("resume_checkpoint")
+        if resume_checkpoint is not None:
+            self._load_base_checkpoint(Path(resume_checkpoint))
 
     def after_task(self):
         self._old_network = self._network.copy().freeze()
         self._known_classes = self._total_classes
+        if self._resume_checkpoint_rng is not None:
+            # The trainer evaluates the restored base once before after_task.
+            # Restore the exact post-base RNG state here so that the first
+            # incremental classifier and shuffled loader match a direct
+            # continuation from the shared base.
+            self._restore_rng_state(self._resume_checkpoint_rng)
+            self._resume_checkpoint_rng = None
         logging.info("Exemplar size: %d", self.exemplar_size)
         if self.save_checkpoints:
             self._save_checkpoint()
 
     def incremental_train(self, data_manager):
+        if self._resume_base_pending:
+            self._resume_base_pending = False
+            test_dataset = data_manager.get_dataset(
+                np.arange(0, self._total_classes),
+                source="test",
+                mode="test",
+            )
+            self.test_loader = self._loader(
+                test_dataset, shuffle=False
+            )
+            self._network.to(self._device)
+            logging.info(
+                "Restored shared base task 0 (0-%d); skipping base training",
+                self._total_classes,
+            )
+            return
+
         self._cur_task += 1
         self._total_classes = self._known_classes + data_manager.get_task_size(
             self._cur_task
@@ -255,6 +312,9 @@ class SACIL(BaseLearner):
                 )
 
         self._network.update_fc(self._total_classes)
+        if self.classification_mode == "prototype_ce":
+            for parameter in self._network.fc.parameters():
+                parameter.requires_grad = False
         train_dataset = data_manager.get_dataset(
             np.arange(self._known_classes, self._total_classes),
             source="train",
@@ -262,6 +322,18 @@ class SACIL(BaseLearner):
             appendent=self._get_memory(),
         )
         self.train_loader = self._loader(train_dataset, shuffle=True)
+        if self.classification_mode == "prototype_ce":
+            prototype_dataset = data_manager.get_dataset(
+                np.arange(self._known_classes, self._total_classes),
+                source="train",
+                mode="test",
+                appendent=self._get_memory(),
+            )
+            self._prototype_loader = self._loader(
+                prototype_dataset, shuffle=False
+            )
+        else:
+            self._prototype_loader = None
         test_dataset = data_manager.get_dataset(
             np.arange(0, self._total_classes),
             source="test",
@@ -273,7 +345,11 @@ class SACIL(BaseLearner):
             self._network = nn.DataParallel(
                 self._network, self._multiple_gpus
             )
-        self._train(self.train_loader, self.test_loader)
+        self._train(
+            self.train_loader,
+            self.test_loader,
+            prototype_loader=self._prototype_loader,
+        )
 
         # These calls deliberately use the official PyCIL BaseLearner
         # implementation and its iCaRL herding policy.
@@ -326,6 +402,54 @@ class SACIL(BaseLearner):
             range(self._known_classes, self._total_classes),
         )
 
+    def _refresh_training_prototypes(self, loader: DataLoader) -> Tensor:
+        collection = collect_pycil_features(
+            self._network, loader, self._device
+        )
+        prototypes = compute_prototypes(
+            collection.features,
+            collection.targets,
+            range(self._total_classes),
+        )
+        return prototypes.to(self._device)
+
+    @torch.inference_mode()
+    def _compute_prototype_accuracy(
+        self,
+        loader: DataLoader,
+        prototypes: Tensor,
+    ) -> float:
+        self._network.eval()
+        correct, total = 0, 0
+        for _, inputs, targets in loader:
+            output = self._network(
+                inputs.to(self._device, non_blocking=True)
+            )
+            logits = prototype_logits(
+                output["features"],
+                prototypes,
+                temperature=self.prototype_temperature,
+            )
+            correct += int(
+                logits.argmax(dim=1).cpu().eq(targets).sum()
+            )
+            total += targets.numel()
+        if total == 0:
+            raise RuntimeError("prototype evaluation loader is empty")
+        return float(np.around(100.0 * correct / total, decimals=2))
+
+    def _eval_cnn(self, loader):
+        if self.classification_mode != "prototype_ce":
+            return super()._eval_cnn(loader)
+        if not hasattr(self, "_class_means"):
+            raise RuntimeError(
+                "prototype inference requires post-hoc class means"
+            )
+        # PyCIL names this first return path "CNN".  For Proto-SACIL it is
+        # deliberately the same NME rule as the primary inference classifier,
+        # so no unused parametric FC head is evaluated.
+        return self._eval_nme(loader, self._class_means)
+
     def _phase(self) -> tuple[int, float, list[int], float]:
         if self._cur_task == 0:
             return (
@@ -336,14 +460,25 @@ class SACIL(BaseLearner):
             )
         return self.epochs, self.lr, self.milestones, self.weight_decay
 
-    def _train(self, train_loader, test_loader):
+    def _train(
+        self,
+        train_loader,
+        test_loader,
+        *,
+        prototype_loader: DataLoader | None = None,
+    ):
         self._network.to(self._device)
         if self._old_network is not None:
             self._old_network.to(self._device)
 
         epochs, learning_rate, milestones, weight_decay = self._phase()
+        parameters = [
+            parameter
+            for parameter in self._network.parameters()
+            if parameter.requires_grad
+        ]
         optimizer = optim.SGD(
-            self._network.parameters(),
+            parameters,
             lr=learning_rate,
             momentum=self.momentum,
             weight_decay=weight_decay,
@@ -355,6 +490,16 @@ class SACIL(BaseLearner):
 
         iterator = tqdm(range(epochs), disable=self.disable_tqdm)
         for epoch in iterator:
+            training_prototypes = None
+            if self.classification_mode == "prototype_ce":
+                if prototype_loader is None:
+                    raise RuntimeError(
+                        "prototype_ce requires a prototype loader"
+                    )
+                training_prototypes = self._refresh_training_prototypes(
+                    prototype_loader
+                )
+                self._training_prototypes = training_prototypes.detach().cpu()
             self._network.train()
             total_loss = 0.0
             total_clf = 0.0
@@ -373,14 +518,36 @@ class SACIL(BaseLearner):
                 logits = output["logits"]
                 features = output["features"]
                 classification = F.cross_entropy(logits, targets)
+                prediction_logits = logits
+                if self.classification_mode == "prototype_ce":
+                    if training_prototypes is None:
+                        raise RuntimeError("training prototypes are missing")
+                    classification, prediction_logits = (
+                        prototype_cross_entropy(
+                            features,
+                            targets,
+                            training_prototypes,
+                            temperature=self.prototype_temperature,
+                        )
+                    )
                 distillation = features.sum() * 0.0
                 geometry = features.sum() * 0.0
 
                 if self._old_network is not None:
                     with torch.no_grad():
                         reference = self._old_network(inputs)
+                    if self.classification_mode == "icarl_bce":
+                        classification = icarl_bce_loss(
+                            logits,
+                            targets,
+                            old_logits=reference["logits"],
+                            known_classes=self._known_classes,
+                        )
                     replay_mask = targets < self._known_classes
-                    if self.lambda_kd != 0:
+                    if (
+                        self.classification_mode == "ce_kd"
+                        and self.lambda_kd != 0
+                    ):
                         if self.kd_scope == "all":
                             kd_current = logits[:, : self._known_classes]
                             kd_reference = reference["logits"]
@@ -402,6 +569,8 @@ class SACIL(BaseLearner):
                             features[replay_mask],
                             reference["features"][replay_mask],
                         )
+                elif self.classification_mode == "icarl_bce":
+                    classification = icarl_bce_loss(logits, targets)
 
                 loss = (
                     classification
@@ -420,7 +589,11 @@ class SACIL(BaseLearner):
                 total_kd += float(distillation.detach().item()) * count
                 total_geo += float(geometry.detach().item()) * count
                 correct += (
-                    logits.argmax(dim=1).eq(targets).detach().cpu().sum()
+                    prediction_logits.argmax(dim=1)
+                    .eq(targets)
+                    .detach()
+                    .cpu()
+                    .sum()
                 )
 
             scheduler.step()
@@ -446,9 +619,14 @@ class SACIL(BaseLearner):
                 self.eval_interval > 0
                 and epoch % self.eval_interval == 0
             ):
-                test_accuracy = self._compute_accuracy(
-                    self._network, test_loader
-                )
+                if self.classification_mode == "prototype_ce":
+                    test_accuracy = self._compute_prototype_accuracy(
+                        test_loader, training_prototypes
+                    )
+                else:
+                    test_accuracy = self._compute_accuracy(
+                        self._network, test_loader
+                    )
                 info += ", Test_accy {:.2f}".format(test_accuracy)
             iterator.set_description(info)
             logging.info(info)
@@ -493,16 +671,20 @@ class SACIL(BaseLearner):
         path = self.artifact_dir / f"task_{self._cur_task:02d}.pt"
         torch.save(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "framework": "PyCIL",
                 "task": self._cur_task,
                 "known_classes": self._known_classes,
                 "model_state_dict": self._network.state_dict(),
                 "memory_data": copy.deepcopy(self._data_memory),
                 "memory_targets": copy.deepcopy(self._targets_memory),
+                "class_means": copy.deepcopy(self._class_means),
+                "classification_mode": self.classification_mode,
+                "prototype_temperature": self.prototype_temperature,
                 "tree": self._artifacts.tree.state_dict(),
                 "prototypes": self._artifacts.prototypes.state_dict(),
                 "anchors": self._artifacts.anchors.state_dict(),
+                "rng_state": self._capture_rng_state(),
                 "conflict": (
                     None
                     if self._conflict_weights is None
@@ -511,3 +693,110 @@ class SACIL(BaseLearner):
             },
             path,
         )
+
+    @staticmethod
+    def _capture_rng_state() -> dict[str, Any]:
+        return {
+            "python": random.getstate(),
+            "numpy": np.random.get_state(),
+            "torch": torch.get_rng_state(),
+            "cuda": (
+                torch.cuda.get_rng_state_all()
+                if torch.cuda.is_available()
+                else None
+            ),
+        }
+
+    @staticmethod
+    def _restore_rng_state(state: dict[str, Any]) -> None:
+        random.setstate(state["python"])
+        np.random.set_state(state["numpy"])
+        torch.set_rng_state(state["torch"])
+        cuda_state = state.get("cuda")
+        if cuda_state is not None and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(cuda_state)
+
+    def _load_base_checkpoint(self, path: Path) -> None:
+        resolved = path.expanduser().resolve()
+        if not resolved.is_file():
+            raise FileNotFoundError(
+                f"shared base checkpoint does not exist: {resolved}"
+            )
+        try:
+            checkpoint = torch.load(
+                resolved, map_location="cpu", weights_only=False
+            )
+        except TypeError:
+            checkpoint = torch.load(resolved, map_location="cpu")
+
+        if checkpoint.get("framework") != "PyCIL":
+            raise ValueError("resume checkpoint is not a PyCIL checkpoint")
+        if int(checkpoint.get("schema_version", 0)) < 2:
+            raise ValueError(
+                "resume checkpoint must use schema version 2 or newer"
+            )
+        checkpoint_mode = checkpoint.get("classification_mode")
+        if checkpoint_mode is None:
+            if self.classification_mode == "prototype_ce":
+                raise ValueError(
+                    "prototype_ce cannot resume a checkpoint without "
+                    "its classification contract"
+                )
+        elif str(checkpoint_mode) != self.classification_mode:
+            raise ValueError(
+                "resume checkpoint classification mode does not match"
+            )
+        checkpoint_temperature = checkpoint.get("prototype_temperature")
+        if (
+            self.classification_mode == "prototype_ce"
+            and checkpoint_temperature is not None
+            and not math.isclose(
+                float(checkpoint_temperature),
+                self.prototype_temperature,
+            )
+        ):
+            raise ValueError(
+                "resume checkpoint prototype temperature does not match"
+            )
+        task = int(checkpoint["task"])
+        if task != 0:
+            raise ValueError(
+                "shared resume currently requires a task-0 checkpoint"
+            )
+        known_classes = int(checkpoint["known_classes"])
+        if known_classes <= 0:
+            raise ValueError(
+                "shared base checkpoint has no learned classes"
+            )
+
+        self._network.update_fc(known_classes)
+        self._network.load_state_dict(checkpoint["model_state_dict"])
+        self._data_memory = copy.deepcopy(checkpoint["memory_data"])
+        self._targets_memory = copy.deepcopy(
+            checkpoint["memory_targets"]
+        )
+        self._class_means = copy.deepcopy(checkpoint["class_means"])
+        tree = HierarchyTree.from_state_dict(checkpoint["tree"])
+        prototypes = PrototypeBank.from_state_dict(
+            checkpoint["prototypes"]
+        )
+        anchors = HierarchicalAnchorBank.from_state_dict(
+            checkpoint["anchors"]
+        )
+        self._artifacts = _SessionArtifacts(tree, prototypes, anchors)
+        conflict = checkpoint.get("conflict")
+        self._conflict_weights = (
+            None
+            if conflict is None
+            else ConflictWeights.from_state_dict(conflict)
+        )
+
+        # The first trainer iteration evaluates this shared base without
+        # retraining it. after_task then creates the teacher and restores the
+        # saved RNG state before task 1 begins.
+        self._cur_task = task
+        self._known_classes = 0
+        self._total_classes = known_classes
+        self._resume_checkpoint_rng = checkpoint["rng_state"]
+        self._resume_base_pending = True
+        logging.info("Loaded shared base checkpoint: %s", resolved)

@@ -51,7 +51,12 @@ def load_experiment_config(
         raise TypeError("PyCIL experiment configuration must be a JSON object")
     config = copy.deepcopy(config)
     config["_config_path"] = str(config_path)
-    for key in ("data_root", "class_order_path", "artifact_dir"):
+    for key in (
+        "data_root",
+        "class_order_path",
+        "artifact_dir",
+        "resume_checkpoint",
+    ):
         if key in config:
             config[key] = str(_resolved(config[key], root))
     return config
@@ -171,11 +176,17 @@ def _install_sacil_factory() -> None:
     original = factory.get_model
 
     def get_model(model_name, args):
-        if str(model_name).lower() in {"sacil", "pycil_sacil"}:
+        normalized = str(model_name).lower()
+        if normalized in {"sacil", "pycil_sacil"}:
             learner_module = importlib.import_module(
                 "sacil.pycil.learner"
             )
             return learner_module.SACIL(args)
+        table1_module = importlib.import_module(
+            "sacil.methods.pycil_table1"
+        )
+        if normalized in table1_module.table1_model_names():
+            return table1_module.get_table1_model(normalized, args)
         model = original(model_name, args)
         # Stock PyCIL learners keep these loader settings as module globals.
         # Runtime overrides let matched experiments avoid Windows' expensive

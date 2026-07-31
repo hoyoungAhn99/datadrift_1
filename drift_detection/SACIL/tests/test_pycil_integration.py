@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from pathlib import Path
 
 import numpy as np
@@ -91,6 +92,7 @@ def test_pycil_runtime_registers_sacil_and_explicit_order(tmp_path):
     from utils import factory
 
     args = dict(resolved)
+    args.pop("resume_checkpoint", None)
     args["device"] = [torch.device("cpu")]
     learner = factory.get_model("sacil", args)
     assert type(learner).__name__ == "SACIL"
@@ -112,6 +114,42 @@ def test_pycil_runtime_registers_sacil_and_explicit_order(tmp_path):
     )
     assert upstream_loader.num_workers == 0
     assert ordinary_loader.num_workers == 4
+
+
+@pytest.mark.skipif(
+    not PYCIL_ROOT.is_dir(), reason="official PyCIL checkout is unavailable"
+)
+def test_pycil_runtime_registers_all_table1_baselines():
+    activate_pycil(
+        {"dataset": "cifar100", "shuffle": False},
+        pycil_root=PYCIL_ROOT,
+    )
+    from utils import factory
+
+    args = {
+        "memory_size": 20,
+        "memory_per_class": 1,
+        "fixed_memory": True,
+        "device": [torch.device("cpu")],
+        "convnet_type": "resnet32",
+        "num_workers": 0,
+    }
+    expected = {
+        "table1_joint": "joint",
+        "table1_finetune": "finetune",
+        "table1_replay": "replay",
+        "table1_icarl": "icarl",
+        "table1_podnet": "podnet",
+        "table1_afc": "afc",
+        "table1_create": "create",
+        "table1_fgp": "fgp",
+        "table1_cscct": "cscct",
+        "table1_casper": "casper",
+    }
+    for model_name, method_name in expected.items():
+        learner = factory.get_model(model_name, dict(args))
+        assert learner.method == method_name
+        assert learner.feature_dim == 64
 
 
 @pytest.mark.skipif(
@@ -144,10 +182,13 @@ def test_pycil_sacil_two_task_smoke(tmp_path):
         "disable_tqdm": True,
         "save_checkpoints": False,
         "artifact_dir": str(tmp_path),
-        "lambda_kd": 1.0,
+        "classification_mode": "prototype_ce",
+        "prototype_temperature": 0.1,
+        "lambda_kd": 0.0,
         "lambda_geo": 1.0,
     }
     learner = factory.get_model("sacil", args)
+    learner.topk = 2
     manager = _TinyDataManager()
 
     learner.incremental_train(manager)
@@ -159,8 +200,87 @@ def test_pycil_sacil_two_task_smoke(tmp_path):
     assert learner._geometry_loss is not None
     assert learner._conflict_weights is not None
     assert learner._artifacts.tree.num_leaves == 4
+    assert learner._training_prototypes is not None
+    assert all(
+        not parameter.requires_grad
+        for parameter in learner._network.fc.parameters()
+    )
+    cnn, nme = learner.eval_task()
+    assert nme is not None
+    assert cnn["top1"] == nme["top1"]
     assert (tmp_path / "tree_task_00.json").is_file()
     assert (tmp_path / "tree_task_01.json").is_file()
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    [
+        "table1_joint",
+        "table1_finetune",
+        "table1_replay",
+        "table1_icarl",
+        "table1_podnet",
+        "table1_afc",
+        "table1_create",
+        "table1_fgp",
+        "table1_cscct",
+        "table1_casper",
+    ],
+)
+@pytest.mark.skipif(
+    not PYCIL_ROOT.is_dir(), reason="official PyCIL checkout is unavailable"
+)
+def test_pycil_table1_baseline_two_task_smoke(model_name):
+    activate_pycil(
+        {"dataset": "cifar100", "shuffle": False},
+        pycil_root=PYCIL_ROOT,
+    )
+    from utils import factory
+
+    args = {
+        "memory_size": 4,
+        "memory_per_class": 1,
+        "fixed_memory": True,
+        "device": [torch.device("cpu")],
+        "dataset": "cifar100",
+        "model_name": model_name,
+        "convnet_type": "resnet18",
+        "batch_size": 16,
+        "num_workers": 0,
+        "pin_memory": False,
+        "init_epochs": 1,
+        "epochs": 1,
+        "init_milestones": [],
+        "milestones": [],
+        "eval_interval": 0,
+        "disable_tqdm": True,
+        "max_batches_per_epoch": 1,
+        "finetune_epochs": 0,
+        "proxy_per_class": 1,
+        "casper_k": 1,
+    }
+    learner = factory.get_model(model_name, args)
+    manager = _TinyDataManager()
+
+    learner.incremental_train(manager)
+    learner.after_task()
+    learner.incremental_train(manager)
+
+    assert learner._total_classes == 4
+    assert learner.exemplar_size == 4
+    if model_name == "table1_cscct":
+        scale_shift_layers = [
+            module
+            for module in learner._network.convnet.modules()
+            if type(module).__name__ == "_ScaleShiftConv2d"
+        ]
+        assert scale_shift_layers
+        assert all(
+            not layer.weight.requires_grad for layer in scale_shift_layers
+        )
+        assert all(
+            layer.mtl_weight.requires_grad for layer in scale_shift_layers
+        )
 
 
 @pytest.mark.skipif(
@@ -192,3 +312,84 @@ def test_pycil_posthoc_rng_guard_restores_all_cpu_states():
     assert actual[0] == expected[0]
     assert actual[1] == expected[1]
     assert torch.equal(actual[2], expected[2])
+
+
+@pytest.mark.skipif(
+    not PYCIL_ROOT.is_dir(), reason="official PyCIL checkout is unavailable"
+)
+def test_pycil_shared_base_resume_skips_training_and_restores_rng(tmp_path):
+    activate_pycil(
+        {"dataset": "cifar100", "shuffle": False},
+        pycil_root=PYCIL_ROOT,
+    )
+    from utils import factory
+
+    manager = _TinyDataManager()
+    common = {
+        "memory_size": 4,
+        "memory_per_class": 1,
+        "fixed_memory": True,
+        "device": [torch.device("cpu")],
+        "convnet_type": "resnet32",
+        "batch_size": 16,
+        "num_workers": 0,
+        "pin_memory": False,
+        "init_epochs": 1,
+        "epochs": 1,
+        "init_milestones": [],
+        "milestones": [],
+        "eval_interval": 0,
+        "disable_tqdm": True,
+        "lambda_kd": 1.0,
+        "lambda_geo": 1.0,
+    }
+    base_args = {
+        **common,
+        "save_checkpoints": True,
+        "artifact_dir": str(tmp_path / "base"),
+    }
+    base = factory.get_model("sacil", base_args)
+    base.topk = 2
+    base.incremental_train(manager)
+    base.eval_task()
+    base.after_task()
+    checkpoint = tmp_path / "base" / "task_00.pt"
+    assert checkpoint.is_file()
+
+    expected_python = random.random()
+    expected_numpy = np.random.rand()
+    expected_torch = torch.rand(3)
+    base_state = {
+        name: value.detach().clone()
+        for name, value in base._network.state_dict().items()
+    }
+    base_memory = base._data_memory.copy()
+
+    resume_args = {
+        **common,
+        "save_checkpoints": False,
+        "artifact_dir": str(tmp_path / "branch"),
+        "resume_checkpoint": str(checkpoint),
+    }
+    resumed = factory.get_model("sacil", resume_args)
+    resumed.topk = 2
+    resumed.incremental_train(manager)
+
+    assert resumed._cur_task == 0
+    assert resumed._known_classes == 0
+    assert resumed._total_classes == 2
+    assert np.array_equal(resumed._data_memory, base_memory)
+    for name, value in resumed._network.state_dict().items():
+        assert torch.equal(value, base_state[name])
+
+    resumed.eval_task()
+    resumed.after_task()
+    assert resumed._known_classes == 2
+    assert resumed._old_network is not None
+    assert random.random() == expected_python
+    assert np.random.rand() == expected_numpy
+    assert torch.equal(torch.rand(3), expected_torch)
+
+    resumed.incremental_train(manager)
+    assert resumed._cur_task == 1
+    assert resumed._total_classes == 4

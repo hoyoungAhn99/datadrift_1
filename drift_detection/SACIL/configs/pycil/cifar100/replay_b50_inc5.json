@@ -14,5 +14,7 @@
   "convnet_type": "resnet32",
   "device": [0],
   "seed": [1],
-  "aug": 1
+  "aug": 1,
+  "num_workers": 0,
+  "memory_num_workers": 0
 }

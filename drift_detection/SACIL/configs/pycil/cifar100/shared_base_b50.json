@@ -1,5 +1,5 @@
 {
-  "prefix": "replay_control_b50_inc5_order1",
+  "prefix": "shared_base_b50_order1",
   "dataset": "cifar100",
   "data_root": "datasets",
   "download": false,
@@ -10,6 +10,7 @@
   "shuffle": false,
   "init_cls": 50,
   "increment": 5,
+  "max_tasks": 1,
   "model_name": "sacil",
   "convnet_type": "resnet32",
   "device": [0],
@@ -30,7 +31,7 @@
   "weight_decay": 0.0002,
   "momentum": 0.9,
   "nesterov": false,
-  "lambda_kd": 0.0,
+  "lambda_kd": 1.0,
   "kd_temperature": 2.0,
   "kd_scope": "all",
   "geometry_mode": "none",
@@ -42,7 +43,6 @@
   "min_preservation_weight": 0.1,
   "ancestor_decay": 0.5,
   "eval_interval": 5,
-  "resume_checkpoint": "outputs/pycil/cifar100_shared_base_b50_order1/task_00.pt",
   "save_checkpoints": true,
-  "artifact_dir": "outputs/pycil/cifar100_replay_control_b50_inc5_order1"
+  "artifact_dir": "outputs/pycil/cifar100_shared_base_b50_order1"
 }

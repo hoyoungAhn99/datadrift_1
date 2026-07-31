@@ -122,3 +122,14 @@ The adapter uses PyCIL's `DataManager`, `BaseLearner`, `IncrementalNet`,
 classifier expansion, iCaRL herding, and evaluator. See
 `mds/experiments/pycil_integration.md` for the pinned framework revision,
 matched baselines, and protocol details.
+
+The controlled CIFAR-100 B50-Inc5 ResNet-18 Table-1 suite can be run with:
+
+```powershell
+.\scripts\run_pycil_table1.ps1 -Gpu 0
+```
+
+It includes Joint, Fine-tune, Replay-CE, iCaRL, PODNet, AFC, CREATE,
+FGP-ICL, iCaRL+CSCCT, iCaRL+CaSpeR, and Proto-SACIL. Method provenance,
+native/adapted protocol boundaries, and result aggregation are documented in
+`mds/experiments/table1_baseline_implementation.md`.
