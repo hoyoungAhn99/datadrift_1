@@ -21,23 +21,23 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $Runner = Join-Path $ProjectRoot "scripts\train_pycil.py"
 $Summarizer = Join-Path $ProjectRoot "scripts\summarize_pycil_table1.py"
-$LogRoot = Join-Path $ProjectRoot "outputs\pycil\table1\runner_logs"
+$LogRoot = Join-Path $ProjectRoot "outputs\pycil\table1\runner_logs_resnet32"
 $SummaryPath = Join-Path `
     $ProjectRoot `
-    "mds\results\table1_cifar100_b50_inc5_resnet18.md"
+    "mds\results\table1_cifar100_b50_inc5_resnet32.md"
 
 $Configs = [ordered]@{
-    joint = "configs/pycil/table1/cifar100/joint_nme_b50_inc5_resnet18.json"
-    finetune = "configs/pycil/table1/cifar100/finetune_nme_b50_inc5_resnet18.json"
-    replay = "configs/pycil/table1/cifar100/replay_nme_b50_inc5_resnet18.json"
-    icarl = "configs/pycil/table1/cifar100/icarl_nme_b50_inc5_resnet18.json"
-    podnet = "configs/pycil/table1/cifar100/podnet_nme_b50_inc5_resnet18.json"
-    afc = "configs/pycil/table1/cifar100/afc_nme_b50_inc5_resnet18.json"
-    create = "configs/pycil/table1/cifar100/create_native_b50_inc5_resnet18.json"
-    fgp = "configs/pycil/table1/cifar100/fgp_nme_b50_inc5_resnet18.json"
-    cscct = "configs/pycil/table1/cifar100/icarl_cscct_nme_b50_inc5_resnet18.json"
-    casper = "configs/pycil/table1/cifar100/icarl_casper_nme_b50_inc5_resnet18.json"
-    sacil = "configs/pycil/table1/cifar100/proto_sacil_nme_b50_inc5_resnet18.json"
+    joint = "configs/pycil/table1/cifar100/joint_nme_b50_inc5_resnet32.json"
+    finetune = "configs/pycil/table1/cifar100/finetune_nme_b50_inc5_resnet32.json"
+    replay = "configs/pycil/table1/cifar100/replay_nme_b50_inc5_resnet32.json"
+    icarl = "configs/pycil/table1/cifar100/icarl_nme_b50_inc5_resnet32.json"
+    podnet = "configs/pycil/table1/cifar100/podnet_nme_b50_inc5_resnet32.json"
+    afc = "configs/pycil/table1/cifar100/afc_nme_b50_inc5_resnet32.json"
+    create = "configs/pycil/table1/cifar100/create_native_b50_inc5_resnet32.json"
+    fgp = "configs/pycil/table1/cifar100/fgp_nme_b50_inc5_resnet32.json"
+    cscct = "configs/pycil/table1/cifar100/icarl_cscct_nme_b50_inc5_resnet32.json"
+    casper = "configs/pycil/table1/cifar100/icarl_casper_nme_b50_inc5_resnet32.json"
+    sacil = "configs/pycil/table1/cifar100/proto_sacil_nme_b50_inc5_resnet32.json"
 }
 
 function Write-Status {

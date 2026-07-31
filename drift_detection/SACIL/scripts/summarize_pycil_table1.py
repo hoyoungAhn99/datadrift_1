@@ -10,12 +10,14 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_LOG_ROOT = PROJECT_ROOT / "outputs" / "pycil" / "table1" / "runner_logs"
+DEFAULT_LOG_ROOT = (
+    PROJECT_ROOT / "outputs" / "pycil" / "table1" / "runner_logs_resnet32"
+)
 DEFAULT_OUTPUT = (
     PROJECT_ROOT
     / "mds"
     / "results"
-    / "table1_cifar100_b50_inc5_resnet18.md"
+    / "table1_cifar100_b50_inc5_resnet32.md"
 )
 CONFIG_ROOT = PROJECT_ROOT / "configs" / "pycil" / "table1" / "cifar100"
 
@@ -30,42 +32,42 @@ class MethodSpec:
 
 METHODS = (
     MethodSpec(
-        "joint", "Joint (upper bound)", "joint_nme_b50_inc5_resnet18.json", "NME"
+        "joint", "Joint (upper bound)", "joint_nme_b50_inc5_resnet32.json", "NME"
     ),
     MethodSpec(
-        "finetune", "Fine-tune", "finetune_nme_b50_inc5_resnet18.json", "NME"
+        "finetune", "Fine-tune", "finetune_nme_b50_inc5_resnet32.json", "NME"
     ),
     MethodSpec(
-        "replay", "Replay-CE", "replay_nme_b50_inc5_resnet18.json", "NME"
+        "replay", "Replay-CE", "replay_nme_b50_inc5_resnet32.json", "NME"
     ),
-    MethodSpec("icarl", "iCaRL", "icarl_nme_b50_inc5_resnet18.json", "NME"),
+    MethodSpec("icarl", "iCaRL", "icarl_nme_b50_inc5_resnet32.json", "NME"),
     MethodSpec(
-        "podnet", "PODNet", "podnet_nme_b50_inc5_resnet18.json", "NME"
+        "podnet", "PODNet", "podnet_nme_b50_inc5_resnet32.json", "NME"
     ),
-    MethodSpec("afc", "AFC", "afc_nme_b50_inc5_resnet18.json", "NME"),
+    MethodSpec("afc", "AFC", "afc_nme_b50_inc5_resnet32.json", "NME"),
     MethodSpec(
         "create",
         "CREATE",
-        "create_native_b50_inc5_resnet18.json",
+        "create_native_b50_inc5_resnet32.json",
         "CNN",
     ),
-    MethodSpec("fgp", "FGP-ICL", "fgp_nme_b50_inc5_resnet18.json", "NME"),
+    MethodSpec("fgp", "FGP-ICL", "fgp_nme_b50_inc5_resnet32.json", "NME"),
     MethodSpec(
         "cscct",
         "iCaRL + CSCCT",
-        "icarl_cscct_nme_b50_inc5_resnet18.json",
+        "icarl_cscct_nme_b50_inc5_resnet32.json",
         "NME",
     ),
     MethodSpec(
         "casper",
         "iCaRL + CaSpeR",
-        "icarl_casper_nme_b50_inc5_resnet18.json",
+        "icarl_casper_nme_b50_inc5_resnet32.json",
         "NME",
     ),
     MethodSpec(
         "sacil",
         "Proto-SACIL",
-        "proto_sacil_nme_b50_inc5_resnet18.json",
+        "proto_sacil_nme_b50_inc5_resnet32.json",
         "NME",
     ),
 )
@@ -239,12 +241,12 @@ def build_report(
 
     timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
     lines = [
-        "# CIFAR-100 B50-Inc5 ResNet-18 Table 1 결과",
+        "# CIFAR-100 B50-Inc5 ResNet-32 Table 1 결과",
         "",
         f"- generated: `{timestamp}`",
         "- class order: AFC/PODNet order 1",
         "- sessions: base 50 classes + 10 increments × 5 classes (총 11 sessions)",
-        "- memory: fixed 2,000 exemplars, 20 exemplars/class",
+        "- memory: 20 exemplars/class, maximum 2,000 exemplars",
         "- seeds: 1, 2, 3",
         "- 표준편차: population standard deviation",
         "- CREATE만 논문 고유 reconstruction classifier(CNN column), "

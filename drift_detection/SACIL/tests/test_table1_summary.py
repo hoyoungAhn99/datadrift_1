@@ -40,7 +40,7 @@ def test_native_log_path_matches_pycil_logging_contract():
         / "cifar100"
         / "50"
         / "5"
-        / "table1_proto_sacil_nme_c100_b50_inc5_r18_1_resnet18.log"
+        / "table1_proto_sacil_nme_c100_b50_inc5_r32_1_resnet32.log"
     )
 
 

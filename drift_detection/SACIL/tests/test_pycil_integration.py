@@ -274,7 +274,7 @@ def test_pycil_table1_baseline_two_task_smoke(model_name):
         "device": [torch.device("cpu")],
         "dataset": "cifar100",
         "model_name": model_name,
-        "convnet_type": "resnet18",
+        "convnet_type": "resnet32",
         "batch_size": 16,
         "num_workers": 0,
         "pin_memory": False,
