@@ -1,0 +1,5 @@
+extends: _common_b50_inc5.yaml
+method:
+  name: finetune
+output:
+  run_name: finetune_nme_c100_b50_inc5_r32

@@ -23,6 +23,7 @@ class AFCMultiProxyClassifier(nn.Module):
         *,
         proxies_per_class: int = 10,
         gamma: float = 1.0,
+        distance_scale: float = 3.0,
     ) -> None:
         super().__init__()
         if feature_dim <= 0 or proxies_per_class <= 0:
@@ -32,6 +33,9 @@ class AFCMultiProxyClassifier(nn.Module):
         self.feature_dim = int(feature_dim)
         self.proxies_per_class = int(proxies_per_class)
         self.gamma = float(gamma)
+        self.distance_scale = float(distance_scale)
+        if self.distance_scale <= 0:
+            raise ValueError("distance_scale must be positive")
         self.class_chunks = [int(value) for value in class_chunks]
         self._weights = nn.ParameterList()
         for class_count in self.class_chunks:
@@ -74,7 +78,10 @@ class AFCMultiProxyClassifier(nn.Module):
         normalized_features = F.normalize(features, dim=1)
         normalized_weights = F.normalize(self.weights, dim=1)
         cosine = normalized_features @ normalized_weights.t()
-        proxy_similarities = 2.0 * cosine - 2.0
+        # PODNet/AFC use ``neg_stable_cosine_distance``.  Their released
+        # classifier first scales both normalized operands, so the negative
+        # squared distance is s^2 * (2 cos(theta) - 2), not plain cosine.
+        proxy_similarities = self.distance_scale**2 * (2.0 * cosine - 2.0)
         per_class = proxy_similarities.view(
             features.shape[0],
             self.num_classes,

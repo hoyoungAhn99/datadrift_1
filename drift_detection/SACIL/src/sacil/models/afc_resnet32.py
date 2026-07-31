@@ -21,7 +21,9 @@ class ChannelImportance(nn.Module):
 
     def __init__(self, num_channels: int) -> None:
         super().__init__()
-        self.register_buffer("importance", torch.ones(num_channels))
+        # The official AFC implementation starts from an empty accumulator and
+        # fills it only during the post-session importance pass.
+        self.register_buffer("importance", torch.zeros(num_channels))
         self._collecting = False
 
     def _accumulate(self, gradient: Tensor) -> None:

@@ -159,11 +159,47 @@ class CIFAR100DataModule:
             self.train_eval, indices, self.protocol, is_replay=False
         )
 
+    def train_dataset_for_classes(
+        self,
+        class_ids: Iterable[int],
+        *,
+        augment: bool = True,
+        samples_per_class: int | None = None,
+    ) -> CILIndexedSubset:
+        """Return a training split for arbitrary seen classes.
+
+        Unlike ``new_train_dataset`` this is also suitable for joint-training
+        upper bounds, which revisit the complete training data of every seen
+        class at each session.
+        """
+
+        indices = self._select_indices(
+            self.train_indices_by_class, class_ids, samples_per_class
+        )
+        dataset = self.train_aug if augment else self.train_eval
+        return CILIndexedSubset(
+            dataset, indices, self.protocol, is_replay=False
+        )
+
     def train_eval_dataset_from_indices(
         self, indices: Sequence[int], *, is_replay: bool = True
     ) -> CILIndexedSubset:
         return CILIndexedSubset(
             self.train_eval, indices, self.protocol, is_replay=is_replay
+        )
+
+    def train_dataset_from_indices(
+        self,
+        indices: Sequence[int],
+        *,
+        augment: bool = True,
+        is_replay: bool = False,
+    ) -> CILIndexedSubset:
+        """Return an augmented or deterministic training view of exact indices."""
+
+        dataset = self.train_aug if augment else self.train_eval
+        return CILIndexedSubset(
+            dataset, indices, self.protocol, is_replay=is_replay
         )
 
     def cumulative_test_dataset(

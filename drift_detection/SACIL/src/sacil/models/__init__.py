@@ -10,6 +10,17 @@ from .takp_resnet18 import (
     TaKPIncrementalNet,
     TaKPResNet18Backbone,
 )
+from .table1_models import (
+    CREATEIncrementalNet,
+    CSCCTIncrementalNet,
+    CSCCTResNet32,
+    ChunkedCosineClassifier,
+    ExpandableLinearNet,
+    FGPIncrementalNet,
+    FGPResNet32,
+    ScaleShiftConv2d,
+    Table1ForwardOutput,
+)
 
 __all__ = [
     "AFCBackboneOutput",
@@ -18,11 +29,20 @@ __all__ = [
     "AFCMultiProxyClassifier",
     "AFCResNet32",
     "CosineClassifier",
+    "CREATEIncrementalNet",
+    "CSCCTIncrementalNet",
+    "CSCCTResNet32",
+    "ChunkedCosineClassifier",
+    "ExpandableLinearNet",
+    "FGPIncrementalNet",
+    "FGPResNet32",
     "CifarResNet18",
     "IncrementalNet",
     "TaKPForwardOutput",
     "TaKPIncrementalNet",
     "TaKPResNet18Backbone",
+    "ScaleShiftConv2d",
+    "Table1ForwardOutput",
     "afc_resnet32",
     "kmeans_imprinted_weights",
     "resnet18",

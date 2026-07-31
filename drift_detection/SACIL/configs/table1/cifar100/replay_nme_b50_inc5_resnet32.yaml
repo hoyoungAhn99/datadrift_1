@@ -1,0 +1,5 @@
+extends: _common_b50_inc5.yaml
+method:
+  name: replay
+output:
+  run_name: replay_nme_c100_b50_inc5_r32

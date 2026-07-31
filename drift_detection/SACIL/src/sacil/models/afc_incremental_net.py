@@ -37,6 +37,7 @@ class AFCIncrementalNet(nn.Module):
         increment_size: int,
         proxies_per_class: int = 10,
         classifier_scale: float = 1.0,
+        distance_scale: float = 3.0,
     ) -> None:
         super().__init__()
         self.backbone: AFCResNet32 = afc_resnet32()
@@ -47,6 +48,7 @@ class AFCIncrementalNet(nn.Module):
             self.feature_dim,
             _class_chunks(num_classes, initial_size, increment_size),
             proxies_per_class=proxies_per_class,
+            distance_scale=distance_scale,
         )
         self.postprocessor_scale = nn.Parameter(
             torch.tensor(float(classifier_scale))

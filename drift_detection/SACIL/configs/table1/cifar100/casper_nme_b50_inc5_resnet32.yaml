@@ -1,0 +1,11 @@
+extends: _common_b50_inc5.yaml
+method:
+  name: casper
+  casper:
+    weight: 0.01
+    knn: 10
+    classes_per_graph: 5
+    replay_batch_size: 64
+    solver: partial
+output:
+  run_name: casper_nme_c100_b50_inc5_r32

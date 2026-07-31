@@ -1,0 +1,26 @@
+extends: _common_b50_inc5.yaml
+model:
+  backbone: rebuffi_resnet32
+  proxies_per_class: 10
+  distance_scale: 3.0
+  nca_scale: 1.0
+method:
+  name: podnet
+  podnet:
+    flat_weight: 1.0
+    spatial_weight: 5.0
+training:
+  base:
+    epochs: 160
+    lr: 0.1
+    momentum: 0.9
+    weight_decay: 0.0005
+    scheduler: cosine
+  incremental:
+    epochs: 160
+    lr: 0.1
+    momentum: 0.9
+    weight_decay: 0.0005
+    scheduler: cosine
+output:
+  run_name: podnet_nme_c100_b50_inc5_r32

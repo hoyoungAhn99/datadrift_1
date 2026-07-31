@@ -104,32 +104,28 @@ Each run records:
 The implementation plan and mathematical contract are in
 `mds/imp_plan/sacil_v0_core_hypothesis_implementation_plan.md`.
 
-## Official PyCIL integration
+## Standalone Table-1 suite
 
-The original `SACILTrainer` is retained for reproducing the early prototype
-experiments. New controlled CIL experiments can run SACIL as a plug-in on the
-official PyCIL toolbox:
+The active controlled-comparison path does not import or execute PyCIL.
+Dataset/session management, memory, model expansion, method-specific losses,
+NME evaluation, and checkpoints are implemented inside `src/sacil`.
+
+Validate or run SACIL with:
 
 ```powershell
-.\scripts\setup_pycil.ps1
-
 & 'C:\Users\user\anaconda3\envs\hoyoung\python.exe' `
-  scripts\train_pycil.py `
-  --config configs\pycil\cifar100\sacil_b50_inc5.json
+  scripts\train_table1.py `
+  configs\table1\cifar100\sacil_nme_b50_inc5_resnet32.yaml `
+  --device cuda:0 `
+  --seed 1
 ```
 
-The adapter uses PyCIL's `DataManager`, `BaseLearner`, `IncrementalNet`,
-classifier expansion, iCaRL herding, and evaluator. See
-`mds/experiments/pycil_integration.md` for the pinned framework revision,
-matched baselines, and protocol details.
-
-The controlled CIFAR-100 B50-Inc5 ResNet-18 Table-1 suite can be run with:
-
-```powershell
-.\scripts\run_pycil_table1.ps1 -Gpu 0
-```
-
-It includes Joint, Fine-tune, Replay-CE, iCaRL, PODNet, AFC, CREATE,
-FGP-ICL, iCaRL+CSCCT, iCaRL+CaSpeR, and Proto-SACIL. Method provenance,
-native/adapted protocol boundaries, and result aggregation are documented in
+The suite includes Joint, Fine-tune, Replay-CE, iCaRL, PODNet, AFC, CREATE,
+FGP-ICL, CSCCT, CaSpeR, and SACIL. CREATE retains its native ResNet-18 and
+reconstruction classifier; the remaining primary rows use their documented
+CIFAR ResNet-32 variants and NME. Commands and implementation boundaries are
+documented in `mds/experiments/table1_powershell_commands.md` and
 `mds/experiments/table1_baseline_implementation.md`.
+
+The earlier PyCIL adapter is retained only as a legacy reproduction path. It
+is not used by `scripts/train_table1.py` or the standalone Table-1 configs.

@@ -37,6 +37,22 @@ class ExemplarMemory:
             raise ValueError("duplicate exemplar index")
         self._indices[int(class_id)] = normalized
 
+    def resize_limit(self, exemplars_per_class: int) -> None:
+        """Change the per-class limit and deterministically trim old sets.
+
+        This is needed for methods whose official protocol keeps a fixed
+        total budget (for example PODNet/AFC with M=2,000).  Existing exemplar
+        order is the herding priority order, so retaining the prefix matches
+        the reference implementations.
+        """
+
+        limit = int(exemplars_per_class)
+        if limit <= 0:
+            raise ValueError("exemplars_per_class must be positive")
+        self.exemplars_per_class = limit
+        for class_id in tuple(self._indices):
+            self._indices[class_id] = self._indices[class_id][:limit]
+
     def state_dict(self) -> dict:
         return {
             "exemplars_per_class": self.exemplars_per_class,
@@ -52,4 +68,3 @@ class ExemplarMemory:
         for class_id, indices in state["indices"].items():
             memory.set_class_indices(int(class_id), list(indices))
         return memory
-
