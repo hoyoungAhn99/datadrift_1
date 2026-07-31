@@ -386,6 +386,14 @@ class SACIL(BaseLearner):
             )
         return classifier.weight.detach().cpu()
 
+    def _taxonomy_class_references(self, prototypes: Tensor) -> Tensor:
+        if self.classification_mode == "prototype_ce":
+            # Prototype CE never optimizes the frozen FC head.  Its taxonomy
+            # must therefore use the same post-hoc class representatives as
+            # training/inference instead of arbitrary FC directions.
+            return prototypes.detach().cpu()
+        return self._classifier_weights()
+
     def _incoming_prototypes(self, data_manager) -> Tensor:
         dataset = data_manager.get_dataset(
             np.arange(self._known_classes, self._total_classes),
@@ -651,7 +659,7 @@ class SACIL(BaseLearner):
         confusion = cosine_soft_confusion(
             collection.features,
             collection.targets,
-            self._classifier_weights(),
+            self._taxonomy_class_references(prototype_tensor),
             temperature=self.taxonomy_temperature,
         )
         tree = GriffinPeronaGreedy().build(

@@ -155,7 +155,7 @@ def test_pycil_runtime_registers_all_table1_baselines():
 @pytest.mark.skipif(
     not PYCIL_ROOT.is_dir(), reason="official PyCIL checkout is unavailable"
 )
-def test_pycil_sacil_two_task_smoke(tmp_path):
+def test_pycil_sacil_two_task_smoke(tmp_path, monkeypatch):
     activate_pycil(
         {
             "dataset": "cifar100",
@@ -163,7 +163,36 @@ def test_pycil_sacil_two_task_smoke(tmp_path):
         },
         pycil_root=PYCIL_ROOT,
     )
+    import sacil.pycil.learner as learner_module
+
+    from sacil.anchors import compute_prototypes
     from utils import factory
+
+    observed_reference_counts = []
+    original_soft_confusion = learner_module.cosine_soft_confusion
+
+    def prototype_reference_spy(
+        features, targets, class_references, temperature
+    ):
+        expected = compute_prototypes(
+            features,
+            targets,
+            range(class_references.shape[0]),
+        )
+        assert torch.allclose(class_references, expected)
+        observed_reference_counts.append(class_references.shape[0])
+        return original_soft_confusion(
+            features,
+            targets,
+            class_references,
+            temperature=temperature,
+        )
+
+    monkeypatch.setattr(
+        learner_module,
+        "cosine_soft_confusion",
+        prototype_reference_spy,
+    )
 
     args = {
         "memory_size": 4,
@@ -201,6 +230,7 @@ def test_pycil_sacil_two_task_smoke(tmp_path):
     assert learner._conflict_weights is not None
     assert learner._artifacts.tree.num_leaves == 4
     assert learner._training_prototypes is not None
+    assert observed_reference_counts == [2, 4]
     assert all(
         not parameter.requires_grad
         for parameter in learner._network.fc.parameters()
