@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import importlib
 import json
+import random
 import sys
 from pathlib import Path
 from typing import Any
@@ -182,24 +183,47 @@ def _install_sacil_factory() -> None:
                 "sacil.pycil.learner"
             )
             return learner_module.SACIL(args)
-        table1_module = importlib.import_module(
-            "sacil.methods.pycil_table1"
-        )
-        if normalized in table1_module.table1_model_names():
-            return table1_module.get_table1_model(normalized, args)
+
+        # Every non-SACIL name is resolved by the unmodified upstream
+        # factory.  In particular, do not route stock names such as
+        # ``finetune`` or aliases such as ``table1_finetune`` through a local
+        # reimplementation.  Method-faithful baselines and controlled SACIL
+        # extensions deliberately have separate code paths.
         model = original(model_name, args)
-        # Stock PyCIL learners keep these loader settings as module globals.
-        # Runtime overrides let matched experiments avoid Windows' expensive
-        # per-epoch worker spawning without changing the learning algorithm.
+
+        # Stock PyCIL learners keep the worker count as a module global.
+        # Overriding only this operational setting avoids Windows process
+        # spawning overhead.  Batch size, optimizer, schedule, losses, and
+        # parameter selection remain exactly as defined by upstream PyCIL.
         model_module = importlib.import_module(model.__class__.__module__)
-        for name in ("batch_size", "num_workers"):
-            if name in args and hasattr(model_module, name):
-                setattr(model_module, name, int(args[name]))
+        if "num_workers" in args and hasattr(model_module, "num_workers"):
+            setattr(model_module, "num_workers", int(args["num_workers"]))
         return model
 
     factory.get_model = get_model
     factory._sacil_factory_installed = True
     factory._sacil_original_get_model = original
+
+
+def _validate_implementation_contract(config: dict[str, Any]) -> None:
+    """Reject configs that blur official and project-owned implementations."""
+
+    source = str(config.get("implementation_source", "")).lower()
+    model_name = str(config.get("model_name", "")).lower()
+    custom = model_name in {"sacil", "pycil_sacil"}
+    if source == "official_pycil" and custom:
+        raise ValueError(
+            "official_pycil configs must use a stock PyCIL model name"
+        )
+    if source == "sacil_pycil_extension" and not custom:
+        raise ValueError(
+            "sacil_pycil_extension configs must use model_name='sacil'"
+        )
+    if source and source not in {
+        "official_pycil",
+        "sacil_pycil_extension",
+    }:
+        raise ValueError(f"unknown implementation_source: {source}")
 
 
 def _configure_base_memory_loader(config: dict[str, Any]) -> None:
@@ -258,6 +282,45 @@ def _configure_task_limit(config: dict[str, Any]) -> None:
     data_manager_module.DataManager = LimitedDataManager
 
 
+def _configure_seed_policy(config: dict[str, Any], trainer_module) -> None:
+    """Make an opt-in PyCIL run use the seed recorded in its config.
+
+    Upstream PyCIL accepts a seed list but its trainer-level RNG helper always
+    seeds torch with the literal value 1.  That makes repeated fixed-order
+    runs identical.  The ``config`` policy fixes only experiment seeding; it
+    does not alter any learner algorithm or optimization hyperparameter.
+    """
+
+    policy = str(config.get("seed_policy", "upstream_fixed_1")).lower()
+    if policy == "upstream_fixed_1":
+        return
+    if policy != "config":
+        raise ValueError(f"unknown seed_policy: {policy}")
+
+    def set_random_from_config() -> None:
+        seed_value = config.get("seed")
+        if isinstance(seed_value, list):
+            if len(seed_value) != 1:
+                raise ValueError(
+                    "seed_policy=config requires one active seed per run"
+                )
+            seed_value = seed_value[0]
+        seed = int(seed_value)
+        random.seed(seed)
+        np.random.seed(seed)
+
+        import torch
+
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+    trainer_module._set_random = set_random_from_config
+
+
 def activate_pycil(
     config: dict[str, Any], *, pycil_root: str | Path
 ) -> dict[str, Any]:
@@ -283,6 +346,7 @@ def activate_pycil(
 
     data_module = importlib.import_module("utils.data")
     resolved = copy.deepcopy(config)
+    _validate_implementation_contract(resolved)
     _configure_data_root(resolved, data_module)
     _configure_class_order(resolved, data_module)
     _configure_task_limit(resolved)
@@ -297,4 +361,5 @@ def run_pycil_experiment(
 ) -> None:
     resolved = activate_pycil(config, pycil_root=pycil_root)
     trainer = importlib.import_module("trainer")
+    _configure_seed_policy(resolved, trainer)
     trainer.train(resolved)

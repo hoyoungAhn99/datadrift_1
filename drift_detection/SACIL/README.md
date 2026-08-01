@@ -104,24 +104,23 @@ Each run records:
 The implementation plan and mathematical contract are in
 `mds/imp_plan/sacil_v0_core_hypothesis_implementation_plan.md`.
 
-## Standalone Table-1 suite
+## Official baselines and controlled SACIL
 
-The active controlled-comparison path does not import or execute PyCIL.
-Dataset/session management, memory, model expansion, method-specific losses,
-NME evaluation, and checkpoints are implemented inside `src/sacil`.
-
-Validate or run SACIL with:
+Paper-facing baselines use stock PyCIL learners whenever PyCIL supports the
+method. The runtime registers only the SACIL extension; it no longer replaces
+Fine-tune, Replay, iCaRL, or PODNet with local reimplementations.
 
 ```powershell
-python scripts\train_table1.py configs\table1\cifar100\sacil_nme_b50_inc5_resnet32.yaml --device cuda:0 --seed 1
+python scripts\train_pycil.py --config configs\pycil\official\cifar100\icarl_b50_inc5_resnet32.json --device 0 --seed 1
+python scripts\train_pycil.py --config configs\pycil\controlled\cifar100\sacil_nme_b50_inc5_resnet32.json --device 0 --seed 1
 ```
 
-The suite includes Joint, Fine-tune, Replay-CE, iCaRL, PODNet, AFC, CREATE,
-FGP-ICL, CSCCT, CaSpeR, and SACIL. CREATE retains its native ResNet-18 and
-reconstruction classifier; the remaining primary rows use their documented
-CIFAR ResNet-32 variants and NME. Commands and implementation boundaries are
-documented in `mds/experiments/table1_powershell_commands.md` and
-`mds/experiments/table1_baseline_implementation.md`.
+The controlled geometry comparison uses one prototype-CE/NME learner and
+changes only `geometry_mode`: none, global, flat, or SACIL. Author-provided
+repositories are used directly for methods absent from PyCIL. Commands and
+implementation boundaries are documented in
+`mds/experiments/table1_powershell_commands.md` and
+`mds/experiments/table1_experiment_design.md`.
 
-The earlier PyCIL adapter is retained only as a legacy reproduction path. It
-is not used by `scripts/train_table1.py` or the standalone Table-1 configs.
+The standalone Table-1 runner is retained only for legacy diagnostics. Its
+outputs are excluded from paper-facing summaries.

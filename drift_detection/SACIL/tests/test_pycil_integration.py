@@ -119,9 +119,15 @@ def test_pycil_runtime_registers_sacil_and_explicit_order(tmp_path):
 @pytest.mark.skipif(
     not PYCIL_ROOT.is_dir(), reason="official PyCIL checkout is unavailable"
 )
-def test_pycil_runtime_registers_all_table1_baselines():
+def test_pycil_runtime_preserves_stock_baseline_classes():
     activate_pycil(
-        {"dataset": "cifar100", "shuffle": False},
+        {
+            "dataset": "cifar100",
+            "shuffle": False,
+            "num_workers": 0,
+            # A stock learner must ignore this project-side batch-size value.
+            "batch_size": 7,
+        },
         pycil_root=PYCIL_ROOT,
     )
     from utils import factory
@@ -135,21 +141,23 @@ def test_pycil_runtime_registers_all_table1_baselines():
         "num_workers": 0,
     }
     expected = {
-        "table1_joint": "joint",
-        "table1_finetune": "finetune",
-        "table1_replay": "replay",
-        "table1_icarl": "icarl",
-        "table1_podnet": "podnet",
-        "table1_afc": "afc",
-        "table1_create": "create",
-        "table1_fgp": "fgp",
-        "table1_cscct": "cscct",
-        "table1_casper": "casper",
+        "finetune": ("models.finetune", "Finetune"),
+        "replay": ("models.replay", "Replay"),
+        "icarl": ("models.icarl", "iCaRL"),
+        "podnet": ("models.podnet", "PODNet"),
     }
-    for model_name, method_name in expected.items():
+    for model_name, (module_name, class_name) in expected.items():
         learner = factory.get_model(model_name, dict(args))
-        assert learner.method == method_name
+        assert learner.__class__.__module__ == module_name
+        assert learner.__class__.__name__ == class_name
         assert learner.feature_dim == 64
+
+    import models.finetune as upstream_finetune
+
+    assert upstream_finetune.num_workers == 0
+    assert upstream_finetune.batch_size == 128
+    with pytest.raises(AssertionError):
+        factory.get_model("table1_finetune", dict(args))
 
 
 @pytest.mark.skipif(
@@ -240,77 +248,6 @@ def test_pycil_sacil_two_task_smoke(tmp_path, monkeypatch):
     assert cnn["top1"] == nme["top1"]
     assert (tmp_path / "tree_task_00.json").is_file()
     assert (tmp_path / "tree_task_01.json").is_file()
-
-
-@pytest.mark.parametrize(
-    "model_name",
-    [
-        "table1_joint",
-        "table1_finetune",
-        "table1_replay",
-        "table1_icarl",
-        "table1_podnet",
-        "table1_afc",
-        "table1_create",
-        "table1_fgp",
-        "table1_cscct",
-        "table1_casper",
-    ],
-)
-@pytest.mark.skipif(
-    not PYCIL_ROOT.is_dir(), reason="official PyCIL checkout is unavailable"
-)
-def test_pycil_table1_baseline_two_task_smoke(model_name):
-    activate_pycil(
-        {"dataset": "cifar100", "shuffle": False},
-        pycil_root=PYCIL_ROOT,
-    )
-    from utils import factory
-
-    args = {
-        "memory_size": 4,
-        "memory_per_class": 1,
-        "fixed_memory": True,
-        "device": [torch.device("cpu")],
-        "dataset": "cifar100",
-        "model_name": model_name,
-        "convnet_type": "resnet32",
-        "batch_size": 16,
-        "num_workers": 0,
-        "pin_memory": False,
-        "init_epochs": 1,
-        "epochs": 1,
-        "init_milestones": [],
-        "milestones": [],
-        "eval_interval": 0,
-        "disable_tqdm": True,
-        "max_batches_per_epoch": 1,
-        "finetune_epochs": 0,
-        "proxy_per_class": 1,
-        "casper_k": 1,
-    }
-    learner = factory.get_model(model_name, args)
-    manager = _TinyDataManager()
-
-    learner.incremental_train(manager)
-    learner.after_task()
-    learner.incremental_train(manager)
-
-    assert learner._total_classes == 4
-    assert learner.exemplar_size == 4
-    if model_name == "table1_cscct":
-        scale_shift_layers = [
-            module
-            for module in learner._network.convnet.modules()
-            if type(module).__name__ == "_ScaleShiftConv2d"
-        ]
-        assert scale_shift_layers
-        assert all(
-            not layer.weight.requires_grad for layer in scale_shift_layers
-        )
-        assert all(
-            layer.mtl_weight.requires_grad for layer in scale_shift_layers
-        )
 
 
 @pytest.mark.skipif(
