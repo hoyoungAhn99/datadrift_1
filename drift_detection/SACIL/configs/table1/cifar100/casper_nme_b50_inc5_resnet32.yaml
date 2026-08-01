@@ -2,10 +2,27 @@ extends: _common_b50_inc5.yaml
 method:
   name: casper
   casper:
-    weight: 0.01
-    knn: 10
-    classes_per_graph: 5
+    weight: 0.001
+    knn: 8
+    classes_per_graph: 8
     replay_batch_size: 64
     solver: partial
+    wd_reg: 0.00001
+training:
+  batch_size: 64
+  base:
+    epochs: 20
+    lr: 0.3
+    momentum: 0.0
+    weight_decay: 0.0
+    scheduler: multistep
+    milestones: []
+  incremental:
+    epochs: 20
+    lr: 0.3
+    momentum: 0.0
+    weight_decay: 0.0
+    scheduler: multistep
+    milestones: []
 output:
-  run_name: casper_nme_c100_b50_inc5_r32
+  run_name: casper_paper_hparams_nme_c100_b50_inc5_r32

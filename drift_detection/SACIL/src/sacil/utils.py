@@ -67,7 +67,24 @@ def git_commit(root: str | Path) -> str | None:
 def resolved_device(requested: str) -> torch.device:
     if requested.startswith("cuda") and not torch.cuda.is_available():
         return torch.device("cpu")
-    return torch.device(requested)
+    device = torch.device(requested)
+    if device.type == "cuda" and device.index is not None:
+        visible_count = torch.cuda.device_count()
+        if device.index >= visible_count:
+            visibility = os.environ.get("CUDA_VISIBLE_DEVICES")
+            visibility_note = (
+                "not set"
+                if visibility is None or visibility == ""
+                else repr(visibility)
+            )
+            raise ValueError(
+                f"requested {device}, but this Python process sees only "
+                f"{visible_count} CUDA device(s). CUDA_VISIBLE_DEVICES is "
+                f"{visibility_note}. Clear CUDA_VISIBLE_DEVICES and use the "
+                "physical index, or keep it set and use the remapped logical "
+                "index (usually cuda:0)."
+            )
+    return device
 
 
 def atomic_torch_save(payload: Any, path: str | Path) -> None:
@@ -76,4 +93,3 @@ def atomic_torch_save(payload: Any, path: str | Path) -> None:
     temporary = destination.with_suffix(destination.suffix + ".tmp")
     torch.save(payload, temporary)
     os.replace(temporary, destination)
-

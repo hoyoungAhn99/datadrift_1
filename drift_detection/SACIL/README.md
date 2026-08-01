@@ -113,11 +113,7 @@ NME evaluation, and checkpoints are implemented inside `src/sacil`.
 Validate or run SACIL with:
 
 ```powershell
-& 'C:\Users\user\anaconda3\envs\hoyoung\python.exe' `
-  scripts\train_table1.py `
-  configs\table1\cifar100\sacil_nme_b50_inc5_resnet32.yaml `
-  --device cuda:0 `
-  --seed 1
+python scripts\train_table1.py configs\table1\cifar100\sacil_nme_b50_inc5_resnet32.yaml --device cuda:0 --seed 1
 ```
 
 The suite includes Joint, Fine-tune, Replay-CE, iCaRL, PODNet, AFC, CREATE,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 from torch import Tensor
+from torch import nn
 from torch.nn import functional as F
 
 
@@ -81,3 +82,19 @@ def icarl_bce_loss(
     ).to(dtype=logits.dtype, device=logits.device)
     return F.binary_cross_entropy_with_logits(logits, combined_targets)
 
+
+def parameter_l2_regularization(
+    model: nn.Module, coefficient: float
+) -> Tensor:
+    """CaSpeR iCaRL's explicit ``wd_reg * sum(theta**2)`` penalty."""
+
+    value = float(coefficient)
+    if value < 0:
+        raise ValueError("L2 regularization coefficient must be non-negative")
+    parameters = tuple(model.parameters())
+    if not parameters:
+        raise ValueError("L2 regularization requires model parameters")
+    penalty = parameters[0].new_zeros(())
+    for parameter in parameters:
+        penalty = penalty + parameter.float().square().sum()
+    return value * penalty

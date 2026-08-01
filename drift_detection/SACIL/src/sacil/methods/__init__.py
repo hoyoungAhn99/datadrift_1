@@ -19,7 +19,11 @@ from .fgp import (
     scheduled_fgp_weight,
 )
 from .global_hap import AnchorGeometryLoss
-from .icarl import icarl_bce_loss, icarl_distillation_targets
+from .icarl import (
+    icarl_bce_loss,
+    icarl_distillation_targets,
+    parameter_l2_regularization,
+)
 from .logit_kd import old_logit_kl_loss
 from .podnet import (
     pod_flat_loss,
@@ -68,6 +72,7 @@ __all__ = [
     "global_preservation_weights",
     "icarl_bce_loss",
     "icarl_distillation_targets",
+    "parameter_l2_regularization",
     "load_frozen_ripsnet",
     "method_uses_afc",
     "method_uses_dual_rebalancing",

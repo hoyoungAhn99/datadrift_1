@@ -14,6 +14,7 @@ from sacil.methods import (
     fgp_graph_preservation_loss,
     icarl_bce_loss,
     icarl_distillation_targets,
+    parameter_l2_regularization,
     pod_flat_loss,
     pod_spatial_loss,
     podnet_nca_loss,
@@ -51,6 +52,19 @@ def test_icarl_bce_matches_explicit_combined_target():
     assert torch.allclose(actual, expected)
     actual.backward()
     assert torch.isfinite(logits.grad).all()
+
+
+def test_parameter_l2_regularization_matches_casper_formula():
+    model = torch.nn.Linear(2, 1)
+    with torch.no_grad():
+        model.weight.copy_(torch.tensor([[1.0, -2.0]]))
+        model.bias.copy_(torch.tensor([3.0]))
+
+    loss = parameter_l2_regularization(model, 1e-5)
+    assert torch.allclose(loss, torch.tensor(14e-5))
+    loss.backward()
+    assert torch.allclose(model.weight.grad, 2e-5 * model.weight)
+    assert torch.allclose(model.bias.grad, 2e-5 * model.bias)
 
 
 def test_podnet_losses_are_zero_for_identical_representations():

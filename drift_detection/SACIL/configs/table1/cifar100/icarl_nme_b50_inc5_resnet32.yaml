@@ -1,5 +1,23 @@
 extends: _common_b50_inc5.yaml
 method:
   name: icarl
+training:
+  batch_size: 128
+  base:
+    epochs: 70
+    lr: 2.0
+    momentum: 0.9
+    weight_decay: 0.00001
+    scheduler: multistep
+    milestones: [49, 63]
+    lr_decay: 0.2
+  incremental:
+    epochs: 70
+    lr: 2.0
+    momentum: 0.9
+    weight_decay: 0.00001
+    scheduler: multistep
+    milestones: [49, 63]
+    lr_decay: 0.2
 output:
-  run_name: icarl_nme_c100_b50_inc5_r32
+  run_name: icarl_original_hparams_nme_c100_b50_inc5_r32

@@ -47,6 +47,7 @@ from sacil.methods import (
     fgp_graph_preservation_loss,
     icarl_bce_loss,
     old_logit_kl_loss,
+    parameter_l2_regularization,
     pod_flat_loss,
     pod_spatial_loss,
     podnet_nca_loss,
@@ -676,6 +677,12 @@ class StandaloneTable1Trainer:
                     known_classes=known,
                 )
                 components = {"classification": loss}
+                if self.method == "casper":
+                    casper = self.config["method"].get("casper", {})
+                    components["regularization"] = parameter_l2_regularization(
+                        self.model,
+                        float(casper.get("wd_reg", 1e-5)),
+                    )
                 if self.method == "casper" and replay_images is not None:
                     casper = self.config["method"].get("casper", {})
                     replay_features = self.model.extract_features(replay_images)

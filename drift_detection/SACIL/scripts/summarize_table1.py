@@ -28,15 +28,15 @@ class MethodSpec:
 
 METHODS = (
     MethodSpec("Joint (upper bound)", "joint_nme_c100_b50_inc5_r32", "NME", "ResNet-32"),
-    MethodSpec("Fine-tune", "finetune_nme_c100_b50_inc5_r32", "NME", "ResNet-32"),
-    MethodSpec("Replay-CE", "replay_nme_c100_b50_inc5_r32", "NME", "ResNet-32"),
-    MethodSpec("iCaRL", "icarl_nme_c100_b50_inc5_r32", "NME", "ResNet-32"),
+    MethodSpec("Fine-tune", "finetune_reference_hparams_nme_c100_b50_inc5_r32", "NME", "ResNet-32"),
+    MethodSpec("Replay-CE", "replay_reference_hparams_nme_c100_b50_inc5_r32", "NME", "ResNet-32"),
+    MethodSpec("iCaRL", "icarl_original_hparams_nme_c100_b50_inc5_r32", "NME", "ResNet-32"),
     MethodSpec("PODNet", "podnet_nme_c100_b50_inc5_r32", "NME", "Rebuffi ResNet-32"),
     MethodSpec("AFC", "afc_nme_c100_b50_inc5_r32", "NME", "Rebuffi ResNet-32"),
     MethodSpec("CREATE", "create_native_c100_b50_inc5_r18", "Native", "ResNet-18"),
     MethodSpec("FGP-ICL", "fgp_nme_c100_b50_inc5_r32", "NME", "FGP ResNet-32"),
-    MethodSpec("CSCCT", "cscct_nme_c100_b50_inc5_r32", "NME", "CSCCT ResNet-32"),
-    MethodSpec("CaSpeR", "casper_nme_c100_b50_inc5_r32", "NME", "ResNet-32"),
+    MethodSpec("iCaRL + CSCCT", "cscct_nme_c100_b50_inc5_r32", "NME", "CSCCT ResNet-32"),
+    MethodSpec("iCaRL + CaSpeR", "casper_paper_hparams_nme_c100_b50_inc5_r32", "NME", "ResNet-32"),
     MethodSpec("SACIL", "sacil_nme_c100_b50_inc5_r32", "NME", "ResNet-32"),
 )
 
