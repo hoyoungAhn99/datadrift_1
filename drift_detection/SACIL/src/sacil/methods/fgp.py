@@ -60,7 +60,15 @@ class RectifiedCosineLinear(nn.Module):
 def pairwise_squared_euclidean(left: Tensor, right: Tensor) -> Tensor:
     if left.ndim != 2 or right.ndim != 2 or left.shape[1] != right.shape[1]:
         raise ValueError("pairwise distance inputs must have matching features")
-    return torch.cdist(left, right, p=2).square()
+    # FGP author release ``FGP._Euclidean``.  Keep the addmm computation
+    # instead of replacing it with torch.cdist: the latter has multiple
+    # kernels and does not guarantee the same floating-point trajectory.
+    distances = left.pow(2).sum(dim=1, keepdim=True).expand(
+        len(left), len(right)
+    ) + right.pow(2).sum(dim=1, keepdim=True).expand(
+        len(right), len(left)
+    ).T
+    return distances.addmm(left, right.T, beta=1.0, alpha=-2.0)
 
 
 def fgp_graph_preservation_loss(
@@ -99,4 +107,3 @@ def scheduled_fgp_weight(
     if known_classes <= 0 or total_classes < known_classes:
         raise ValueError("invalid FGP class counts")
     return float(base_weight) * math.sqrt(known_classes / total_classes)
-

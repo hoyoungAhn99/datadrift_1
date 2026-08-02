@@ -21,9 +21,14 @@ class ChannelImportance(nn.Module):
 
     def __init__(self, num_channels: int) -> None:
         super().__init__()
-        # The official AFC implementation starts from an empty accumulator and
-        # fills it only during the post-session importance pass.
-        self.register_buffer("importance", torch.zeros(num_channels))
+        # Keep the author implementation's RNG consumption as well as its
+        # final value.  Constructing with ones changes the random stream for
+        # every convolution initialized after this module.
+        self.scale = nn.Parameter(
+            torch.randn(num_channels), requires_grad=False
+        )
+        nn.init.constant_(self.scale, 1.0)
+        self.register_buffer("importance", torch.zeros_like(self.scale))
         self._collecting = False
 
     def _accumulate(self, gradient: Tensor) -> None:
@@ -33,9 +38,13 @@ class ChannelImportance(nn.Module):
         self.importance.add_(values.mean(dim=0))
 
     def forward(self, inputs: Tensor) -> Tensor:
-        if self._collecting and inputs.requires_grad:
-            inputs.register_hook(self._accumulate)
-        return inputs
+        if inputs.ndim == 4:
+            outputs = inputs * self.scale.reshape(1, -1, 1, 1)
+        else:
+            outputs = inputs * self.scale.reshape(1, -1)
+        if self._collecting and outputs.requires_grad:
+            outputs.register_hook(self._accumulate)
+        return outputs
 
     def reset(self) -> None:
         self.importance.zero_()

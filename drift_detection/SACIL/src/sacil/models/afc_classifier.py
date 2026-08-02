@@ -75,13 +75,29 @@ class AFCMultiProxyClassifier(nn.Module):
         return tuple(self._weights[:-1])
 
     def forward(self, features: Tensor) -> Tensor:
-        normalized_features = F.normalize(features, dim=1)
-        normalized_weights = F.normalize(self.weights, dim=1)
-        cosine = normalized_features @ normalized_weights.t()
-        # PODNet/AFC use ``neg_stable_cosine_distance``.  Their released
-        # classifier first scales both normalized operands, so the negative
-        # squared distance is s^2 * (2 cos(theta) - 2), not plain cosine.
-        proxy_similarities = self.distance_scale**2 * (2.0 * cosine - 2.0)
+        normalized_features = self.distance_scale * F.normalize(
+            features, p=2, dim=-1
+        )
+        normalized_weights = self.distance_scale * F.normalize(
+            self.weights, p=2, dim=-1
+        )
+        # Exact AFC ``-stable_cosine_distance`` implementation, including
+        # its clamp/mask behavior around zero distances.
+        combined = torch.cat((normalized_features, normalized_weights))
+        squared = torch.add(
+            combined.pow(2).sum(dim=1, keepdim=True).expand(combined.size(0), -1),
+            combined.T.pow(2).sum(dim=0, keepdim=True).expand(combined.size(0), -1),
+        ) - 2 * (combined @ combined.T)
+        squared = torch.clamp(squared, min=0.0)
+        error_mask = squared <= 0.0
+        squared = squared * (~error_mask).float()
+        off_diagonal = 1 - torch.eye(
+            *squared.size(), device=squared.device
+        )
+        squared = squared * off_diagonal
+        proxy_similarities = -squared[
+            : normalized_features.shape[0], normalized_features.shape[0] :
+        ]
         per_class = proxy_similarities.view(
             features.shape[0],
             self.num_classes,
@@ -108,13 +124,13 @@ def kmeans_imprinted_weights(
     reference_weights: Tensor,
     *,
     proxies_per_class: int,
-    random_state: int,
+    random_state: int | None = None,
 ) -> Tensor:
     if not class_features:
         raise ValueError("at least one class feature tensor is required")
     average_norm = reference_weights.detach().float().norm(dim=1).mean()
     result = []
-    for offset, features in enumerate(class_features):
+    for features in class_features:
         if features.ndim != 2:
             raise ValueError("class features must be matrices")
         if features.shape[0] < proxies_per_class:
@@ -122,8 +138,6 @@ def kmeans_imprinted_weights(
         normalized = F.normalize(features.detach().float(), dim=1)
         clusterer = KMeans(
             n_clusters=int(proxies_per_class),
-            n_init=10,
-            random_state=int(random_state) + offset,
         )
         centers = clusterer.fit(normalized.cpu().numpy()).cluster_centers_
         centers_tensor = torch.from_numpy(

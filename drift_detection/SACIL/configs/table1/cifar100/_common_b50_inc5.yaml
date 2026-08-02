@@ -3,6 +3,11 @@ deterministic: true
 device: cuda:0
 disable_tqdm: false
 
+comparison_contract:
+  name: annotation_1_cifar100_b50_inc5
+  implementation: in_repo_unified
+  reference_code_policy: reference_only
+
 data:
   name: cifar100
   root: datasets
@@ -48,5 +53,5 @@ training:
     lr_decay: 0.1
 
 output:
-  directory: outputs/standalone/table1
+  directory: outputs/unified/table1
   run_name: replace_me

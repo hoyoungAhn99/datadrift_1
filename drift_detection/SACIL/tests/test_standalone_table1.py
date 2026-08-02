@@ -12,6 +12,11 @@ from sacil.engine.table1_trainer import (
     StandaloneTable1Trainer,
 )
 from sacil.methods import casper_spectral_loss
+from sacil.methods import (
+    pycil_finetune_loss,
+    pycil_icarl_kd_loss,
+    unified_method_contract,
+)
 from sacil.models import (
     AFCMultiProxyClassifier,
     CREATEIncrementalNet,
@@ -20,6 +25,7 @@ from sacil.models import (
     FGPResNet32,
     ScaleShiftConv2d,
 )
+from sacil.config import load_config_tree
 
 
 def test_afc_classifier_matches_scaled_negative_cosine_distance() -> None:
@@ -117,6 +123,52 @@ def test_standalone_runner_import_graph_does_not_reference_pycil() -> None:
     assert not any("pycil" in module.lower() for module in imported)
 
 
+def test_unified_reference_paths_are_metadata_only() -> None:
+    root = Path(__file__).resolve().parents[1]
+    sources = (
+        root / "scripts" / "train_table1.py",
+        root / "src" / "sacil" / "engine" / "table1_trainer.py",
+    )
+    for source in sources:
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        names = {
+            node.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name)
+        }
+        assert "subprocess" not in names
+        assert "importlib" not in names
+    contract = unified_method_contract("create")
+    assert contract.reference_only is True
+    assert contract.implementation_module == "sacil.methods.create"
+    assert contract.evaluation_classifier == "native_reconstruction_error"
+
+
+def test_pycil_finetune_uses_only_the_new_head_slice() -> None:
+    logits = torch.tensor(
+        [[100.0, 90.0, 1.0, 2.0], [80.0, 70.0, 3.0, 1.0]],
+        requires_grad=True,
+    )
+    targets = torch.tensor([3, 2])
+    expected = F.cross_entropy(logits[:, 2:], targets - 2)
+    actual = pycil_finetune_loss(logits, targets, known_classes=2)
+    assert torch.allclose(actual, expected)
+
+
+def test_unified_icarl_matches_pycil_softmax_kd_without_t_squared() -> None:
+    current = torch.tensor([[2.0, 0.0], [0.5, 1.5]])
+    reference = torch.tensor([[1.0, -1.0], [1.5, 0.5]])
+    temperature = 2.0
+    expected = -(
+        F.softmax(reference / temperature, dim=1)
+        * F.log_softmax(current / temperature, dim=1)
+    ).sum() / current.shape[0]
+    actual = pycil_icarl_kd_loss(
+        current, reference, temperature=temperature
+    )
+    assert torch.allclose(actual, expected)
+
+
 def test_standalone_runner_refuses_to_append_to_existing_run(tmp_path) -> None:
     trainer = StandaloneTable1Trainer.__new__(StandaloneTable1Trainer)
     trainer.run_dir = tmp_path
@@ -126,3 +178,26 @@ def test_standalone_runner_refuses_to_append_to_existing_run(tmp_path) -> None:
 
     with pytest.raises(FileExistsError, match="new --run-name"):
         trainer.run()
+
+
+def test_recursive_config_extends_preserves_method_and_debug_overrides(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "base.yaml"
+    method = tmp_path / "method.yaml"
+    validation = tmp_path / "validation.yaml"
+    base.write_text("training:\n  base:\n    epochs: 200\n", encoding="utf-8")
+    method.write_text(
+        "extends: base.yaml\nmethod:\n  name: replay\n",
+        encoding="utf-8",
+    )
+    validation.write_text(
+        "extends: method.yaml\n"
+        "training:\n  base:\n    epochs: 2\n"
+        "debug:\n  max_sessions: 2\n",
+        encoding="utf-8",
+    )
+    config = load_config_tree(validation)
+    assert config["method"]["name"] == "replay"
+    assert config["training"]["base"]["epochs"] == 2
+    assert config["debug"]["max_sessions"] == 2

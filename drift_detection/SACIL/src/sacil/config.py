@@ -19,6 +19,26 @@ def load_config(path: str | Path) -> dict[str, Any]:
     return config
 
 
+def load_config_tree(
+    path: str | Path,
+    *,
+    _chain: tuple[Path, ...] = (),
+) -> dict[str, Any]:
+    """Load a YAML config and recursively resolve its ``extends`` chain."""
+
+    source = Path(path).expanduser().resolve()
+    if source in _chain:
+        cycle = " -> ".join(str(item) for item in (*_chain, source))
+        raise ValueError(f"configuration inheritance cycle: {cycle}")
+    config = load_config(source)
+    parent = config.pop("extends", None)
+    if parent is None:
+        return config
+    parent_path = (source.parent / str(parent)).resolve()
+    inherited = load_config_tree(parent_path, _chain=(*_chain, source))
+    return deep_update(inherited, config)
+
+
 def deep_update(
     base: Mapping[str, Any], override: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -43,4 +63,3 @@ def get_required(config: Mapping[str, Any], dotted_key: str) -> Any:
             raise KeyError(f"missing configuration key: {dotted_key}")
         value = value[key]
     return value
-

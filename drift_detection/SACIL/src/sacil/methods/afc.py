@@ -19,11 +19,12 @@ def afc_nca_loss(
     scaled = scale * (similarities - float(margin))
     if not exclude_positive_denominator:
         return F.cross_entropy(scaled, targets)
-    scaled = scaled - scaled.max(dim=1, keepdim=True).values
+    scaled = scaled - scaled.max(1)[0].view(-1, 1)
     target_values = scaled.gather(1, targets[:, None]).squeeze(1)
     denominator = scaled.clone()
     denominator.scatter_(1, targets[:, None], 0.0)
-    return -(target_values - torch.logsumexp(denominator, dim=1)).mean()
+    losses = target_values - torch.log(torch.exp(denominator).sum(-1))
+    return -losses.mean()
 
 
 def afc_pod_loss(
@@ -46,19 +47,27 @@ def afc_pod_loss(
         if reference.shape != current.shape or reference.ndim != 4:
             raise ValueError("AFC attention shapes do not match")
         reference_pixels = F.normalize(
-            reference.float().square().flatten(start_dim=2), dim=2
+            torch.pow(reference, 2).view(
+                reference.shape[0], reference.shape[1], -1
+            ),
+            dim=2,
+            p=2,
         )
         current_pixels = F.normalize(
-            current.float().square().flatten(start_dim=2), dim=2
+            torch.pow(current, 2).view(
+                current.shape[0], current.shape[1], -1
+            ),
+            dim=2,
+            p=2,
         )
-        per_channel = torch.linalg.vector_norm(
-            reference_pixels - current_pixels, dim=2
+        per_channel = torch.frobenius_norm(
+            reference_pixels - current_pixels, dim=-1
         )
         if layer_importance.numel() != per_channel.shape[1]:
             raise ValueError("AFC importance dimension does not match attention")
         loss = loss + (
             per_channel
-            * layer_importance.detach().float().reshape(1, -1)
+            * layer_importance.detach().reshape(1, -1)
         ).mean()
     return loss / len(reference_attentions)
 

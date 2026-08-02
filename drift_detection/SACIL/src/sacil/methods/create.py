@@ -133,7 +133,25 @@ def create_classification_loss(
 ) -> Tensor:
     if probabilities.ndim != 2 or targets.ndim != 1:
         raise ValueError("invalid CREATE classification inputs")
-    return F.nll_loss(probabilities.clamp_min(1e-10).log(), targets)
+    one_hot = torch.zeros_like(probabilities).scatter_(
+        1, targets.reshape(-1, 1).long(), 1
+    )
+    return -(one_hot * torch.log(probabilities)).sum(dim=1).mean()
+
+
+def create_kd_loss(
+    current_old_errors: Tensor,
+    reference_errors: Tensor,
+    *,
+    temperature: float,
+) -> Tensor:
+    """CREATE author-code ``_KD_loss`` over reconstruction errors."""
+
+    prediction = F.log_softmax(current_old_errors / temperature, dim=1)
+    target = F.softmax(reference_errors.detach() / temperature, dim=1)
+    return -(
+        target * prediction
+    ).sum() * float(temperature) ** 2 / prediction.shape[0]
 
 
 def reconstruction_confidence_weights(
@@ -146,8 +164,8 @@ def reconstruction_confidence_weights(
     sorted_values = error_logits.sort(dim=1, descending=True).values
     score = (sorted_values[:, 1] - sorted_values[:, 0]).abs()
     score = score / (
-        (sorted_values[:, 0] - sorted_values[:, -1]).abs() + 1e-8
-    )
+        sorted_values[:, 0] - sorted_values[:, -1] + 1e-8
+    ).abs()
     return 1.0 + torch.exp(-float(alpha) * score.detach())
 
 
@@ -173,34 +191,36 @@ def create_contrastive_loss(
     if temperature <= 0 or base_temperature <= 0:
         raise ValueError("contrastive temperatures must be positive")
 
-    identity = torch.eye(
-        batch_size, dtype=torch.bool, device=latents.device
-    )
     total = latents.new_zeros(())
     for class_id in range(num_classes):
         features = latents[:, class_id]
-        logits = (features @ features.T) / float(temperature)
-        logits = logits - logits.max(dim=1, keepdim=True).values.detach()
-        logits = logits.clamp_min(-95.0)
-        valid = ~identity
-        positive = (
+        mask = (
             (targets[:, None] == targets[None, :])
             & (targets[:, None] == class_id)
-            & valid
         )
-        log_denominator = torch.logsumexp(
-            logits.masked_fill(~valid, -torch.inf), dim=1
+        logits = (features @ features.T) / temperature
+        logits = logits - logits.max(dim=1, keepdim=True).values.detach()
+        logits = logits.clamp_min(-95.0)
+        logits_mask = torch.scatter(
+            torch.ones_like(mask),
+            1,
+            torch.arange(batch_size, device=latents.device).view(-1, 1),
+            0,
         )
-        log_probability = logits - log_denominator[:, None]
-        positive_count = positive.sum(dim=1).clamp_min(1)
-        mean_positive = (
-            log_probability.masked_fill(~positive, 0.0).sum(dim=1)
-            / positive_count
+        mask = mask * logits_mask
+        exp_logits = torch.exp(logits) * logits_mask
+        log_probability = logits - torch.log(
+            exp_logits.sum(1, keepdim=True)
         )
-        total = total - (
-            (temperature / base_temperature)
-            * mean_positive
-            * sample_weights
-        ).mean()
+        positive_count = mask.sum(1)
+        positive_count = torch.where(
+            positive_count < 1e-6,
+            torch.ones_like(positive_count),
+            positive_count,
+        )
+        mean_positive = (mask * log_probability).sum(1) / positive_count
+        loss = -(
+            temperature / base_temperature
+        ) * mean_positive * sample_weights
+        total = total + loss.mean()
     return total / num_classes
-

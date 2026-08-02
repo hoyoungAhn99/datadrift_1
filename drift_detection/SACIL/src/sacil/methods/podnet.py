@@ -34,12 +34,13 @@ def podnet_nca_loss(
     if not exclude_positive_denominator:
         return F.cross_entropy(adjusted, targets)
 
-    stable = adjusted - adjusted.max(dim=1, keepdim=True).values
+    stable = adjusted - adjusted.max(1)[0].view(-1, 1)
     row = torch.arange(targets.shape[0], device=targets.device)
     numerator = stable[row, targets]
     denominator_terms = stable.clone()
     denominator_terms[row, targets] = 0.0
-    return -(numerator - torch.logsumexp(denominator_terms, dim=1)).mean()
+    losses = numerator - torch.log(torch.exp(denominator_terms).sum(-1))
+    return -losses.mean()
 
 
 def pod_spatial_loss(
@@ -62,8 +63,8 @@ def pod_spatial_loss(
     for current, reference in zip(current_maps, reference_maps):
         if current.shape != reference.shape or current.ndim != 4:
             raise ValueError("POD-spatial map shapes do not match")
-        current_sq = current.float().square()
-        reference_sq = reference.detach().float().square()
+        current_sq = torch.pow(current, 2)
+        reference_sq = torch.pow(reference, 2)
         current_h = current_sq.sum(dim=3).flatten(start_dim=1)
         current_w = current_sq.sum(dim=2).flatten(start_dim=1)
         reference_h = reference_sq.sum(dim=3).flatten(start_dim=1)
@@ -73,9 +74,11 @@ def pod_spatial_loss(
         if normalize:
             current_pooled = F.normalize(current_pooled, dim=1)
             reference_pooled = F.normalize(reference_pooled, dim=1)
-        loss = loss + torch.linalg.vector_norm(
-            current_pooled - reference_pooled, dim=1
-        ).mean()
+        loss = loss + torch.mean(
+            torch.frobenius_norm(
+                current_pooled - reference_pooled, dim=-1
+            )
+        )
     return loss / len(current_maps)
 
 

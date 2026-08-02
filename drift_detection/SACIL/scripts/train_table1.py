@@ -11,15 +11,15 @@ SOURCE_ROOT = PROJECT_ROOT / "src"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
-from sacil.config import deep_update, load_config  # noqa: E402
-from sacil.engine import StandaloneTable1Trainer  # noqa: E402
+from sacil.config import load_config_tree  # noqa: E402
+from sacil.engine import UnifiedTable1Trainer  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run PyCIL-free SACIL Table-1 experiments"
+        description="Run every SACIL Table-1 method through one in-repo engine"
     )
-    parser.add_argument("config", type=Path, help="standalone YAML config")
+    parser.add_argument("config", type=Path, help="method YAML config")
     parser.add_argument("--max-sessions", type=int, default=None)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--device", type=str, default=None)
@@ -31,11 +31,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    config = load_config(args.config)
-    parent = config.pop("extends", None)
-    if parent is not None:
-        parent_path = (args.config.resolve().parent / str(parent)).resolve()
-        config = deep_update(load_config(parent_path), config)
+    config = load_config_tree(args.config)
     if args.device is not None:
         config["device"] = args.device
     if args.seed is not None:
@@ -44,15 +40,17 @@ def main() -> int:
         config["output"]["directory"] = str(args.output_dir.resolve())
     if args.run_name is not None:
         config["output"]["run_name"] = args.run_name
-    trainer = StandaloneTable1Trainer(
+    trainer = UnifiedTable1Trainer(
         config, PROJECT_ROOT, max_sessions=args.max_sessions
     )
     if args.dry_run:
         result = {
             "status": "validated",
-            "framework": "sacil-standalone",
+            "framework": "sacil-unified",
             "pycil_used": False,
+            "reference_code_executed": False,
             "method": trainer.method,
+            "method_contract": trainer.method_contract.as_dict(),
             "protocol_id": trainer.protocol.protocol_id,
             "sessions": trainer.max_sessions,
             "device": str(trainer.device),

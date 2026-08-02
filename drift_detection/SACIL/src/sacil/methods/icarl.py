@@ -6,6 +6,29 @@ from torch import nn
 from torch.nn import functional as F
 
 
+def pycil_icarl_kd_loss(
+    current_old_logits: Tensor,
+    reference_logits: Tensor,
+    *,
+    temperature: float = 2.0,
+) -> Tensor:
+    """The old-class softmax distillation used by PyCIL's iCaRL learner.
+
+    This intentionally has no ``T**2`` multiplier: it mirrors PyCIL's
+    ``models/icarl.py::_KD_loss`` rather than the original iCaRL BCE objective.
+    """
+
+    if current_old_logits.shape != reference_logits.shape:
+        raise ValueError("current and reference old logits must have equal shape")
+    if current_old_logits.ndim != 2 or current_old_logits.shape[1] == 0:
+        raise ValueError("old logits must be a non-empty matrix")
+    if temperature <= 0:
+        raise ValueError("temperature must be positive")
+    prediction = F.log_softmax(current_old_logits / temperature, dim=1)
+    target = F.softmax(reference_logits.detach() / temperature, dim=1)
+    return -(target * prediction).sum() / current_old_logits.shape[0]
+
+
 def icarl_distillation_targets(
     targets: Tensor,
     num_classes: int,

@@ -4,11 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from sacil.config import deep_update, load_config
+from sacil.config import deep_update, load_config, load_config_tree
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_ROOT = PROJECT_ROOT / "configs" / "table1" / "cifar100"
+VALIDATION_ROOT = (
+    PROJECT_ROOT / "configs" / "validation" / "two_session_25spc"
+)
 
 
 def _resolved(name: str) -> dict:
@@ -44,17 +47,35 @@ def test_control_baselines_use_their_reference_incremental_recipe(
     }
 
 
-def test_icarl_uses_original_cifar_optimization_recipe():
+def test_icarl_uses_pycil_optimization_recipe():
     config = _resolved("icarl_nme_b50_inc5_resnet32.yaml")
     assert config["training"]["batch_size"] == 128
-    for phase in ("base", "incremental"):
-        settings = config["training"][phase]
-        assert settings["epochs"] == 70
-        assert settings["lr"] == 2.0
-        assert settings["momentum"] == 0.9
-        assert settings["weight_decay"] == 1e-5
-        assert settings["milestones"] == [49, 63]
-        assert settings["lr_decay"] == 0.2
+    base = config["training"]["base"]
+    assert base["epochs"] == 200
+    assert base["lr"] == 0.1
+    assert base["weight_decay"] == 5e-4
+    assert base["milestones"] == [60, 120, 170]
+    incremental = config["training"]["incremental"]
+    assert incremental["epochs"] == 170
+    assert incremental["lr"] == 0.1
+    assert incremental["weight_decay"] == 2e-4
+    assert incremental["milestones"] == [80, 120]
+
+
+def test_casper_uses_paper_topology_hyperparameters():
+    config = _resolved("casper_nme_b50_inc5_resnet32.yaml")
+    casper = config["method"]["casper"]
+    assert casper["weight"] == 0.001
+    assert casper["knn"] == 8
+    assert casper["classes_per_graph"] == 8
+    assert casper["replay_batch_size"] == 64
+    assert casper["wd_reg"] == 1e-5
+
+
+def test_create_uses_author_cosine_floor():
+    config = _resolved("create_native_b50_inc5_resnet32.yaml")
+    assert config["training"]["base"].get("eta_min", 0.0) == 0.0
+    assert config["training"]["incremental"]["eta_min"] == 1e-8
 
 
 @pytest.mark.parametrize(
@@ -70,3 +91,35 @@ def test_table1_methods_share_protocol_memory_and_augmentation(name: str):
     assert config["memory"]["mode"] == "per_class"
     assert config["memory"]["exemplars_per_class"] == 20
     assert config["memory"]["selection"] == "icarl_herding"
+    assert "resnet18" not in config["model"]["backbone"]
+    assert "32" in config["model"]["backbone"]
+    expected_evaluator = (
+        "native" if config["method"]["name"] == "create" else "nme"
+    )
+    assert config["evaluation"]["classifier"] == expected_evaluator
+    assert config["comparison_contract"] == {
+        "name": "annotation_1_cifar100_b50_inc5",
+        "implementation": "in_repo_unified",
+        "reference_code_policy": "reference_only",
+    }
+
+
+@pytest.mark.parametrize(
+    "path",
+    sorted(VALIDATION_ROOT.glob("*.yaml")),
+    ids=lambda path: path.stem,
+)
+def test_two_session_validation_configs_only_shrink_data_and_epochs(
+    path: Path,
+) -> None:
+    config = load_config_tree(path)
+    assert config["debug"] == {
+        "train_samples_per_class": 25,
+        "max_sessions": 2,
+    }
+    assert config["training"]["base"]["epochs"] == 2
+    assert config["training"]["incremental"]["epochs"] == 2
+    assert config["memory"]["exemplars_per_class"] == 20
+    assert config["data"]["protocol"].endswith(
+        "cifar100_b50_t10_afc_order1.json"
+    )

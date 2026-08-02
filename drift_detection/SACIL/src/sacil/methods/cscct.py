@@ -66,8 +66,9 @@ def controlled_transfer_loss(
         F.kl_div(
             F.log_softmax(current_relation / temperature, dim=1),
             F.softmax(reference_relation / temperature, dim=1),
-            reduction="batchmean",
+            # The CSCCT release uses ``nn.KLDivLoss()`` with its historical
+            # default reduction.  That is element-wise mean, not batchmean.
+            reduction="mean",
         )
         * temperature**2
     )
-

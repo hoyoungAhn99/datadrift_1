@@ -14,7 +14,7 @@ sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
 
-def test_standalone_summary_reads_only_complete_seed_runs(tmp_path) -> None:
+def test_unified_summary_reads_only_complete_seed_runs(tmp_path) -> None:
     spec = MODULE.METHODS[0]
     run_dir = tmp_path / spec.run_name / "seed_1"
     run_dir.mkdir(parents=True)

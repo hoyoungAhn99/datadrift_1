@@ -50,9 +50,6 @@ class AFCIncrementalNet(nn.Module):
             proxies_per_class=proxies_per_class,
             distance_scale=distance_scale,
         )
-        self.postprocessor_scale = nn.Parameter(
-            torch.tensor(float(classifier_scale))
-        )
 
     @property
     def num_classes(self) -> int:
@@ -131,7 +128,6 @@ class AFCIncrementalNet(nn.Module):
             for parameter in self.backbone.parameters()
             if parameter.requires_grad
         ]
-        parameters.append(self.postprocessor_scale)
         parameters.append(self.classifier.new_weights)
         return parameters
 

@@ -33,7 +33,7 @@ from sacil.hierarchy import (
     cosine_soft_confusion,
     symmetric_affinity,
 )
-from sacil.memory import ExemplarMemory, herding_select, icarl_herding_select
+from sacil.memory import ExemplarMemory, herding_select
 from sacil.methods import (
     AnchorGeometryLoss,
     afc_nca_loss,
@@ -43,6 +43,7 @@ from sacil.methods import (
     controlled_transfer_loss,
     create_classification_loss,
     create_contrastive_loss,
+    create_kd_loss,
     cross_space_clustering_loss,
     fgp_graph_preservation_loss,
     icarl_bce_loss,
@@ -52,9 +53,16 @@ from sacil.methods import (
     pod_spatial_loss,
     podnet_nca_loss,
     prototype_cross_entropy,
+    pycil_finetune_loss,
+    pycil_icarl_kd_loss,
+    replay_cross_entropy,
     reconstruction_confidence_weights,
     scheduled_afc_factor,
     scheduled_fgp_weight,
+    SUPPORTED_UNIFIED_METHODS,
+    unified_method_contract,
+    validate_annotation1_config,
+    validate_annotation1_protocol,
 )
 from sacil.metrics import CILMetricsTracker
 from sacil.models import (
@@ -63,6 +71,7 @@ from sacil.models import (
     CSCCTIncrementalNet,
     ExpandableLinearNet,
     FGPIncrementalNet,
+    PyCILPODNet,
     kmeans_imprinted_weights,
 )
 from sacil.utils import (
@@ -76,21 +85,7 @@ from sacil.utils import (
 )
 
 
-SUPPORTED_TABLE1_METHODS = frozenset(
-    {
-        "joint",
-        "finetune",
-        "replay",
-        "icarl",
-        "podnet",
-        "afc",
-        "create",
-        "fgp",
-        "cscct",
-        "casper",
-        "sacil",
-    }
-)
+SUPPORTED_TABLE1_METHODS = SUPPORTED_UNIFIED_METHODS
 
 
 class BalancedClassBatchSampler(Sampler[list[int]]):
@@ -147,8 +142,12 @@ class BalancedClassBatchSampler(Sampler[list[int]]):
             yield batch
 
 
-class StandaloneTable1Trainer:
-    """PyCIL-free Table-1 trainer with method-specific model lifecycles."""
+class UnifiedTable1Trainer:
+    """One in-repo Table-1 engine with method-specific adapters.
+
+    Upstream repositories are algorithm references only.  This class has no
+    runtime import or subprocess path into ``ref_codes``.
+    """
 
     def __init__(
         self,
@@ -161,13 +160,16 @@ class StandaloneTable1Trainer:
         self.project_root = Path(project_root).resolve()
         self.method = str(get_required(config, "method.name")).lower()
         if self.method not in SUPPORTED_TABLE1_METHODS:
-            raise ValueError(f"unsupported standalone method: {self.method}")
+            raise ValueError(f"unsupported unified method: {self.method}")
+        validate_annotation1_config(self.config)
+        self.method_contract = unified_method_contract(self.method)
         self.seed = int(config.get("seed", 1))
         set_seed(self.seed, deterministic=bool(config.get("deterministic", True)))
         self.device = resolved_device(str(config.get("device", "cuda:0")))
         self.protocol = ClassOrderProtocol.from_json(
             self._project_path(get_required(config, "data.protocol"))
         )
+        validate_annotation1_protocol(self.protocol)
         self.data = build_data_module(
             str(config["data"].get("name", "cifar100")),
             self._project_path(get_required(config, "data.root")),
@@ -183,11 +185,21 @@ class StandaloneTable1Trainer:
         self.sacil_tree: HierarchyTree | None = None
         self.sacil_prototypes: PrototypeBank | None = None
         self.sacil_anchors: HierarchicalAnchorBank | None = None
-        self.max_sessions = (
-            self.protocol.num_sessions
-            if max_sessions is None
-            else min(int(max_sessions), self.protocol.num_sessions)
+        configured_max_sessions = self.config.get("debug", {}).get(
+            "max_sessions"
         )
+        requested_max_sessions = (
+            configured_max_sessions if max_sessions is None else max_sessions
+        )
+        if requested_max_sessions is None:
+            self.max_sessions = self.protocol.num_sessions
+        else:
+            requested_max_sessions = int(requested_max_sessions)
+            if requested_max_sessions <= 0:
+                raise ValueError("max_sessions must be positive")
+            self.max_sessions = min(
+                requested_max_sessions, self.protocol.num_sessions
+            )
         output = config["output"]
         self.run_dir = ensure_dir(
             self._project_path(output["directory"])
@@ -198,8 +210,10 @@ class StandaloneTable1Trainer:
         dump_json(
             {
                 "config": self.config,
-                "framework": "sacil-standalone",
+                "framework": "sacil-unified",
                 "pycil_used": False,
+                "reference_code_executed": False,
+                "method_contract": self.method_contract.as_dict(),
                 "protocol_id": self.protocol.protocol_id,
                 "device": str(self.device),
                 "git_commit": git_commit(self.project_root),
@@ -263,7 +277,12 @@ class StandaloneTable1Trainer:
 
     def _new_model(self, num_classes: int) -> nn.Module:
         model = self.config.get("model", {})
-        if self.method in {"podnet", "afc"}:
+        if self.method == "podnet":
+            return PyCILPODNet(
+                num_classes,
+                proxies_per_class=int(model.get("proxies_per_class", 10)),
+            )
+        if self.method == "afc":
             return AFCIncrementalNet(
                 num_classes,
                 initial_size=self.protocol.session(0).size,
@@ -278,6 +297,7 @@ class StandaloneTable1Trainer:
                 hidden_layers=tuple(model.get("hidden_layers", [])),
                 latent_features=int(model.get("latent_features", 32)),
                 reconstruction_scale=float(model.get("reconstruction_scale", 0.1)),
+                backbone=str(model.get("backbone", "resnet32")),
             )
         if self.method == "fgp":
             return FGPIncrementalNet(num_classes)
@@ -295,7 +315,11 @@ class StandaloneTable1Trainer:
     def _scheduler(optimizer: SGD, phase: dict[str, Any], epochs: int):
         kind = str(phase.get("scheduler", "multistep"))
         if kind == "cosine":
-            return CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-8)
+            return CosineAnnealingLR(
+                optimizer,
+                T_max=epochs,
+                eta_min=float(phase.get("eta_min", 0.0)),
+            )
         if kind == "multistep":
             return MultiStepLR(
                 optimizer,
@@ -354,7 +378,12 @@ class StandaloneTable1Trainer:
         if self.model is None:
             raise RuntimeError("cannot expand a missing model")
         total = self.protocol.session(session_id).stop
-        if isinstance(self.model, AFCIncrementalNet):
+        if isinstance(self.model, PyCILPODNet):
+            # Stock PyCIL initializes the new proxy chunk through
+            # SplitCosineLinear.reset_parameters; PODNet does not use AFC's
+            # K-means weight imprinting.
+            self.model.expand_classes(total)
+        elif isinstance(self.model, AFCIncrementalNet):
             collection = self._incoming_collection(session_id)
             class_features = [
                 collection.features[
@@ -390,7 +419,7 @@ class StandaloneTable1Trainer:
         existing_checkpoints = tuple(self.checkpoint_dir.glob("session_*.pt"))
         if session_log.exists() or metrics_path.exists() or existing_checkpoints:
             raise FileExistsError(
-                "the standalone run directory already contains training "
+                "the unified run directory already contains training "
                 f"artifacts: {self.run_dir}; choose a new --run-name"
             )
         for session_id in range(self.max_sessions):
@@ -442,8 +471,14 @@ class StandaloneTable1Trainer:
             geometry,
             prototype_loader,
         )
+        # PODNet, AFC, and CREATE construct a temporary balanced memory for
+        # their classifier fine-tuning stage.  Their released lifecycles then
+        # rebuild the incoming-class exemplars with the final, fine-tuned
+        # representation before evaluation/after_task.
         self._update_memory(session_id)
-        post = self._post_training(session_id, train_loader)
+        post = self._post_training(session_id, train_loader, teacher)
+        if session_id > 0 and self.method in {"podnet", "afc", "create"}:
+            self._update_memory(session_id)
         self._build_evaluation_state(session_id)
         evaluation = self._evaluate_session(session_id)
         metric = self.metrics.update(session_id, evaluation)
@@ -508,6 +543,14 @@ class StandaloneTable1Trainer:
             raise RuntimeError("training has no model")
         phase = self._phase(session_id)
         parameters = self._main_parameters()
+        if self.method == "afc":
+            # AFC author code clips every trainable parameter gradient through
+            # per-parameter hooks registered at the beginning of each task.
+            for parameter in self.model.parameters():
+                if parameter.requires_grad:
+                    parameter.register_hook(
+                        lambda gradient: torch.clamp(gradient, -5.0, 5.0)
+                    )
         optimizer = SGD(
             parameters,
             lr=float(phase["lr"]),
@@ -546,6 +589,13 @@ class StandaloneTable1Trainer:
             range(epochs), disable=bool(self.config.get("disable_tqdm", False))
         )
         for epoch in progress:
+            if self.method == "cscct":
+                # The CSCCT release advances both schedulers at the start of
+                # every epoch, including the zeroth phase.  Preserve that
+                # ordering instead of forcing the shared end-of-epoch order.
+                scheduler.step()
+                if fusion_scheduler is not None:
+                    fusion_scheduler.step()
             prototypes = (
                 self._refresh_training_prototypes(prototype_loader)
                 if prototype_loader is not None
@@ -592,13 +642,14 @@ class StandaloneTable1Trainer:
                 totals["loss"] += float(loss.detach()) * batch_count
                 for name, value in components.items():
                     totals[name] += float(value.detach()) * batch_count
-            scheduler.step()
+            if self.method != "cscct":
+                scheduler.step()
             if fusion_optimizer is not None and fusion_loader is not None:
                 self._update_cscct_fusion(fusion_loader, fusion_optimizer)
-                if fusion_scheduler is not None:
+                if fusion_scheduler is not None and self.method != "cscct":
                     fusion_scheduler.step()
             if count == 0:
-                raise RuntimeError("standalone training processed no samples")
+                raise RuntimeError("unified training processed no samples")
             record = {
                 "epoch": epoch + 1,
                 "lr": float(optimizer.param_groups[0]["lr"]),
@@ -616,20 +667,14 @@ class StandaloneTable1Trainer:
     def _main_parameters(self) -> list[nn.Parameter]:
         if self.model is None:
             raise RuntimeError("model is missing")
+        if isinstance(self.model, PyCILPODNet):
+            return self.model.main_trainable_parameters()
         if isinstance(self.model, AFCIncrementalNet):
-            self.model.postprocessor_scale.requires_grad_(False)
-            if self.method == "afc":
-                for parameter in self.model.classifier.old_weights:
-                    parameter.requires_grad_(False)
-                return [
-                    *[p for p in self.model.backbone.parameters() if p.requires_grad],
-                    self.model.classifier.new_weights,
-                ]
-            for parameter in self.model.classifier.parameters():
-                parameter.requires_grad_(True)
+            for parameter in self.model.classifier.old_weights:
+                parameter.requires_grad_(False)
             return [
                 *[p for p in self.model.backbone.parameters() if p.requires_grad],
-                *list(self.model.classifier.parameters()),
+                self.model.classifier.new_weights,
             ]
         if isinstance(self.model, CSCCTIncrementalNet):
             for parameter in self.model.classifier.old_weights:
@@ -662,14 +707,41 @@ class StandaloneTable1Trainer:
 
         if isinstance(self.model, ExpandableLinearNet):
             output = self.model.forward_detailed(images)
-            if self.method in {"joint", "finetune", "replay"}:
+            if self.method == "joint":
                 return {"classification": F.cross_entropy(output.logits, targets)}, output.logits
+            if self.method == "replay":
+                return {
+                    "classification": replay_cross_entropy(
+                        output.logits, targets
+                    )
+                }, output.logits
+            if self.method == "finetune":
+                return {
+                    "classification": pycil_finetune_loss(
+                        output.logits,
+                        targets,
+                        known_classes=known,
+                    )
+                }, output.logits
             reference = (
                 None
                 if teacher is None
                 else teacher.forward_detailed(images)
             )
-            if self.method in {"icarl", "casper"}:
+            if self.method == "icarl":
+                components = {
+                    "classification": F.cross_entropy(output.logits, targets)
+                }
+                if reference is not None:
+                    components["kd"] = pycil_icarl_kd_loss(
+                        output.logits[:, :known],
+                        reference.logits,
+                        temperature=float(
+                            self.config["method"].get("kd_temperature", 2.0)
+                        ),
+                    )
+                return components, output.logits
+            if self.method == "casper":
                 loss = icarl_bce_loss(
                     output.logits,
                     targets,
@@ -677,14 +749,12 @@ class StandaloneTable1Trainer:
                     known_classes=known,
                 )
                 components = {"classification": loss}
-                if self.method == "casper":
-                    casper = self.config["method"].get("casper", {})
-                    components["regularization"] = parameter_l2_regularization(
-                        self.model,
-                        float(casper.get("wd_reg", 1e-5)),
-                    )
-                if self.method == "casper" and replay_images is not None:
-                    casper = self.config["method"].get("casper", {})
+                casper = self.config["method"].get("casper", {})
+                components["regularization"] = parameter_l2_regularization(
+                    self.model,
+                    float(casper.get("wd_reg", 1e-5)),
+                )
+                if replay_images is not None:
                     replay_features = self.model.extract_features(replay_images)
                     components["spectral"] = float(
                         casper.get("weight", 0.01)
@@ -721,29 +791,35 @@ class StandaloneTable1Trainer:
                 return components, prediction
             raise RuntimeError(f"unhandled linear method: {self.method}")
 
+        if isinstance(self.model, PyCILPODNet):
+            output = self.model.forward_detailed(images)
+            components = {
+                "classification": podnet_nca_loss(
+                    output.logits,
+                    targets,
+                    scale=1.0,
+                )
+            }
+            if teacher is not None:
+                if not isinstance(teacher, PyCILPODNet):
+                    raise TypeError("PODNet teacher has the wrong model type")
+                reference = teacher.forward_detailed(images)
+                factor = math.sqrt(total / new_count)
+                pod = self.config["method"].get("podnet", {})
+                components["pod_flat"] = float(
+                    pod.get("flat_weight", 1.0)
+                ) * factor * pod_flat_loss(
+                    output.features, reference.features
+                )
+                components["pod_spatial"] = float(
+                    pod.get("spatial_weight", 5.0)
+                ) * factor * pod_spatial_loss(
+                    output.attentions, reference.attentions
+                )
+            return components, output.logits
+
         if isinstance(self.model, AFCIncrementalNet):
             output = self.model.forward_detailed(images)
-            if self.method == "podnet":
-                components = {
-                    "classification": podnet_nca_loss(
-                        output.logits, targets, scale=1.0
-                    )
-                }
-                if teacher is not None:
-                    reference = teacher.forward_detailed(images)
-                    factor = math.sqrt(total / new_count)
-                    pod = self.config["method"].get("podnet", {})
-                    components["pod_flat"] = float(
-                        pod.get("flat_weight", 1.0)
-                    ) * factor * pod_flat_loss(
-                        output.features, reference.features
-                    )
-                    components["pod_spatial"] = float(
-                        pod.get("spatial_weight", 5.0)
-                    ) * factor * pod_spatial_loss(
-                        output.attentions, reference.attentions
-                    )
-                return components, output.logits
             components = {
                 "classification": afc_nca_loss(
                     output.logits, targets, 1.0
@@ -781,7 +857,7 @@ class StandaloneTable1Trainer:
             )
             if teacher is not None:
                 reference = teacher.forward_detailed(images)
-                components["kd"] = float(create.get("kd_weight", 1.0)) * old_logit_kl_loss(
+                components["kd"] = float(create.get("kd_weight", 1.0)) * create_kd_loss(
                     output["error_logits"][:, :known],
                     reference["error_logits"],
                     temperature=float(create.get("kd_temperature", 2.0)),
@@ -948,9 +1024,13 @@ class StandaloneTable1Trainer:
         selection = str(self.config["memory"].get("selection", "icarl_herding"))
         for class_id in self.protocol.classes_for_session(session_id):
             mask = collection.original_targets == int(class_id)
-            function = (
-                icarl_herding_select if selection == "icarl_herding" else herding_select
-            )
+            # The controlled Table-1 contract uses one selector for every
+            # replay-based method.  ``icarl_herding`` means the running-mean
+            # greedy procedure implemented by stock PyCIL BaseLearner, not
+            # AFC's direction-update variant.
+            function = herding_select
+            if selection not in {"icarl_herding", "running_mean"}:
+                raise ValueError(f"unsupported controlled herding: {selection}")
             selected = function(
                 collection.features[mask],
                 collection.indices[mask].tolist(),
@@ -959,16 +1039,71 @@ class StandaloneTable1Trainer:
             self.memory.set_class_indices(class_id, selected)
 
     def _post_training(
-        self, session_id: int, train_loader: DataLoader
+        self,
+        session_id: int,
+        train_loader: DataLoader,
+        teacher: nn.Module | None,
     ) -> dict[str, Any] | None:
+        if self.method == "podnet":
+            return {"finetuning": self._podnet_finetune(session_id, teacher)}
         if self.method == "afc":
             return {
                 "finetuning": self._afc_finetune(session_id),
                 "importance": self._afc_importance(train_loader),
             }
         if self.method == "create":
-            return {"finetuning": self._create_finetune(session_id)}
+            return {
+                "finetuning": self._create_finetune(session_id, teacher)
+            }
         return None
+
+    def _podnet_finetune(
+        self, session_id: int, teacher: nn.Module | None
+    ) -> dict[str, Any] | None:
+        if session_id == 0 or not isinstance(self.model, PyCILPODNet):
+            return None
+        config = self.config["method"].get("podnet", {}).get(
+            "finetuning", {}
+        )
+        epochs = int(config.get("epochs", 20))
+        if epochs <= 0:
+            return None
+        parameters = self._main_parameters()
+        optimizer = SGD(
+            parameters,
+            lr=float(config.get("lr", 0.005)),
+            momentum=float(config.get("momentum", 0.9)),
+            weight_decay=float(config.get("weight_decay", 5e-4)),
+        )
+        scheduler = CosineAnnealingLR(optimizer, T_max=epochs)
+        loader = self._memory_loader(session_id, augment=True)
+        losses: list[float] = []
+        for _ in range(epochs):
+            self.model.train()
+            total_loss = 0.0
+            count = 0
+            for batch in loader:
+                images = batch["image"].to(self.device, non_blocking=True)
+                targets = batch["target"].to(self.device).long()
+                components, _ = self._loss_components(
+                    session_id,
+                    images,
+                    targets,
+                    batch["is_replay"].to(self.device).bool(),
+                    teacher,
+                    None,
+                    None,
+                    None,
+                )
+                loss = sum(components.values())
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                optimizer.step()
+                total_loss += float(loss.detach()) * targets.numel()
+                count += targets.numel()
+            scheduler.step()
+            losses.append(total_loss / count)
+        return {"epochs": epochs, "losses": losses}
 
     def _memory_loader(self, session_id: int, *, augment: bool) -> DataLoader:
         indices = self.memory.all_indices(self.protocol.class_order)
@@ -1038,7 +1173,11 @@ class StandaloneTable1Trainer:
             ],
         }
 
-    def _create_finetune(self, session_id: int) -> dict[str, Any] | None:
+    def _create_finetune(
+        self,
+        session_id: int,
+        teacher: nn.Module | None,
+    ) -> dict[str, Any] | None:
         if session_id == 0 or not isinstance(self.model, CREATEIncrementalNet):
             return None
         config = self.config["method"].get("create", {}).get("finetuning", {})
@@ -1062,7 +1201,17 @@ class StandaloneTable1Trainer:
             for batch in loader:
                 images = batch["image"].to(self.device)
                 targets = batch["target"].to(self.device).long()
-                loss = create_classification_loss(self.model(images), targets)
+                components, _ = self._loss_components(
+                    session_id,
+                    images,
+                    targets,
+                    batch["is_replay"].to(self.device).bool(),
+                    teacher,
+                    None,
+                    None,
+                    None,
+                )
+                loss = sum(components.values())
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 optimizer.step()
@@ -1156,8 +1305,10 @@ class StandaloneTable1Trainer:
         path = self.checkpoint_dir / f"session_{session_id:02d}.pt"
         payload: dict[str, Any] = {
             "schema_version": 1,
-            "framework": "sacil-standalone",
+            "framework": "sacil-unified",
             "pycil_used": False,
+            "reference_code_executed": False,
+            "method_contract": self.method_contract.as_dict(),
             "method": self.method,
             "session_id": session_id,
             "protocol_id": self.protocol.protocol_id,
@@ -1176,3 +1327,8 @@ class StandaloneTable1Trainer:
             )
         save_checkpoint(payload, path)
         return path
+
+
+# Backward-compatible import name for old analysis utilities.  New experiment
+# code and documentation use UnifiedTable1Trainer.
+StandaloneTable1Trainer = UnifiedTable1Trainer

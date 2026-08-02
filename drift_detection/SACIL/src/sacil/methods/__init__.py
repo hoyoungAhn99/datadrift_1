@@ -5,6 +5,7 @@ from .create import (
     ClasswiseAutoencoderClassifier,
     create_classification_loss,
     create_contrastive_loss,
+    create_kd_loss,
     reconstruction_confidence_weights,
 )
 from .cscct import (
@@ -18,11 +19,13 @@ from .fgp import (
     pairwise_squared_euclidean,
     scheduled_fgp_weight,
 )
+from .finetune import pycil_finetune_loss
 from .global_hap import AnchorGeometryLoss
 from .icarl import (
     icarl_bce_loss,
     icarl_distillation_targets,
     parameter_l2_regularization,
+    pycil_icarl_kd_loss,
 )
 from .logit_kd import old_logit_kl_loss
 from .podnet import (
@@ -38,6 +41,7 @@ from .replay_ce import (
     method_uses_logit_kd,
     method_uses_topkd,
     method_uses_takp,
+    replay_cross_entropy,
 )
 from .sacil_v0 import (
     ConflictWeights,
@@ -48,6 +52,13 @@ from .topology_kd import (
     RipsNet,
     TopologyDistillationLoss,
     load_frozen_ripsnet,
+)
+from .unified_contracts import (
+    SUPPORTED_UNIFIED_METHODS,
+    UnifiedMethodContract,
+    unified_method_contract,
+    validate_annotation1_config,
+    validate_annotation1_protocol,
 )
 from .takp import takp_mixed_classification_loss
 
@@ -67,11 +78,14 @@ __all__ = [
     "cosine_similarity_matrix",
     "create_classification_loss",
     "create_contrastive_loss",
+    "create_kd_loss",
     "cross_space_clustering_loss",
     "fgp_graph_preservation_loss",
     "global_preservation_weights",
     "icarl_bce_loss",
     "icarl_distillation_targets",
+    "pycil_finetune_loss",
+    "pycil_icarl_kd_loss",
     "parameter_l2_regularization",
     "load_frozen_ripsnet",
     "method_uses_afc",
@@ -80,6 +94,7 @@ __all__ = [
     "method_uses_logit_kd",
     "method_uses_topkd",
     "method_uses_takp",
+    "replay_cross_entropy",
     "old_logit_kl_loss",
     "neural_knn_weights",
     "pairwise_squared_euclidean",
@@ -92,4 +107,9 @@ __all__ = [
     "scheduled_afc_factor",
     "scheduled_fgp_weight",
     "takp_mixed_classification_loss",
+    "SUPPORTED_UNIFIED_METHODS",
+    "UnifiedMethodContract",
+    "unified_method_contract",
+    "validate_annotation1_config",
+    "validate_annotation1_protocol",
 ]

@@ -1,5 +1,18 @@
 from __future__ import annotations
 
+from torch import Tensor
+from torch.nn import functional as F
+
+
+def replay_cross_entropy(logits: Tensor, targets: Tensor) -> Tensor:
+    """Seen-class CE used by PyCIL Replay on new data plus memory."""
+
+    if logits.ndim != 2 or targets.ndim != 1:
+        raise ValueError("logits must be a matrix and targets a vector")
+    if logits.shape[0] != targets.shape[0]:
+        raise ValueError("logits and targets have different batch sizes")
+    return F.cross_entropy(logits, targets)
+
 
 VALID_METHODS = {
     "replay_ce",

@@ -1188,7 +1188,7 @@ class SACILTrainer:
                     classification = afc_nca_loss(
                         output.logits,
                         targets,
-                        self.model.postprocessor_scale,
+                        1.0,
                         margin=nca_margin,
                     )
                 else:
@@ -1216,14 +1216,14 @@ class SACILTrainer:
                         * afc_nca_loss(
                             mixed_logits,
                             targets,
-                            self.model.postprocessor_scale,
+                            1.0,
                             margin=nca_margin,
                         )
                         + (1.0 - mixing_alpha)
                         * afc_nca_loss(
                             mixed_logits,
                             rebalancing_targets,
-                            self.model.postprocessor_scale,
+                            1.0,
                             margin=nca_margin,
                         )
                     )
@@ -1351,7 +1351,6 @@ class SACILTrainer:
         )
         for parameter in self.model.backbone.parameters():
             parameter.requires_grad_(False)
-        self.model.postprocessor_scale.requires_grad_(False)
         for parameter in self.model.classifier.parameters():
             parameter.requires_grad_(True)
         optimizer = SGD(
@@ -1387,7 +1386,7 @@ class SACILTrainer:
                 loss = afc_nca_loss(
                     logits,
                     targets,
-                    self.model.postprocessor_scale,
+                    1.0,
                     margin=nca_margin,
                 )
                 optimizer.zero_grad(set_to_none=True)
@@ -1411,7 +1410,6 @@ class SACILTrainer:
             )
         for parameter in self.model.backbone.parameters():
             parameter.requires_grad_(True)
-        self.model.postprocessor_scale.requires_grad_(True)
         return {
             "epochs": epochs,
             "samples_in_dataset": len(dataset),
@@ -1425,7 +1423,6 @@ class SACILTrainer:
             parameter.requires_grad_(True)
         for parameter in self.model.classifier.parameters():
             parameter.requires_grad_(False)
-        self.model.postprocessor_scale.requires_grad_(False)
         self.model.backbone.reset_importance()
         self.model.backbone.start_importance_collection()
         self.model.train()
@@ -1449,7 +1446,7 @@ class SACILTrainer:
             loss = afc_nca_loss(
                 logits,
                 targets,
-                self.model.postprocessor_scale,
+                1.0,
                 margin=nca_margin,
             )
             loss.backward()
@@ -1458,7 +1455,6 @@ class SACILTrainer:
         self.model.backbone.normalize_importance()
         for parameter in self.model.classifier.parameters():
             parameter.requires_grad_(True)
-        self.model.postprocessor_scale.requires_grad_(True)
         means = [
             float(layer.importance.mean().item())
             for layer in self.model.backbone.importance_layers

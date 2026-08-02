@@ -9,12 +9,9 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_ROOT = PROJECT_ROOT / "outputs" / "standalone" / "table1"
+DEFAULT_ROOT = PROJECT_ROOT / "outputs" / "unified" / "table1"
 DEFAULT_OUTPUT = (
-    PROJECT_ROOT
-    / "mds"
-    / "results"
-    / "table1_cifar100_b50_inc5_standalone.md"
+    PROJECT_ROOT / "mds" / "results" / "table1_cifar100_b50_inc5_unified.md"
 )
 
 
@@ -22,22 +19,29 @@ DEFAULT_OUTPUT = (
 class MethodSpec:
     label: str
     run_name: str
-    evaluator: str
-    backbone: str
+    evaluator: str = "NME"
+    backbone: str = "ResNet-32"
 
 
 METHODS = (
-    MethodSpec("Joint (upper bound)", "joint_nme_c100_b50_inc5_r32", "NME", "ResNet-32"),
-    MethodSpec("Fine-tune", "finetune_reference_hparams_nme_c100_b50_inc5_r32", "NME", "ResNet-32"),
-    MethodSpec("Replay-CE", "replay_reference_hparams_nme_c100_b50_inc5_r32", "NME", "ResNet-32"),
-    MethodSpec("iCaRL", "icarl_original_hparams_nme_c100_b50_inc5_r32", "NME", "ResNet-32"),
-    MethodSpec("PODNet", "podnet_nme_c100_b50_inc5_r32", "NME", "Rebuffi ResNet-32"),
-    MethodSpec("AFC", "afc_nme_c100_b50_inc5_r32", "NME", "Rebuffi ResNet-32"),
-    MethodSpec("CREATE", "create_native_c100_b50_inc5_r18", "Native", "ResNet-18"),
-    MethodSpec("FGP-ICL", "fgp_nme_c100_b50_inc5_r32", "NME", "FGP ResNet-32"),
-    MethodSpec("iCaRL + CSCCT", "cscct_nme_c100_b50_inc5_r32", "NME", "CSCCT ResNet-32"),
-    MethodSpec("iCaRL + CaSpeR", "casper_paper_hparams_nme_c100_b50_inc5_r32", "NME", "ResNet-32"),
-    MethodSpec("SACIL", "sacil_nme_c100_b50_inc5_r32", "NME", "ResNet-32"),
+    MethodSpec("Joint (upper bound)", "joint_nme_c100_b50_inc5_r32"),
+    MethodSpec(
+        "Fine-tune", "finetune_reference_hparams_nme_c100_b50_inc5_r32"
+    ),
+    MethodSpec(
+        "Replay-CE", "replay_reference_hparams_nme_c100_b50_inc5_r32"
+    ),
+    MethodSpec("iCaRL", "icarl_pycil_semantics_nme_c100_b50_inc5_r32"),
+    MethodSpec("PODNet", "podnet_nme_c100_b50_inc5_r32"),
+    MethodSpec("AFC", "afc_nme_c100_b50_inc5_r32"),
+    MethodSpec(
+        "CREATE",
+        "create_native_c100_b50_inc5_r32",
+        evaluator="Native reconstruction error",
+    ),
+    MethodSpec("FGP-ICL", "fgp_nme_c100_b50_inc5_r32"),
+    MethodSpec("iCaRL + CSCCT", "cscct_nme_c100_b50_inc5_r32"),
+    MethodSpec("SACIL", "sacil_nme_c100_b50_inc5_r32"),
 )
 
 
@@ -73,17 +77,14 @@ def build_report(
             run
             for seed in seeds
             if (
-                run := _load_complete_run(
-                    root, spec, seed, expected_sessions
-                )
+                run := _load_complete_run(root, spec, seed, expected_sessions)
             )
             is not None
         ]
         if len(runs) != len(seeds):
-            incomplete.append(f"{spec.label}: {len(runs)}/{len(seeds)} seeds complete")
-        averages = [run["summary"]["average_incremental_accuracy"] for run in runs]
-        finals = [run["summary"]["final_accuracy"] for run in runs]
-        forgetting = [run["summary"]["average_forgetting"] for run in runs]
+            incomplete.append(
+                f"{spec.label}: {len(runs)}/{len(seeds)} seeds complete"
+            )
         rows.append(
             "| "
             + " | ".join(
@@ -92,9 +93,21 @@ def build_report(
                     spec.backbone,
                     spec.evaluator,
                     str(len(runs)),
-                    _mean_std(averages),
-                    _mean_std(finals),
-                    _mean_std(forgetting),
+                    _mean_std(
+                        [
+                            run["summary"]["average_incremental_accuracy"]
+                            for run in runs
+                        ]
+                    ),
+                    _mean_std(
+                        [run["summary"]["final_accuracy"] for run in runs]
+                    ),
+                    _mean_std(
+                        [
+                            run["summary"]["average_forgetting"]
+                            for run in runs
+                        ]
+                    ),
                 )
             )
             + " |"
@@ -111,27 +124,33 @@ def build_report(
             details.append("")
 
     lines = [
-        "# CIFAR-100 B50-Inc5 standalone Table 1",
+        "# CIFAR-100 B50-Inc5 unified Table 1",
         "",
         f"- generated: `{datetime.now().astimezone().isoformat(timespec='seconds')}`",
-        "- framework: SACIL standalone runner (PyCIL not used)",
+        "- engine: one in-repo SACIL unified runner",
+        "- upstream code policy: reference-only; never executed",
         "- class order: AFC/PODNet public order 1",
-        "- memory: 20 exemplars per class",
+        "- backbone: CIFAR ResNet-32 for every method",
+        "- evaluator: NME, except CREATE's native reconstruction-error rule",
+        "- memory: 20 exemplars per class with shared herding",
+        "- AIA: arithmetic mean of all session accuracies, including session 0",
         f"- expected sessions: {expected_sessions}",
         "",
-        "| Method | Backbone | Evaluator | Seeds | Average accuracy | Final accuracy | Forgetting ↓ |",
-        "|---|---|---:|---:|---:|---:|---:|",
+        "| Method | Backbone | Evaluator | Seeds | AIA | Final accuracy | Forgetting ↓ |",
+        "|---|---|---|---:|---:|---:|---:|",
         *rows,
         "",
     ]
     if incomplete:
-        lines.extend(("## Incomplete", "", *[f"- {item}" for item in incomplete], ""))
+        lines.extend(
+            ("## Incomplete", "", *[f"- {item}" for item in incomplete], "")
+        )
     lines.extend(("## Session curves (%)", "", *details))
     return "\n".join(lines).rstrip() + "\n", incomplete
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Summarize standalone Table-1 runs")
+    parser = argparse.ArgumentParser(description="Summarize unified Table-1 runs")
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--seeds", type=int, nargs="+", default=[1, 2, 3])

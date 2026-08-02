@@ -5,6 +5,14 @@ from .cosine_classifier import CosineClassifier
 from .incremental_net import IncrementalNet
 from .resnet18 import CifarResNet18, resnet18
 from .resnet32 import resnet32
+from .pycil_podnet import (
+    PyCILCosineLinear,
+    PyCILPODNet,
+    PyCILPODNetOutput,
+    PyCILSplitCosineLinear,
+    reduce_proxies,
+)
+from .pycil_linear import PyCILSimpleLinear
 from .takp_resnet18 import (
     TaKPForwardOutput,
     TaKPIncrementalNet,
@@ -38,6 +46,11 @@ __all__ = [
     "FGPResNet32",
     "CifarResNet18",
     "IncrementalNet",
+    "PyCILCosineLinear",
+    "PyCILSimpleLinear",
+    "PyCILPODNet",
+    "PyCILPODNetOutput",
+    "PyCILSplitCosineLinear",
     "TaKPForwardOutput",
     "TaKPIncrementalNet",
     "TaKPResNet18Backbone",
@@ -47,4 +60,5 @@ __all__ = [
     "kmeans_imprinted_weights",
     "resnet18",
     "resnet32",
+    "reduce_proxies",
 ]

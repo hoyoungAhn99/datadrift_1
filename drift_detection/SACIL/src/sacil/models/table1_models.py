@@ -13,6 +13,7 @@ from sacil.methods.fgp import RectifiedCosineLinear
 
 from .resnet18 import resnet18
 from .resnet32 import resnet32
+from .pycil_linear import PyCILSimpleLinear
 
 
 @dataclass
@@ -34,13 +35,13 @@ class ExpandableLinearNet(nn.Module):
         else:
             raise ValueError(f"unsupported linear backbone: {backbone}")
         self.feature_dim = int(self.backbone.output_dim)
-        self.classifier = nn.Linear(self.feature_dim, int(num_classes))
-        self._reset_classifier(self.classifier)
+        self.classifier = PyCILSimpleLinear(
+            self.feature_dim, int(num_classes)
+        )
 
     @staticmethod
-    def _reset_classifier(classifier: nn.Linear) -> None:
-        nn.init.kaiming_normal_(classifier.weight, nonlinearity="linear")
-        nn.init.zeros_(classifier.bias)
+    def _reset_classifier(classifier: PyCILSimpleLinear) -> None:
+        classifier.reset_parameters()
 
     @property
     def num_classes(self) -> int:
@@ -51,7 +52,9 @@ class ExpandableLinearNet(nn.Module):
 
     def forward_detailed(self, images: Tensor) -> Table1ForwardOutput:
         features = self.extract_features(images)
-        return Table1ForwardOutput(self.classifier(features), features)
+        return Table1ForwardOutput(
+            self.classifier(features)["logits"], features
+        )
 
     def forward(
         self, images: Tensor, return_features: bool = False
@@ -67,11 +70,10 @@ class ExpandableLinearNet(nn.Module):
         target = int(num_classes)
         if target <= self.num_classes:
             raise ValueError("classifier expansion must add classes")
-        expanded = nn.Linear(self.feature_dim, target).to(
+        expanded = PyCILSimpleLinear(self.feature_dim, target).to(
             device=self.classifier.weight.device,
             dtype=self.classifier.weight.dtype,
         )
-        self._reset_classifier(expanded)
         with torch.no_grad():
             expanded.weight[: self.num_classes].copy_(self.classifier.weight)
             expanded.bias[: self.num_classes].copy_(self.classifier.bias)
@@ -144,6 +146,7 @@ class FGPResNet32(nn.Module):
         self.layer1 = self._stage(16, 16, 5, stride=1)
         self.layer2 = self._stage(16, 32, 5, stride=2)
         self.layer3 = self._stage(32, 64, 5, stride=2, final=True)
+        self.avgpool = nn.AvgPool2d(8)
         self._initialize()
 
     @staticmethod
@@ -185,7 +188,8 @@ class FGPResNet32(nn.Module):
         outputs = self.layer1(outputs)
         outputs = self.layer2(outputs)
         outputs = self.layer3(outputs)
-        return torch.flatten(F.adaptive_avg_pool2d(outputs, 1), 1)
+        outputs = self.avgpool(outputs)
+        return outputs.view(outputs.size(0), -1)
 
 
 class FGPIncrementalNet(nn.Module):
@@ -234,9 +238,15 @@ class CREATEIncrementalNet(nn.Module):
         hidden_layers: tuple[int, ...] = (),
         latent_features: int = 32,
         reconstruction_scale: float = 0.1,
+        backbone: str = "resnet32",
     ) -> None:
         super().__init__()
-        self.backbone = resnet18()
+        if backbone == "resnet32":
+            self.backbone = resnet32()
+        elif backbone == "resnet18":
+            self.backbone = resnet18()
+        else:
+            raise ValueError(f"unsupported CREATE backbone: {backbone}")
         self.feature_dim = int(self.backbone.output_dim)
         self.hidden_layers = tuple(int(value) for value in hidden_layers)
         self.latent_features = int(latent_features)
@@ -364,7 +374,7 @@ class _CSCCTBasicBlock(nn.Module):
 class CSCCTResNet32(nn.Module):
     output_dim = 64
 
-    def __init__(self) -> None:
+    def __init__(self, *, initialize: bool = True) -> None:
         super().__init__()
         self.conv1 = nn.Conv2d(3, 16, 3, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(16)
@@ -372,7 +382,9 @@ class CSCCTResNet32(nn.Module):
         self.layer1 = self._stage(16, 16, stride=1)
         self.layer2 = self._stage(16, 32, stride=2)
         self.layer3 = self._stage(32, 64, stride=2, final=True)
-        self._initialize()
+        self.avgpool = nn.AvgPool2d(8, stride=1)
+        if initialize:
+            self.initialize_parameters()
 
     @staticmethod
     def _stage(
@@ -393,7 +405,7 @@ class CSCCTResNet32(nn.Module):
             )
         return nn.Sequential(*blocks)
 
-    def _initialize(self) -> None:
+    def initialize_parameters(self) -> None:
         for module in self.modules():
             if isinstance(module, nn.Conv2d):
                 nn.init.kaiming_normal_(
@@ -406,9 +418,8 @@ class CSCCTResNet32(nn.Module):
     def stem(self, images: Tensor) -> Tensor:
         return self.relu(self.bn1(self.conv1(images)))
 
-    @staticmethod
-    def pool(features: Tensor) -> Tensor:
-        return torch.flatten(F.adaptive_avg_pool2d(features, 1), 1)
+    def pool(self, features: Tensor) -> Tensor:
+        return torch.flatten(self.avgpool(features), 1)
 
     def forward(self, images: Tensor) -> tuple[Tensor, tuple[Tensor, ...]]:
         map1 = self.layer1(self.stem(images))
@@ -480,12 +491,17 @@ def _convert_scale_shift(module: nn.Module) -> None:
 class CSCCTIncrementalNet(nn.Module):
     def __init__(self, num_classes: int) -> None:
         super().__init__()
-        self.first = CSCCTResNet32()
+        # The reference ResNet constructs its cosine FC before applying the
+        # explicit Kaiming initialization to convolution layers.  Defer the
+        # backbone initialization until after the separate wrapper head has
+        # been constructed so the seeded parameter stream is identical.
+        self.first = CSCCTResNet32(initialize=False)
         self.second: CSCCTResNet32 | None = None
         self.feature_dim = self.first.output_dim
         self.classifier = ChunkedCosineClassifier(
             self.feature_dim, [int(num_classes)]
         )
+        self.first.initialize_parameters()
         self.fusion = nn.ParameterList(
             nn.Parameter(torch.tensor([0.5])) for _ in range(3)
         )

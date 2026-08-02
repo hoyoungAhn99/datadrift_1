@@ -21,8 +21,12 @@ def herding_select(
     if count <= 0:
         return []
 
-    normalized = F.normalize(features.detach().float(), dim=1)
-    class_mean = F.normalize(normalized.mean(dim=0, keepdim=True), dim=1)[0]
+    # Stock PyCIL BaseLearner normalizes each feature vector, then uses the
+    # unnormalized arithmetic mean during greedy exemplar construction.
+    # Normalizing the class mean here changes the ranking of candidates.
+    values = features.detach().float()
+    normalized = values / (values.norm(dim=1, keepdim=True) + 1e-8)
+    class_mean = normalized.mean(dim=0)
     selected_mask = torch.zeros(
         normalized.shape[0], dtype=torch.bool, device=normalized.device
     )
