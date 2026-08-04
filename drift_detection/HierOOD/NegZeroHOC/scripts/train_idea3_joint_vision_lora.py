@@ -4,7 +4,6 @@ import argparse
 from argparse import Namespace
 import gc
 import math
-import random
 import sys
 from pathlib import Path
 
@@ -21,7 +20,12 @@ except ImportError:  # pragma: no cover
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from negzerohoc.checkpointing import load_idea3_checkpoint, save_idea3_checkpoint
+from negzerohoc.checkpointing import (
+    load_idea3_checkpoint,
+    load_idea3_checkpoint_with_fallback,
+    previous_checkpoint_path,
+    save_idea3_checkpoint,
+)
 from negzerohoc.config_utils import load_yaml_config
 from negzerohoc.evaluation import build_hierarchy, evaluate_split, make_distance_mats, mixed_summary
 from negzerohoc.feature_io import ensure_dir, save_json
@@ -43,7 +47,12 @@ from negzerohoc.metric_terminal import (
 )
 from negzerohoc.output_layout import resolve_experiment_artifact
 from negzerohoc.prompt_models import HierPromptConfig, PositivePromptLearner
-from negzerohoc.runtime import available_device, configured_device
+from negzerohoc.runtime import (
+    available_device,
+    configure_reproducibility,
+    configured_device,
+    seed_data_loader_worker,
+)
 from negzerohoc.soft_prompting import SoftPromptTextEncoder
 from negzerohoc.vision_lora import (
     VisionLoRAConfig,
@@ -131,6 +140,7 @@ def load_config(path: str | Path) -> Namespace:
         device=configured_device(runtime_cfg),
         gpu_ids=tuple(int(gpu_id) for gpu_id in runtime_gpu_ids),
         seed=int(runtime_cfg.get("seed", 0)),
+        deterministic=bool(runtime_cfg.get("deterministic", True)),
         prompt=prompt_cfg,
         vision_lora=lora_cfg,
         augmentation=augmentation_cfg,
@@ -327,6 +337,7 @@ def make_loader(dataset, batch_size: int, num_workers: int, shuffle: bool, seed:
         pin_memory=torch.cuda.is_available(),
         persistent_workers=num_workers > 0,
         generator=generator,
+        worker_init_fn=seed_data_loader_worker,
     )
 
 
@@ -382,6 +393,7 @@ def make_hierarchy_metric_loader(dataset, hierarchy, args):
         pin_memory=torch.cuda.is_available(),
         persistent_workers=args.num_workers > 0,
         generator=generator,
+        worker_init_fn=seed_data_loader_worker,
     )
 
 
@@ -813,10 +825,7 @@ def main():
             "joint_training.loss.sampler must be one of: "
             "hierarchy_independent, ms_loss, globally_balanced"
         )
-    random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
+    configure_reproducibility(args.seed, deterministic=args.deterministic)
     device = available_device(args.device)
 
     hierarchy, _ = build_hierarchy(REPO_ROOT, args.id_split, args.hierarchy)
@@ -920,6 +929,7 @@ def main():
         f"vision_lora_params={sum(parameter.numel() for parameter in lora_params)}, "
         f"batch_size={args.train_batch_size}, precision={args.precision}, "
         f"loss={args.loss_name}, sampler={args.loss_sampler}, "
+        f"seed={args.seed}, deterministic={args.deterministic}, "
         f"gpu_ids={list(active_gpu_ids)}, "
         f"data_parallel={len(active_gpu_ids) > 1}, "
         f"grad_cache={args.grad_cache_mode}, "
@@ -936,8 +946,12 @@ def main():
     last_completed_epoch = 0
 
     resume_path = Path(args.resume_checkpoint)
-    if args.resume_enabled and resume_path.exists():
-        resume_checkpoint = load_idea3_checkpoint(resume_path, map_location="cpu")
+    previous_resume_path = previous_checkpoint_path(resume_path)
+    if args.resume_enabled and (resume_path.exists() or previous_resume_path.exists()):
+        resume_checkpoint, loaded_resume_path = load_idea3_checkpoint_with_fallback(
+            resume_path,
+            map_location="cpu",
+        )
         training_state = resume_checkpoint.get("training_state")
         if not training_state:
             raise ValueError(
@@ -997,8 +1011,13 @@ def main():
         if sampler_state is not None and hasattr(batch_sampler, "load_state_dict"):
             batch_sampler.load_state_dict(sampler_state)
         restore_rng_state(training_state.get("rng_state"), train_loader)
+        if loaded_resume_path != resume_path:
+            print(
+                f"primary resume checkpoint was unavailable or invalid; "
+                f"using previous checkpoint: {loaded_resume_path}"
+            )
         print(
-            f"resumed checkpoint: {resume_path}, "
+            f"resumed checkpoint: {loaded_resume_path}, "
             f"completed_epoch={last_completed_epoch}, "
             f"next_epoch={start_epoch if start_epoch <= args.epochs else 'finalize'}, "
             f"best_epoch={best_epoch}, best_val_bacc={best_bacc:.6f}"

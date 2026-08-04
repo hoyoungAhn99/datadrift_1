@@ -33,7 +33,11 @@ from negzerohoc.losses import (
 )
 from negzerohoc.output_layout import resolve_experiment_artifact, resolve_shared_feature_dir
 from negzerohoc.prompt_models import HierPromptConfig, PositivePromptLearner
-from negzerohoc.runtime import available_device, configured_device
+from negzerohoc.runtime import (
+    available_device,
+    configure_reproducibility,
+    configured_device,
+)
 from negzerohoc.soft_prompting import SoftPromptTextEncoder, soft_prompt_smoke_test
 from negzerohoc.training_data import build_positive_edge_examples, gather_image_features, group_examples_by_parent, node_path, sample_examples
 
@@ -741,8 +745,7 @@ def main():
     if not args.features_dir:
         raise ValueError("Missing features.dir or inference.features_dir in config")
 
-    random.seed(args.seed)
-    torch.manual_seed(args.seed)
+    configure_reproducibility(args.seed)
     device = available_device(args.device)
 
     hierarchy, _ = build_hierarchy(REPO_ROOT, args.id_split, args.hierarchy)

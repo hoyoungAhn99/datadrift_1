@@ -1,1 +1,9 @@
 /mds
+/ref_codes
+/ref_papers
+/datasets
+/outputs
+/.pytest_cache
+/src/*.egg-info
+**/__pycache__/
+*.py[cod]

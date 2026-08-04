@@ -35,7 +35,11 @@ from negzerohoc.idea4_inference import terminal_global_path_scores
 from negzerohoc.output_layout import resolve_experiment_artifact
 from negzerohoc.oracle_parent import oracle_parent_diagnostics
 from negzerohoc.prompt_models import HierNegativePromptLearner
-from negzerohoc.runtime import available_device, configured_device
+from negzerohoc.runtime import (
+    available_device,
+    configure_reproducibility,
+    configured_device,
+)
 from negzerohoc.training_data import (
     build_positive_edge_examples,
     group_examples_by_parent_child,
@@ -262,10 +266,7 @@ def save_checkpoint(args, positive_checkpoint, prompt_cfg, negative, metrics):
 
 def main():
     args = parse_args()
-    random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
+    configure_reproducibility(args.seed)
     device = available_device(args.device)
 
     hierarchy, _ = build_hierarchy(REPO_ROOT, args.id_split, args.hierarchy)

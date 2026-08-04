@@ -28,7 +28,11 @@ from negzerohoc.idea4_inference import predict_features_terminal_global_path
 from negzerohoc.losses import unknown_regularization
 from negzerohoc.output_layout import resolve_experiment_artifact
 from negzerohoc.prompt_models import HierPromptConfig, PositivePromptLearner, UnknownPromptLearner
-from negzerohoc.runtime import available_device, configured_device
+from negzerohoc.runtime import (
+    available_device,
+    configure_reproducibility,
+    configured_device,
+)
 from negzerohoc.semantic_index import LocalSemanticCandidates
 from negzerohoc.soft_prompting import SoftPromptTextEncoder
 from negzerohoc.training_data import (
@@ -204,10 +208,11 @@ def validate_positive_checkpoint(args, checkpoint: dict) -> None:
             for key, (actual, expected_value) in mismatches.items()
         )
         raise ValueError(f"Idea 4 positive checkpoint/config mismatch: {details}")
-    if checkpoint.get("stage") != "positive_joint_vision_lora":
+    stage = str(checkpoint.get("stage", ""))
+    if not stage.startswith("positive_joint_vision_lora"):
         raise ValueError(
-            "Idea 4 requires a positive_joint_vision_lora checkpoint, "
-            f"got {checkpoint.get('stage')!r}"
+            "Frozen-positive training requires a positive_joint_vision_lora "
+            f"checkpoint family, got {checkpoint.get('stage')!r}"
         )
     for key in (
         "positive_state_dict",
@@ -605,10 +610,7 @@ def scalar_metric_summary(result: dict) -> dict:
 
 def main():
     args = parse_args()
-    random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
+    configure_reproducibility(args.seed)
     device = available_device(args.device)
 
     hierarchy, _ = build_hierarchy(REPO_ROOT, args.id_split, args.hierarchy)

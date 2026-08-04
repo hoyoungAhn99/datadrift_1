@@ -166,3 +166,78 @@ C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_idea3_joint_vis
 
 # Maximum leaf-class diversity ablation 2/2: all 80 ID leaves, K3, logical batch 240
 C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_idea3_joint_vision_lora.py --config configs\04_joint_vision_lora\idea3_fgvc_aircraft_b16_joint_vision_lora_r16_qkvo_dual_weihims_b240_p80k3_e100_2gpu_gradcache_earlystop.yaml
+
+# P80K4 positive-only OOD diagnostics
+C:\Users\user\anaconda3\envs\hoyoung\python.exe scripts\diagnose_leaf_cosine_ood.py --config configs\08_idea7_virtual_open_negprompt\idea7_fgvc_aircraft_b16_r16_qkvo_virtual_open.yaml --vision lora --text learned --gpu-id 0 --positive-checkpoint outputs\experiments\idea3-fgvc-aircraft-b16-dual-weihims-b320-p80k4-es\checkpoints\positive.pt --out outputs\experiments\idea3-fgvc-aircraft-b16-dual-weihims-b320-p80k4-es\diagnostics\positive-leaf-cosine.json
+C:\Users\user\anaconda3\envs\hoyoung\python.exe scripts\diagnose_image_density_ood.py --config configs\09_image_metric_joint_prompts\idea8_fgvc_aircraft_b16_image_metric_lora.yaml --checkpoint outputs\experiments\idea3-fgvc-aircraft-b16-dual-weihims-b320-p80k4-es\checkpoints\positive.pt --gpu-id 0 --knn-k 20 --out outputs\experiments\idea3-fgvc-aircraft-b16-dual-weihims-b320-p80k4-es\diagnostics\image-density-ood.json
+
+# P80K3 positive-only OOD diagnostics
+C:\Users\user\anaconda3\envs\hoyoung\python.exe scripts\diagnose_leaf_cosine_ood.py --config configs\08_idea7_virtual_open_negprompt\idea7_fgvc_aircraft_b16_r16_qkvo_virtual_open.yaml --vision lora --text learned --gpu-id 1 --positive-checkpoint outputs\experiments\idea3-fgvc-aircraft-b16-dual-weihims-b240-p80k3-es\checkpoints\positive.pt --out outputs\experiments\idea3-fgvc-aircraft-b16-dual-weihims-b240-p80k3-es\diagnostics\positive-leaf-cosine.json
+C:\Users\user\anaconda3\envs\hoyoung\python.exe scripts\diagnose_image_density_ood.py --config configs\09_image_metric_joint_prompts\idea8_fgvc_aircraft_b16_image_metric_lora.yaml --checkpoint outputs\experiments\idea3-fgvc-aircraft-b16-dual-weihims-b240-p80k3-es\checkpoints\positive.pt --gpu-id 1 --knn-k 20 --out outputs\experiments\idea3-fgvc-aircraft-b16-dual-weihims-b240-p80k3-es\diagnostics\image-density-ood.json
+
+# Literature NegPrompt ablation, GPU 0/1
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_paper_negprompt_ablation.py --config configs\11_paper_negprompt\repulsive_npd_gpu0.yaml
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_paper_negprompt_ablation.py --config configs\11_paper_negprompt\published_npd_gpu1.yaml
+
+# Tree-Consistent Virtual-Sibling loss + threshold-free complement-terminal decoder
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_tree_virtual_unknown.py --config configs\12_tree_virtual_unknown\fgvc_aircraft_p64k4_pilot.yaml
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_tree_loco_multiprompt.py --config configs\13_tree_loco_multiprompt\fgvc_aircraft_p64k4_k4.yaml
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\evaluate_tree_loco_calibration.py --config configs\13_tree_loco_multiprompt\fgvc_aircraft_p64k4_k4.yaml
+
+# Negative-prompt-free dual-expert support pilots (GPU 0/1)
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\evaluate_dual_expert_support.py --config configs\14_hierarchical_support\fgvc_aircraft_dual_expert_metric_gpu0.yaml
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\evaluate_dual_expert_support.py --config configs\14_hierarchical_support\fgvc_aircraft_dual_expert_p64_gpu1.yaml
+
+# Frozen-feature multi-depth CompProb/EntCompProb pilots (GPU 0/1)
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_multidepth_feature_heads.py --config configs\15_multidepth_feature_heads\fgvc_aircraft_metric_gpu0.yaml
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_multidepth_feature_heads.py --config configs\15_multidepth_feature_heads\fgvc_aircraft_p64_gpu1.yaml
+
+# Calibration-safe frozen CLIP controls (two deterministic train splits)
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_multidepth_feature_heads.py --config configs\15_multidepth_feature_heads\fgvc_aircraft_base_clip_seed0_gpu0.yaml
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_multidepth_feature_heads.py --config configs\15_multidepth_feature_heads\fgvc_aircraft_base_clip_seed1_gpu1.yaml
+
+# End-to-end calibration-safe metric LoRA: encoder never sees calibration split
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_image_metric_vision_lora.py --config configs\09_image_metric_joint_prompts\idea8_fgvc_aircraft_b16_image_metric_lora_reference_only_seed0.yaml
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_image_metric_vision_lora.py --config configs\09_image_metric_joint_prompts\idea8_fgvc_aircraft_b16_image_metric_lora_reference_only_seed1.yaml
+
+# Multi-depth/Fisher inference on the end-to-end held-out representations
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_multidepth_feature_heads.py --config configs\15_multidepth_feature_heads\fgvc_aircraft_reference_only_seed0_gpu0.yaml
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_multidepth_feature_heads.py --config configs\15_multidepth_feature_heads\fgvc_aircraft_reference_only_seed1_gpu1.yaml
+
+# Threshold-free shared masked-support likelihood pilots (GPU 0/1)
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_probabilistic_support_likelihood.py --config configs\16_probabilistic_support\fgvc_aircraft_metric_gpu0.yaml
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_probabilistic_support_likelihood.py --config configs\16_probabilistic_support\fgvc_aircraft_p64_gpu1.yaml
+
+# Threshold-free coherent K+1 prototype-mixture pilots (GPU 0/1)
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_probabilistic_support_likelihood.py --config configs\17_probabilistic_mixture\fgvc_aircraft_metric_gpu0.yaml
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_probabilistic_support_likelihood.py --config configs\17_probabilistic_mixture\fgvc_aircraft_p64_gpu1.yaml
+
+# Threshold-free reference-image vMF mixture pilots (GPU 0/1)
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_probabilistic_support_likelihood.py --config configs\18_reference_sample_mixture\fgvc_aircraft_metric_gpu0.yaml
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_probabilistic_support_likelihood.py --config configs\18_reference_sample_mixture\fgvc_aircraft_p64_gpu1.yaml
+
+# Reference-only final-epoch K+1 mixture with split-lineage checks and pre-OOD ID gate
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_probabilistic_support_likelihood.py --config configs\16_probabilistic_support\fgvc_aircraft_reference_only_last_seed0_categorical_gpu0.yaml
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_probabilistic_support_likelihood.py --config configs\16_probabilistic_support\fgvc_aircraft_reference_only_last_seed1_categorical_gpu1.yaml
+
+# Idea N / CF-HCH stage 1: topology-only LOCO representation cross-fit
+# Audited feasible heldout folds are 13/13/12/12 (50 eligible leaves), not 4x16.
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_crossfit_class_holdout_lora.py --config configs\18_crossfit_class_holdout\fgvc_aircraft_loco_folds02_gpu0.yaml
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_crossfit_class_holdout_lora.py --config configs\18_crossfit_class_holdout\fgvc_aircraft_loco_folds13_gpu1.yaml
+
+# Idea O/P / CF-RPEP stage 2: non-nested screen plus strict nested class/image OOF gate
+# This stage never loads actual OOD; only its nested gate may unlock the transfer evaluation.
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_cf_rpep_oof.py --config configs\19_cf_rpep\fgvc_aircraft_oof_gate_gpu0.yaml
+
+# Idea V / CF-FSHP: nested class/image OOF method-development screen
+# Reuses the actual-OOD-free CF-RPEP OOF bundles; a pass cannot unlock official OOD.
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\train_cf_fshp_oof.py --config configs\22_cf_fshp\fgvc_aircraft_oof_screen_gpu0.yaml
+
+# Idea R / HHP: nested class-disjoint hierarchical stopping posterior (cached OOF only)
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\analyze_cf_hierarchical_hazard.py --config configs\20_hierarchical_hazard\fgvc_aircraft_oof.yaml
+
+# Idea T / SRHC: shared linear relational hazard, strict nested OOF
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\analyze_cf_relational_hazard.py --config configs\21_relational_hazard\fgvc_aircraft_oof.yaml
+
+# Idea U / CLRM: retained-class LOCO relational meta-head, outer-class OOF gate
+C:\Users\user\anaconda3\envs\hoyoung\python.exe -u scripts\analyze_cf_class_loco_relational.py --config configs\22_class_loco_relational\fgvc_aircraft_oof.yaml

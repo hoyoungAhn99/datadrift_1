@@ -28,7 +28,11 @@ from negzerohoc.idea3_inference import build_idea3_semantic_index, predict_featu
 from negzerohoc.losses import unknown_ce_loss, unknown_regularization
 from negzerohoc.output_layout import resolve_experiment_artifact, resolve_shared_feature_dir
 from negzerohoc.prompt_models import HierPromptConfig, PositivePromptLearner, UnknownPromptLearner
-from negzerohoc.runtime import available_device, configured_device
+from negzerohoc.runtime import (
+    available_device,
+    configure_reproducibility,
+    configured_device,
+)
 from negzerohoc.soft_prompting import SoftPromptTextEncoder
 from negzerohoc.training_data import (
     UNKNOWN_LABEL,
@@ -189,8 +193,7 @@ def main():
     if not args.features_dir:
         raise ValueError("Missing features.dir or inference.features_dir in config")
 
-    random.seed(args.seed)
-    torch.manual_seed(args.seed)
+    configure_reproducibility(args.seed)
     device = available_device(args.device)
 
     hierarchy, _ = build_hierarchy(REPO_ROOT, args.id_split, args.hierarchy)

@@ -24,7 +24,11 @@ from negzerohoc.config_utils import load_yaml_config
 from negzerohoc.evaluation import build_hierarchy, evaluate_split, make_distance_mats, mixed_summary
 from negzerohoc.feature_io import ensure_dir, load_feature_file, save_json
 from negzerohoc.output_layout import resolve_experiment_artifact, resolve_shared_feature_dir
-from negzerohoc.runtime import available_device, configured_device
+from negzerohoc.runtime import (
+    available_device,
+    configure_reproducibility,
+    configured_device,
+)
 from negzerohoc.training_data import build_positive_edge_examples, gather_image_features, group_examples_by_parent, node_path, sample_examples
 
 
@@ -497,8 +501,7 @@ def main() -> None:
     if args.probe not in {"leaf", "local", "both"}:
         raise ValueError("linear_probe.probe must be one of: leaf, local, both")
 
-    random.seed(args.seed)
-    torch.manual_seed(args.seed)
+    configure_reproducibility(args.seed)
     device = available_device(args.device)
     args.device = device
 

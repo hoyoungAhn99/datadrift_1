@@ -10,6 +10,12 @@ from .prompts import (
 
 
 TEXT_TEMPLATES_VERSION = "idea3_path_aware_v1"
+UNKNOWN_TEXT_VARIANTS = {
+    "generic",
+    "parent_conditioned",
+    "unseen_child",
+    "literal_not",
+}
 
 
 def node_depth(hierarchy, node: str) -> int:
@@ -83,11 +89,34 @@ def build_parent_text(dataset_name: str, hierarchy, parent: str) -> str:
     return f"a photo of {parent_name}, a visual category"
 
 
-def build_parent_unknown_text(dataset_name: str, hierarchy, parent: str) -> str:
+def build_parent_unknown_text(
+    dataset_name: str,
+    hierarchy,
+    parent: str,
+    variant: str = "parent_conditioned",
+) -> str:
+    if variant not in UNKNOWN_TEXT_VARIANTS:
+        raise ValueError(
+            f"Unsupported unknown text variant {variant!r}; "
+            f"expected one of {sorted(UNKNOWN_TEXT_VARIANTS)}"
+        )
     dataset_key = dataset_name.lower()
+    if variant == "generic":
+        if dataset_key == "fgvc-aircraft":
+            return "a photo of an unknown aircraft"
+        return "a photo of an unknown visual category"
+
     if parent == "root":
         if dataset_key == "fgvc-aircraft":
+            if variant == "literal_not":
+                return "a photo of an aircraft that is not from a known manufacturer"
+            if variant == "unseen_child":
+                return "a photo of an aircraft from an unseen manufacturer"
             return "a photo of an aircraft from an unknown manufacturer"
+        if variant == "literal_not":
+            return "a photo of a visual category that is not known"
+        if variant == "unseen_child":
+            return "a photo of an unseen visual category"
         return "a photo of an unknown visual category"
 
     parent_name = _path_canonical(hierarchy, dataset_name, parent)
@@ -95,11 +124,45 @@ def build_parent_unknown_text(dataset_name: str, hierarchy, parent: str) -> str:
 
     if dataset_key == "fgvc-aircraft":
         if parent_role == "manufacturer":
+            if variant == "literal_not":
+                return (
+                    f"a photo of an aircraft manufactured by {parent_name} "
+                    "that is not from a known aircraft family"
+                )
+            if variant == "unseen_child":
+                return (
+                    f"a photo of an unseen aircraft family manufactured by "
+                    f"{parent_name}"
+                )
             return f"a photo of an unknown aircraft family manufactured by {parent_name}"
         if parent_role == "family":
+            if variant == "literal_not":
+                return (
+                    f"a photo of an aircraft in the {parent_name} family "
+                    "that is not a known aircraft model"
+                )
+            if variant == "unseen_child":
+                return (
+                    f"a photo of an unseen aircraft model under the "
+                    f"{parent_name} family"
+                )
             return f"a photo of an unknown aircraft model under the {parent_name} family"
+        if variant == "literal_not":
+            return (
+                f"a photo of an aircraft under {parent_name} "
+                "that is not a known child category"
+            )
+        if variant == "unseen_child":
+            return f"a photo of an unseen aircraft category under {parent_name}"
         return f"a photo of another aircraft category under {parent_name}"
 
+    if variant == "literal_not":
+        return (
+            f"a photo of a visual category under {parent_name} "
+            "that is not a known child category"
+        )
+    if variant == "unseen_child":
+        return f"a photo of an unseen visual category under {parent_name}"
     return f"a photo of another visual category under {parent_name}"
 
 

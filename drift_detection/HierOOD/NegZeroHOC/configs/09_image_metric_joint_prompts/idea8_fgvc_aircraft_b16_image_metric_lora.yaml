@@ -11,6 +11,9 @@ image_metric_training:
   epochs: 30
   classes_per_batch: 4
   examples_per_class: 4
+  resume:
+    enabled: false
+    checkpoint: null
   lora_lr: 0.0001
   proxy_lr: 0.001
   weight_decay: 0.0001

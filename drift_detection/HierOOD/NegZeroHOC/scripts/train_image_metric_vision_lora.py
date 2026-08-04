@@ -7,9 +7,10 @@ import random
 import sys
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch import nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 try:
     from tqdm.auto import tqdm
@@ -20,7 +21,11 @@ except ImportError:  # pragma: no cover
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from negzerohoc.checkpointing import save_idea3_checkpoint
+from negzerohoc.checkpointing import (
+    load_idea3_checkpoint_with_fallback,
+    previous_checkpoint_path,
+    save_idea3_checkpoint,
+)
 from negzerohoc.config_utils import load_yaml_config
 from negzerohoc.evaluation import build_hierarchy
 from negzerohoc.feature_io import save_json
@@ -31,8 +36,16 @@ from negzerohoc.image_metric import (
     cosine_proxy_loss,
     supervised_contrastive_loss,
 )
+from negzerohoc.hierarchical_support import (
+    stratified_reference_calibration_split,
+)
 from negzerohoc.output_layout import resolve_experiment_artifact
-from negzerohoc.runtime import available_device, configured_device
+from negzerohoc.runtime import (
+    available_device,
+    configure_reproducibility,
+    configured_device,
+    seed_data_loader_worker,
+)
 from negzerohoc.vision_lora import (
     VisionLoRAConfig,
     inject_clip_vision_lora,
@@ -45,6 +58,7 @@ from negzerohoc.vision_lora import (
 from scripts.train_idea3_joint_vision_lora import (
     autocast_context,
     build_datasets,
+    build_transforms,
     load_clip_and_tokenizer,
     make_grad_scaler,
     make_loader,
@@ -64,6 +78,8 @@ def load_config(path: str | Path) -> Namespace:
     train_cfg = cfg.get("image_metric_training", {})
     loss_cfg = train_cfg.get("loss", {})
     validation_cfg = train_cfg.get("validation", {})
+    split_cfg = train_cfg.get("training_split", {})
+    resume_cfg = train_cfg.get("resume", {})
     experiment_name = str(experiment_cfg.get("name", "image-metric-vision-lora"))
     output_root = Path(experiment_cfg.get("output_root", "outputs"))
 
@@ -75,6 +91,13 @@ def load_config(path: str | Path) -> Namespace:
             kind=kind,
             default_filename=filename,
         ))
+
+    last_checkpoint = artifact(
+        validation_cfg.get("last_checkpoint"),
+        "checkpoints",
+        f"{experiment_name}-last.pt",
+    )
+    resume_checkpoint = resume_cfg.get("checkpoint") or last_checkpoint
 
     return Namespace(
         config=str(path),
@@ -90,6 +113,7 @@ def load_config(path: str | Path) -> Namespace:
         local_files_only=bool(clip_cfg.get("local_files_only", True)),
         device=configured_device(runtime_cfg),
         seed=int(runtime_cfg.get("seed", 0)),
+        deterministic=bool(runtime_cfg.get("deterministic", True)),
         augmentation=cfg.get("augmentation", {}),
         num_workers=int(dataloader_cfg.get("num_workers", 4)),
         vision_lora=cfg.get("vision_lora", {}),
@@ -113,8 +137,16 @@ def load_config(path: str | Path) -> Namespace:
         lambda_proxy=float(loss_cfg.get("lambda_proxy", 1.0)),
         lambda_retention=float(loss_cfg.get("lambda_retention", 0.5)),
         validation_every_n_epochs=max(1, int(validation_cfg.get("every_n_epochs", 1))),
+        reference_only_training=bool(
+            split_cfg.get("reference_only", False)
+        ),
+        reference_fraction=float(
+            split_cfg.get("reference_fraction", 0.8)
+        ),
+        resume_enabled=bool(resume_cfg.get("enabled", False)),
+        resume_checkpoint=str(resume_checkpoint),
         checkpoint=artifact(train_cfg.get("checkpoint"), "checkpoints", f"{experiment_name}.pt"),
-        last_checkpoint=artifact(validation_cfg.get("last_checkpoint"), "checkpoints", f"{experiment_name}-last.pt"),
+        last_checkpoint=last_checkpoint,
         diagnostics_path=artifact(train_cfg.get("diagnostics_path"), "diagnostics", f"{experiment_name}-diagnostics.json"),
     )
 
@@ -127,6 +159,176 @@ def parse_args() -> Namespace:
 
 def clone_state(state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     return {key: value.detach().cpu().clone() for key, value in state.items()}
+
+
+def resume_signature(args, classes: list[str]) -> dict:
+    return {
+        "version": 1,
+        "experiment_name": args.experiment_name,
+        "dataset": args.dataset,
+        "datadir": args.datadir,
+        "hierarchy": args.hierarchy,
+        "id_split": args.id_split,
+        "classes": list(classes),
+        "clip_model": args.clip_model,
+        "vision_lora": args.vision_lora,
+        "seed": args.seed,
+        "deterministic": args.deterministic,
+        "num_workers": args.num_workers,
+        "augmentation": args.augmentation,
+        "epochs": args.epochs,
+        "classes_per_batch": args.classes_per_batch,
+        "examples_per_class": args.examples_per_class,
+        "eval_batch_size": args.eval_batch_size,
+        "lora_lr": args.lora_lr,
+        "proxy_lr": args.proxy_lr,
+        "weight_decay": args.weight_decay,
+        "precision": args.precision,
+        "gradient_checkpointing": args.gradient_checkpointing,
+        "gradient_clip_norm": args.gradient_clip_norm,
+        "supcon_temperature": args.supcon_temperature,
+        "proxy_temperature": args.proxy_temperature,
+        "proxy_margin": args.proxy_margin,
+        "triplet_base_margin": args.triplet_base_margin,
+        "triplet_hierarchy_margin": args.triplet_hierarchy_margin,
+        "lambda_supcon": args.lambda_supcon,
+        "lambda_triplet": args.lambda_triplet,
+        "lambda_proxy": args.lambda_proxy,
+        "lambda_retention": args.lambda_retention,
+        "validation_every_n_epochs": args.validation_every_n_epochs,
+        "reference_only_training": args.reference_only_training,
+        "reference_fraction": args.reference_fraction,
+    }
+
+
+def cuda_device_index(device: str) -> int:
+    parsed = torch.device(device)
+    if parsed.type != "cuda":
+        raise ValueError(f"Expected a CUDA device, got {device!r}")
+    return (
+        int(parsed.index)
+        if parsed.index is not None
+        else int(torch.cuda.current_device())
+    )
+
+
+def capture_rng_state(train_loader, device: str) -> dict:
+    state = {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch": torch.get_rng_state(),
+    }
+    if device.startswith("cuda") and torch.cuda.is_available():
+        state["cuda"] = torch.cuda.get_rng_state(
+            cuda_device_index(device)
+        ).cpu()
+    loader_generator = getattr(train_loader, "generator", None)
+    if loader_generator is not None:
+        state["train_loader_generator"] = loader_generator.get_state()
+    return state
+
+
+def restore_rng_state(
+    state: dict | None, train_loader, device: str
+) -> None:
+    if not state:
+        return
+    if state.get("python") is not None:
+        random.setstate(state["python"])
+    if state.get("numpy") is not None:
+        np.random.set_state(state["numpy"])
+    if state.get("torch") is not None:
+        torch.set_rng_state(state["torch"])
+    if (
+        device.startswith("cuda")
+        and torch.cuda.is_available()
+        and state.get("cuda") is not None
+    ):
+        torch.cuda.set_rng_state(
+            state["cuda"], cuda_device_index(device)
+        )
+    loader_generator = getattr(train_loader, "generator", None)
+    if (
+        loader_generator is not None
+        and state.get("train_loader_generator") is not None
+    ):
+        loader_generator.set_state(state["train_loader_generator"])
+
+
+def make_training_state(
+    args,
+    *,
+    classes,
+    epoch,
+    optimizer,
+    scheduler,
+    scaler,
+    train_loader,
+    device,
+    history,
+    best_epoch,
+    best_bacc,
+    best_lora_state,
+    best_proxy_state,
+    training_loop_complete,
+) -> dict:
+    batch_sampler = getattr(train_loader, "batch_sampler", None)
+    sampler_state = (
+        batch_sampler.state_dict()
+        if batch_sampler is not None and hasattr(batch_sampler, "state_dict")
+        else None
+    )
+    return {
+        "version": 1,
+        "epoch": int(epoch),
+        "training_loop_complete": bool(training_loop_complete),
+        "resume_signature": resume_signature(args, classes),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict(),
+        "scaler_state_dict": scaler.state_dict(),
+        "rng_state": capture_rng_state(train_loader, device),
+        "sampler_state_dict": sampler_state,
+        "history": list(history),
+        "best_epoch": best_epoch,
+        "best_bacc": (
+            float(best_bacc) if math.isfinite(best_bacc) else None
+        ),
+        "best_lora_state_dict": best_lora_state,
+        "best_proxy_state": best_proxy_state,
+    }
+
+
+def restore_training_components(
+    training_state: dict,
+    *,
+    optimizer,
+    scheduler,
+    scaler,
+    train_loader,
+    device,
+) -> None:
+    optimizer.load_state_dict(training_state["optimizer_state_dict"])
+    scheduler.load_state_dict(training_state["scheduler_state_dict"])
+    scaler.load_state_dict(training_state.get("scaler_state_dict", {}))
+    sampler_state = training_state.get("sampler_state_dict")
+    batch_sampler = getattr(train_loader, "batch_sampler", None)
+    if (
+        sampler_state is not None
+        and batch_sampler is not None
+        and hasattr(batch_sampler, "load_state_dict")
+    ):
+        batch_sampler.load_state_dict(sampler_state)
+    restore_rng_state(
+        training_state.get("rng_state"), train_loader, device
+    )
+
+
+def next_epoch_from_training_state(
+    training_state: dict, epochs: int
+) -> int:
+    if training_state.get("training_loop_complete", False):
+        return int(epochs) + 1
+    return int(training_state["epoch"]) + 1
 
 
 def balanced_accuracy(targets: torch.Tensor, predictions: torch.Tensor) -> float:
@@ -192,8 +394,18 @@ def evaluate_proxy(args, clip_model, proxies: torch.Tensor, loader, device: str)
     }
 
 
-def save_checkpoint(args, path: str, lora_cfg, clip_model, proxies, classes, metrics):
-    checkpoint_path = save_idea3_checkpoint(
+def save_checkpoint(
+    args,
+    path: str,
+    lora_cfg,
+    clip_model,
+    proxies,
+    classes,
+    metrics,
+    *,
+    training_state: dict | None = None,
+):
+    return save_idea3_checkpoint(
         path,
         stage=CHECKPOINT_STAGE,
         dataset=args.dataset,
@@ -205,47 +417,108 @@ def save_checkpoint(args, path: str, lora_cfg, clip_model, proxies, classes, met
         vision_lora_state_dict=vision_lora_state_dict(clip_model),
         metrics=metrics,
         args=vars(args),
+        training_state=training_state,
+        extra_payload={
+            "metric_proxies": proxies.detach().cpu().clone(),
+            "metric_proxy_classes": list(classes),
+        },
     )
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    checkpoint["metric_proxies"] = proxies.detach().cpu().clone()
-    checkpoint["metric_proxy_classes"] = list(classes)
-    torch.save(checkpoint, checkpoint_path)
-    return checkpoint_path
 
 
 def main():
     args = parse_args()
     if not args.datadir:
         raise ValueError("Missing dataset.datadir")
-    random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
+    if args.resume_enabled and args.num_workers != 0:
+        raise ValueError(
+            "Exact image-metric resume requires dataloader.num_workers=0"
+        )
+    configure_reproducibility(
+        args.seed, deterministic=args.deterministic
+    )
     device = available_device(args.device)
 
     hierarchy, _ = build_hierarchy(REPO_ROOT, args.id_split, args.hierarchy)
     train_dataset, val_dataset, _ = build_datasets(args, hierarchy)
+    selection_dataset = val_dataset
+    selection_name = "official_test_id"
+    reference_indices = torch.arange(
+        len(train_dataset), dtype=torch.long
+    )
+    calibration_indices = torch.empty(0, dtype=torch.long)
+    sampler_targets = list(train_dataset.targets)
+    training_dataset = train_dataset
+    proxy_dataset = train_dataset
+    if args.reference_only_training:
+        from negzerohoc.prohoc_compat.utils.dataset_util import (
+            SubsetImageFolder,
+            get_id_classes,
+        )
+
+        _, eval_transform = build_transforms(args)
+        eval_train_dataset = SubsetImageFolder(
+            Path(args.datadir) / "train",
+            get_id_classes(args.id_split),
+            transform=eval_transform,
+        )
+        if (
+            eval_train_dataset.classes != train_dataset.classes
+            or eval_train_dataset.targets != train_dataset.targets
+        ):
+            raise RuntimeError(
+                "Train/eval dataset ordering differs for reference-only split"
+            )
+        reference_indices, calibration_indices = (
+            stratified_reference_calibration_split(
+                torch.tensor(train_dataset.targets, dtype=torch.long),
+                reference_fraction=args.reference_fraction,
+                seed=args.seed,
+            )
+        )
+        training_dataset = Subset(
+            train_dataset, reference_indices.tolist()
+        )
+        proxy_dataset = Subset(
+            eval_train_dataset, reference_indices.tolist()
+        )
+        selection_dataset = Subset(
+            eval_train_dataset, calibration_indices.tolist()
+        )
+        sampler_targets = [
+            train_dataset.targets[int(index)]
+            for index in reference_indices.tolist()
+        ]
+        selection_name = "id_train_internal_calibration"
     batch_sampler = PKBatchSampler(
-        train_dataset.targets,
+        sampler_targets,
         classes_per_batch=args.classes_per_batch,
         examples_per_class=args.examples_per_class,
         seed=args.seed,
     )
     train_loader = DataLoader(
-        train_dataset,
+        training_dataset,
         batch_sampler=batch_sampler,
         num_workers=args.num_workers,
         pin_memory=torch.cuda.is_available(),
         persistent_workers=args.num_workers > 0,
+        generator=torch.Generator().manual_seed(args.seed),
+        worker_init_fn=seed_data_loader_worker,
     )
     proxy_init_loader = make_loader(
-        train_dataset,
+        proxy_dataset,
         args.eval_batch_size,
         args.num_workers,
         shuffle=False,
         seed=args.seed,
     )
-    val_loader = make_loader(
+    selection_loader = make_loader(
+        selection_dataset,
+        args.eval_batch_size,
+        args.num_workers,
+        shuffle=False,
+        seed=args.seed,
+    )
+    official_test_loader = make_loader(
         val_dataset,
         args.eval_batch_size,
         args.num_workers,
@@ -260,9 +533,69 @@ def main():
     replaced_modules = inject_clip_vision_lora(clip_model, lora_cfg)
     lora_params = vision_lora_parameters(clip_model)
     feature_dim = int(clip_model.config.projection_dim)
-    initial_proxies = initialize_proxies(
-        args, clip_model, proxy_init_loader, len(train_dataset.classes), feature_dim, device
-    )
+    resume_payload = None
+    loaded_resume_path = None
+    resume_path = Path(args.resume_checkpoint)
+    previous_resume_path = previous_checkpoint_path(resume_path)
+    if args.resume_enabled and (
+        resume_path.exists() or previous_resume_path.exists()
+    ):
+        resume_payload, loaded_resume_path = (
+            load_idea3_checkpoint_with_fallback(
+                resume_path, map_location="cpu"
+            )
+        )
+        if resume_payload.get("stage") != CHECKPOINT_STAGE:
+            raise ValueError(
+                "Image-metric resume stage mismatch: "
+                f"saved={resume_payload.get('stage')}, "
+                f"expected={CHECKPOINT_STAGE}"
+            )
+        training_state = resume_payload["training_state"]
+        saved_signature = training_state.get("resume_signature")
+        current_signature = resume_signature(
+            args, train_dataset.classes
+        )
+        if saved_signature != current_signature:
+            raise ValueError(
+                "Image-metric resume configuration mismatch: "
+                f"saved={saved_signature}, current={current_signature}"
+            )
+        if resume_payload.get("metric_proxy_classes") != list(
+            train_dataset.classes
+        ):
+            raise ValueError(
+                "Image-metric resume proxy class ordering mismatch"
+            )
+        saved_proxies = resume_payload.get("metric_proxies")
+        expected_shape = (len(train_dataset.classes), feature_dim)
+        if (
+            not isinstance(saved_proxies, torch.Tensor)
+            or tuple(saved_proxies.shape) != expected_shape
+        ):
+            raise ValueError(
+                "Image-metric resume proxy shape mismatch: "
+                f"saved={getattr(saved_proxies, 'shape', None)}, "
+                f"expected={expected_shape}"
+            )
+        load_vision_lora_state_dict(
+            clip_model, resume_payload["vision_lora_state_dict"]
+        )
+        initial_proxies = saved_proxies.float().to(device)
+    else:
+        if args.resume_enabled:
+            print(
+                "resume checkpoint not found; starting fresh: "
+                f"{resume_path}"
+            )
+        initial_proxies = initialize_proxies(
+            args,
+            clip_model,
+            proxy_init_loader,
+            len(train_dataset.classes),
+            feature_dim,
+            device,
+        )
     proxies = nn.Parameter(initial_proxies)
 
     class_node_indices = hierarchy.gen_ds2node_map(train_dataset.classes)
@@ -280,7 +613,9 @@ def main():
         "image-only metric Vision LoRA training: "
         f"modules={len(replaced_modules)}, classes={len(train_dataset.classes)}, "
         f"P={args.classes_per_batch}, K={args.examples_per_class}, "
-        f"lora_params={sum(parameter.numel() for parameter in lora_params)}"
+        f"lora_params={sum(parameter.numel() for parameter in lora_params)}, "
+        f"selection={selection_name}, reference={len(reference_indices)}, "
+        f"calibration={len(calibration_indices)}"
     )
 
     history = []
@@ -288,7 +623,49 @@ def main():
     best_epoch = None
     best_lora_state = None
     best_proxy_state = None
-    for epoch in range(1, args.epochs + 1):
+    start_epoch = 1
+    if resume_payload is not None:
+        training_state = resume_payload["training_state"]
+        restore_training_components(
+            training_state,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            scaler=scaler,
+            train_loader=train_loader,
+            device=device,
+        )
+        history = list(training_state.get("history", []))
+        best_epoch = training_state.get("best_epoch")
+        saved_best_bacc = training_state.get("best_bacc")
+        best_bacc = (
+            float(saved_best_bacc)
+            if saved_best_bacc is not None
+            else float("-inf")
+        )
+        best_lora_state = training_state.get(
+            "best_lora_state_dict"
+        )
+        best_proxy_state = training_state.get(
+            "best_proxy_state"
+        )
+        completed_epoch = int(training_state["epoch"])
+        start_epoch = next_epoch_from_training_state(
+            training_state, args.epochs
+        )
+        if loaded_resume_path != resume_path:
+            print(
+                "primary resume checkpoint was unavailable or invalid; "
+                f"using previous checkpoint: {loaded_resume_path}"
+            )
+        print(
+            f"resumed checkpoint: {loaded_resume_path}, "
+            f"completed_epoch={completed_epoch}, "
+            f"next_epoch="
+            f"{start_epoch if start_epoch <= args.epochs else 'finalize'}, "
+            f"best_epoch={best_epoch}, best_val_bacc={best_bacc:.6f}"
+        )
+
+    for epoch in range(start_epoch, args.epochs + 1):
         batch_sampler.set_epoch(epoch)
         clip_model.eval()
         set_vision_lora_enabled(clip_model, True)
@@ -358,7 +735,9 @@ def main():
             epoch_stats[f"{group['group_name']}_lr"] = group["lr"]
 
         if epoch % args.validation_every_n_epochs == 0 or epoch == args.epochs:
-            validation = evaluate_proxy(args, clip_model, proxies, val_loader, device)
+            validation = evaluate_proxy(
+                args, clip_model, proxies, selection_loader, device
+            )
             epoch_stats.update({f"val_{key}": value for key, value in validation.items()})
             if validation["balanced_acc"] > best_bacc:
                 best_bacc = validation["balanced_acc"]
@@ -375,6 +754,41 @@ def main():
                     {"train_history": history + [epoch_stats], "best_validation": {"epoch": epoch, **validation}},
                 )
         history.append(epoch_stats)
+        last_metrics = {
+            "train_history": history,
+            "best_validation": {
+                "epoch": best_epoch,
+                "balanced_acc": (
+                    best_bacc if math.isfinite(best_bacc) else None
+                ),
+            },
+        }
+        training_state = make_training_state(
+            args,
+            classes=train_dataset.classes,
+            epoch=epoch,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            scaler=scaler,
+            train_loader=train_loader,
+            device=device,
+            history=history,
+            best_epoch=best_epoch,
+            best_bacc=best_bacc,
+            best_lora_state=best_lora_state,
+            best_proxy_state=best_proxy_state,
+            training_loop_complete=epoch >= args.epochs,
+        )
+        save_checkpoint(
+            args,
+            args.last_checkpoint,
+            lora_cfg,
+            clip_model,
+            proxies,
+            train_dataset.classes,
+            last_metrics,
+            training_state=training_state,
+        )
         print(
             f"epoch {epoch}: loss={epoch_stats['loss']:.6f}, "
             f"supcon={epoch_stats['supcon_loss']:.6f}, "
@@ -383,26 +797,36 @@ def main():
             f"val_bacc={epoch_stats.get('val_balanced_acc', float('nan')):.6f}"
         )
 
-    save_checkpoint(
-        args,
-        args.last_checkpoint,
-        lora_cfg,
-        clip_model,
-        proxies,
-        train_dataset.classes,
-        {"train_history": history, "best_validation": {"epoch": best_epoch, "balanced_acc": best_bacc}},
-    )
     if best_lora_state is None or best_proxy_state is None:
         raise RuntimeError("Metric training did not produce a validation checkpoint")
     load_vision_lora_state_dict(clip_model, best_lora_state)
     with torch.no_grad():
         proxies.copy_(best_proxy_state.to(device))
-    final_validation = evaluate_proxy(args, clip_model, proxies, val_loader, device)
+    final_selection = evaluate_proxy(
+        args, clip_model, proxies, selection_loader, device
+    )
+    official_test = evaluate_proxy(
+        args, clip_model, proxies, official_test_loader, device
+    )
     metrics = {
         "train_history": history,
-        "best_validation": {"epoch": best_epoch, **final_validation},
+        "best_validation": {"epoch": best_epoch, **final_selection},
+        "selection_split": selection_name,
+        "official_test_id": official_test,
+        "training_split": {
+            "reference_only": args.reference_only_training,
+            "reference_fraction": args.reference_fraction,
+            "seed": args.seed,
+            "reference_samples": int(reference_indices.numel()),
+            "calibration_samples": int(calibration_indices.numel()),
+            "reference_indices": reference_indices.tolist(),
+            "calibration_indices": calibration_indices.tolist(),
+        },
         "used_text_during_training": False,
         "used_ood_for_training_or_selection": False,
+        "used_official_test_for_checkpoint_selection": (
+            not args.reference_only_training
+        ),
     }
     save_checkpoint(
         args,
@@ -417,7 +841,14 @@ def main():
     print(f"best epoch: {best_epoch}")
     print(f"saved checkpoint: {args.checkpoint}")
     print(f"saved diagnostics: {args.diagnostics_path}")
-    print(f"ID proxy BAcc: {final_validation['balanced_acc']:.6f}")
+    print(
+        f"selection ID proxy BAcc: "
+        f"{final_selection['balanced_acc']:.6f}"
+    )
+    print(
+        f"official test ID proxy BAcc: "
+        f"{official_test['balanced_acc']:.6f}"
+    )
 
 
 if __name__ == "__main__":
