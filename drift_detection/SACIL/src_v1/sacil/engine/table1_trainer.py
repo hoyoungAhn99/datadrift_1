@@ -946,7 +946,11 @@ class UnifiedTable1Trainer:
 
         if "rng_state" not in checkpoint:
             raise ValueError("base checkpoint has no RNG state")
-        restore_rng_state(checkpoint["rng_state"])
+        restore_rng_state(
+            checkpoint["rng_state"],
+            source_cuda_device=checkpoint["config"].get("device"),
+            target_cuda_device=self.device,
+        )
         self.start_session = 1
 
         record = copy.deepcopy(self._source_base_record(checkpoint))
