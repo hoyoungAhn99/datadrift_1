@@ -20,7 +20,15 @@ from .fgp import (
     scheduled_fgp_weight,
 )
 from .finetune import pycil_finetune_loss
-from .global_hap import AnchorGeometryLoss
+from .global_hap import (
+    ANCHOR_FRAME_MODES,
+    ANCHOR_RELATION_OBJECTIVES,
+    ANCHOR_WEIGHT_NORMALIZATIONS,
+    AnchorGeometryLoss,
+    hierarchical_triplet_rank_loss,
+    inverse_angular_dispersion_reliability,
+    weighted_anchor_correlation_loss,
+)
 from .icarl import (
     icarl_bce_loss,
     icarl_distillation_targets,
@@ -64,6 +72,9 @@ from .takp import takp_mixed_classification_loss
 
 __all__ = [
     "AnchorGeometryLoss",
+    "ANCHOR_FRAME_MODES",
+    "ANCHOR_RELATION_OBJECTIVES",
+    "ANCHOR_WEIGHT_NORMALIZATIONS",
     "ClassAutoencoder",
     "ClasswiseAutoencoderClassifier",
     "ConflictWeights",
@@ -82,11 +93,13 @@ __all__ = [
     "cross_space_clustering_loss",
     "fgp_graph_preservation_loss",
     "global_preservation_weights",
+    "hierarchical_triplet_rank_loss",
     "icarl_bce_loss",
     "icarl_distillation_targets",
     "pycil_finetune_loss",
     "pycil_icarl_kd_loss",
     "parameter_l2_regularization",
+    "inverse_angular_dispersion_reliability",
     "load_frozen_ripsnet",
     "method_uses_afc",
     "method_uses_dual_rebalancing",
@@ -107,6 +120,7 @@ __all__ = [
     "scheduled_afc_factor",
     "scheduled_fgp_weight",
     "takp_mixed_classification_loss",
+    "weighted_anchor_correlation_loss",
     "SUPPORTED_UNIFIED_METHODS",
     "UnifiedMethodContract",
     "unified_method_contract",

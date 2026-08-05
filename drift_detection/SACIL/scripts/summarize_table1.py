@@ -32,6 +32,7 @@ METHODS = (
         "Replay-CE", "replay_reference_hparams_nme_c100_b50_inc5_r32"
     ),
     MethodSpec("iCaRL", "icarl_pycil_semantics_nme_c100_b50_inc5_r32"),
+    MethodSpec("iCaRL + CaSpeR-IL", "icarl_casper_nme_c100_b50_inc5_r32"),
     MethodSpec("PODNet", "podnet_nme_c100_b50_inc5_r32"),
     MethodSpec("AFC", "afc_nme_c100_b50_inc5_r32"),
     MethodSpec(

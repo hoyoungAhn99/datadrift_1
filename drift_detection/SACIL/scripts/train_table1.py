@@ -25,6 +25,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--run-name", type=str, default=None)
+    parser.add_argument(
+        "--base-checkpoint",
+        type=Path,
+        default=None,
+        help="reuse a compatible unified session-0 checkpoint and start at S1",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -41,15 +47,23 @@ def main() -> int:
     if args.run_name is not None:
         config["output"]["run_name"] = args.run_name
     trainer = UnifiedTable1Trainer(
-        config, PROJECT_ROOT, max_sessions=args.max_sessions
+        config,
+        PROJECT_ROOT,
+        max_sessions=args.max_sessions,
+        base_checkpoint=args.base_checkpoint,
     )
     if args.dry_run:
+        base_checkpoint = trainer.validate_base_checkpoint()
         result = {
             "status": "validated",
             "framework": "sacil-unified",
             "pycil_used": False,
             "reference_code_executed": False,
             "method": trainer.method,
+            "geometry_mode": trainer.geometry_mode,
+            "geometry_options": trainer.geometry_options,
+            "casper_options": trainer.casper_options,
+            "base_checkpoint": base_checkpoint,
             "method_contract": trainer.method_contract.as_dict(),
             "protocol_id": trainer.protocol.protocol_id,
             "sessions": trainer.max_sessions,

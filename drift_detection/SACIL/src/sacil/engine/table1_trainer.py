@@ -20,7 +20,11 @@ from tqdm import tqdm
 from sacil.anchors import HierarchicalAnchorBank, PrototypeBank, compute_prototypes
 from sacil.config import get_required
 from sacil.data import ClassOrderProtocol, build_data_module
-from sacil.engine.checkpoint import save_checkpoint
+from sacil.engine.checkpoint import (
+    load_checkpoint,
+    restore_rng_state,
+    save_checkpoint,
+)
 from sacil.engine.evaluator import (
     compute_nme_class_means,
     evaluate,
@@ -46,7 +50,9 @@ from sacil.methods import (
     create_kd_loss,
     cross_space_clustering_loss,
     fgp_graph_preservation_loss,
+    global_preservation_weights,
     icarl_bce_loss,
+    inverse_angular_dispersion_reliability,
     old_logit_kl_loss,
     parameter_l2_regularization,
     pod_flat_loss,
@@ -86,6 +92,269 @@ from sacil.utils import (
 
 
 SUPPORTED_TABLE1_METHODS = SUPPORTED_UNIFIED_METHODS
+GEOMETRY_MODES = frozenset({"none", "global", "flat", "sacil"})
+GEOMETRY_SUBSTRATES = frozenset({"icarl", "afc", "sacil"})
+GEOMETRY_RELIABILITY_MODES = frozenset(
+    {"uniform", "inverse_angular_dispersion"}
+)
+GEOMETRY_OBJECTIVES = frozenset({"mse", "correlation", "triplet_rank"})
+CASPER_SUBSTRATES = frozenset({"icarl", "casper"})
+
+
+def resolve_geometry_mode(
+    method_name: str, method_config: dict[str, Any]
+) -> str:
+    """Resolve the geometry ablation without changing the CIL substrate.
+
+    Older pure-SACIL configs exposed two boolean switches.  Explicit
+    ``geometry_mode`` takes precedence, while the legacy switches remain a
+    backward-compatible spelling for the same Global/Flat/SACIL variants.
+    """
+
+    method = str(method_name).lower()
+    explicit = method_config.get("geometry_mode")
+    if explicit is None:
+        if method != "sacil":
+            return "none"
+        if not bool(method_config.get("local_relaxation", True)):
+            return "global"
+        if not bool(method_config.get("use_internal_anchors", True)):
+            return "flat"
+        return "sacil"
+    mode = str(explicit).lower().replace("-", "_")
+    aliases = {
+        "off": "none",
+        "global_hap": "global",
+        "flat_lrhap": "flat",
+        "full": "sacil",
+    }
+    mode = aliases.get(mode, mode)
+    if mode not in GEOMETRY_MODES:
+        raise ValueError(
+            f"unknown geometry mode {explicit!r}; expected one of "
+            f"{sorted(GEOMETRY_MODES)}"
+        )
+    if mode != "none" and method not in GEOMETRY_SUBSTRATES:
+        raise ValueError(
+            f"geometry mode {mode!r} is unsupported for substrate {method!r}"
+        )
+    return mode
+
+
+def resolve_geometry_options(method_config: dict[str, Any]) -> dict[str, Any]:
+    """Validate anchor-frame ablation options with legacy-safe defaults."""
+
+    raw = method_config.get("geometry", {})
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ValueError("method.geometry must be a mapping")
+    frame = str(raw.get("anchor_frame", "fixed")).lower().replace("-", "_")
+    frame = {"moving": "co_moving", "comoving": "co_moving"}.get(
+        frame, frame
+    )
+    if frame not in {"fixed", "co_moving", "hybrid"}:
+        raise ValueError(
+            "method.geometry.anchor_frame must be fixed, co_moving, or hybrid"
+        )
+    reliability = str(raw.get("reliability", "uniform")).lower().replace(
+        "-", "_"
+    )
+    reliability = {
+        "none": "uniform",
+        "inverse_dispersion": "inverse_angular_dispersion",
+    }.get(reliability, reliability)
+    if reliability not in GEOMETRY_RELIABILITY_MODES:
+        raise ValueError(
+            "method.geometry.reliability must be uniform or "
+            "inverse_angular_dispersion"
+        )
+    requested_fixed_mix = float(raw.get("fixed_mix", 0.5))
+    refresh = int(raw.get("refresh_interval_epochs", 1))
+    power = float(raw.get("reliability_power", 1.0))
+    epsilon = float(raw.get("reliability_epsilon", 1e-4))
+    minimum = float(raw.get("reliability_min_weight", 0.25))
+    maximum = float(raw.get("reliability_max_weight", 4.0))
+    objective = str(raw.get("objective", "mse")).lower().replace("-", "_")
+    objective = {
+        "pearson": "correlation",
+        "rank": "triplet_rank",
+        "triplet": "triplet_rank",
+    }.get(objective, objective)
+    weight_normalization = str(
+        raw.get("weight_normalization", "weight_sum")
+    ).lower().replace("-", "_")
+    weight_normalization = {
+        "relative": "weight_sum",
+        "absolute": "anchor_count",
+    }.get(weight_normalization, weight_normalization)
+    triplet_margin_scale = float(raw.get("triplet_margin_scale", 1.0))
+    rank_tolerance = float(raw.get("rank_tolerance", 1e-4))
+    if not 0.0 <= requested_fixed_mix <= 1.0:
+        raise ValueError("method.geometry.fixed_mix must be in [0, 1]")
+    if refresh <= 0:
+        raise ValueError(
+            "method.geometry.refresh_interval_epochs must be positive"
+        )
+    if power < 0 or epsilon <= 0:
+        raise ValueError("invalid geometry reliability power/epsilon")
+    if not 0 < minimum <= maximum:
+        raise ValueError("invalid geometry reliability weight bounds")
+    if objective not in GEOMETRY_OBJECTIVES:
+        raise ValueError(
+            "method.geometry.objective must be mse, correlation, or "
+            "triplet_rank"
+        )
+    if weight_normalization not in {"weight_sum", "anchor_count"}:
+        raise ValueError(
+            "method.geometry.weight_normalization must be weight_sum or "
+            "anchor_count"
+        )
+    if not 0.0 < triplet_margin_scale <= 1.0:
+        raise ValueError(
+            "method.geometry.triplet_margin_scale must be in (0, 1]"
+        )
+    if rank_tolerance < 0.0:
+        raise ValueError(
+            "method.geometry.rank_tolerance must be non-negative"
+        )
+    fixed_mix = (
+        1.0
+        if frame == "fixed"
+        else 0.0
+        if frame == "co_moving"
+        else requested_fixed_mix
+    )
+    return {
+        "anchor_frame": frame,
+        "fixed_mix": fixed_mix,
+        "refresh_interval_epochs": refresh,
+        "reliability": reliability,
+        "reliability_power": power,
+        "reliability_epsilon": epsilon,
+        "reliability_min_weight": minimum,
+        "reliability_max_weight": maximum,
+        "objective": objective,
+        "weight_normalization": weight_normalization,
+        "triplet_margin_scale": triplet_margin_scale,
+        "rank_tolerance": rank_tolerance,
+    }
+
+
+def resolve_casper_options(
+    method_name: str, method_config: dict[str, Any]
+) -> dict[str, Any]:
+    """Resolve the CaSpeR regularizer without replacing its CIL substrate.
+
+    ``method=casper`` retains the author-style standalone adapter.  The
+    controlled comparison instead uses ``method=icarl`` with
+    ``method.casper.enabled=true`` so the model, CE/KD objective, optimizer,
+    epochs, memory, and evaluator remain exactly those of the iCaRL control.
+    """
+
+    method = str(method_name).lower()
+    raw = method_config.get("casper", {})
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ValueError("method.casper must be a mapping")
+    enabled = method == "casper" or bool(raw.get("enabled", False))
+    weight = float(raw.get("weight", 0.01))
+    knn = int(raw.get("knn", 10))
+    classes = int(raw.get("classes_per_graph", 5))
+    batch_size = int(raw.get("replay_batch_size", 64))
+    solver = str(raw.get("solver", "xitorch")).lower()
+    wd_reg = float(raw.get("wd_reg", 1e-5 if method == "casper" else 0.0))
+
+    if enabled and method not in CASPER_SUBSTRATES:
+        raise ValueError(
+            f"CaSpeR regularization is unsupported for substrate {method!r}"
+        )
+    if weight < 0 or wd_reg < 0:
+        raise ValueError("CaSpeR weights must be non-negative")
+    if knn <= 0 or classes <= 0 or batch_size <= 0:
+        raise ValueError("CaSpeR k, class count, and batch size must be positive")
+    if enabled and batch_size <= max(knn, classes + 1):
+        raise ValueError(
+            "CaSpeR replay_batch_size must exceed both knn and "
+            "classes_per_graph + 1"
+        )
+    if solver not in {"xitorch", "partial"}:
+        raise ValueError("CaSpeR solver must use the author xitorch path")
+    if method == "icarl" and wd_reg != 0.0:
+        raise ValueError(
+            "the controlled iCaRL+CaSpeR plug-in requires wd_reg=0 so "
+            "only the spectral term differs from the iCaRL substrate"
+        )
+    return {
+        "enabled": enabled,
+        "weight": weight,
+        "knn": knn,
+        "classes_per_graph": classes,
+        "replay_batch_size": batch_size,
+        "solver": solver,
+        "wd_reg": wd_reg,
+    }
+
+
+def geometry_preservation_component(
+    geometry: AnchorGeometryLoss | None,
+    current_features: Tensor,
+    reference_features: Tensor | None,
+    replay_mask: Tensor,
+    *,
+    weight: float,
+) -> Tensor | None:
+    """Return the weighted replay-only geometry term, when applicable."""
+
+    if weight < 0:
+        raise ValueError("geometry weight must be non-negative")
+    if (
+        geometry is None
+        or reference_features is None
+        or not bool(replay_mask.any())
+    ):
+        return None
+    return float(weight) * geometry(
+        current_features[replay_mask], reference_features[replay_mask]
+    )
+
+
+def base_recipe_signature(config: dict[str, Any]) -> dict[str, Any]:
+    """Return every configuration field that can affect session 0."""
+
+    method = copy.deepcopy(config.get("method", {}))
+    for key in (
+        "geometry_mode",
+        "lambda_geo",
+        "hierarchy",
+        "conflict",
+        "geometry",
+        "local_relaxation",
+        "use_internal_anchors",
+    ):
+        method.pop(key, None)
+    # In the controlled iCaRL plug-in, CaSpeR is inactive in S0 and therefore
+    # must not prevent reuse of the exact iCaRL base checkpoint.  The separate
+    # method=casper adapter keeps this field because its explicit L2 term can
+    # affect S0.
+    if str(method.get("name", "")).lower() == "icarl":
+        method.pop("casper", None)
+    training = copy.deepcopy(config.get("training", {}))
+    training.pop("incremental", None)
+    debug = copy.deepcopy(config.get("debug", {}))
+    debug.pop("max_sessions", None)
+    return {
+        "seed": int(config.get("seed", 1)),
+        "deterministic": bool(config.get("deterministic", True)),
+        "data": copy.deepcopy(config.get("data", {})),
+        "model": copy.deepcopy(config.get("model", {})),
+        "memory": copy.deepcopy(config.get("memory", {})),
+        "evaluation": copy.deepcopy(config.get("evaluation", {})),
+        "training": training,
+        "method": method,
+        "debug": debug,
+    }
 
 
 class BalancedClassBatchSampler(Sampler[list[int]]):
@@ -155,6 +424,7 @@ class UnifiedTable1Trainer:
         project_root: str | Path,
         *,
         max_sessions: int | None = None,
+        base_checkpoint: str | Path | None = None,
     ) -> None:
         self.config = copy.deepcopy(config)
         self.project_root = Path(project_root).resolve()
@@ -162,6 +432,21 @@ class UnifiedTable1Trainer:
         if self.method not in SUPPORTED_TABLE1_METHODS:
             raise ValueError(f"unsupported unified method: {self.method}")
         validate_annotation1_config(self.config)
+        self.geometry_mode = resolve_geometry_mode(
+            self.method, self.config["method"]
+        )
+        self.geometry_options = resolve_geometry_options(
+            self.config["method"]
+        )
+        self.casper_options = resolve_casper_options(
+            self.method, self.config["method"]
+        )
+        self.base_checkpoint_path = (
+            None
+            if base_checkpoint is None
+            else self._project_path(base_checkpoint)
+        )
+        self.start_session = 0
         self.method_contract = unified_method_contract(self.method)
         self.seed = int(config.get("seed", 1))
         set_seed(self.seed, deterministic=bool(config.get("deterministic", True)))
@@ -214,6 +499,14 @@ class UnifiedTable1Trainer:
                 "pycil_used": False,
                 "reference_code_executed": False,
                 "method_contract": self.method_contract.as_dict(),
+                "geometry_mode": self.geometry_mode,
+                "geometry_options": self.geometry_options,
+                "casper_options": self.casper_options,
+                "base_checkpoint": (
+                    None
+                    if self.base_checkpoint_path is None
+                    else str(self.base_checkpoint_path)
+                ),
                 "protocol_id": self.protocol.protocol_id,
                 "device": str(self.device),
                 "git_commit": git_commit(self.project_root),
@@ -413,6 +706,143 @@ class UnifiedTable1Trainer:
         else:
             raise TypeError("model has no expansion contract")
 
+    def _source_base_record(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+        if self.base_checkpoint_path is None:
+            raise RuntimeError("base checkpoint path is missing")
+        session_log = self.base_checkpoint_path.parent.parent / "sessions.jsonl"
+        if session_log.exists():
+            for line in session_log.read_text(encoding="utf-8").splitlines():
+                record = json.loads(line)
+                if int(record.get("session_id", -1)) == 0:
+                    return record
+        embedded = checkpoint.get("session_record")
+        if embedded is not None:
+            return copy.deepcopy(embedded)
+        records = checkpoint.get("metrics", {}).get("records", [])
+        if len(records) != 1:
+            raise ValueError(
+                "base checkpoint has no recoverable session-0 record"
+            )
+        return {
+            "session_id": 0,
+            "method": self.method,
+            "geometry_mode": self.geometry_mode,
+            "seen_class_count": self.protocol.session(0).stop,
+            "memory_size": len(self.memory),
+            "training": {
+                "source": "shared_base_checkpoint",
+                "epoch_logs": [],
+            },
+            "post_training": None,
+            "evaluation": copy.deepcopy(records[0]),
+        }
+
+    def _validate_base_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        if checkpoint.get("framework") != "sacil-unified":
+            raise ValueError("base checkpoint is not from the unified runner")
+        if int(checkpoint.get("session_id", -1)) != 0:
+            raise ValueError("base checkpoint must be session_00.pt")
+        if checkpoint.get("protocol_id") != self.protocol.protocol_id:
+            raise ValueError("base checkpoint protocol does not match config")
+        if str(checkpoint.get("method", "")).lower() != self.method:
+            raise ValueError(
+                "base checkpoint substrate does not match target config"
+            )
+        source_config = checkpoint.get("config")
+        if not isinstance(source_config, dict):
+            raise ValueError("base checkpoint has no resolved config")
+        if base_recipe_signature(source_config) != base_recipe_signature(
+            self.config
+        ):
+            raise ValueError(
+                "base checkpoint session-0 recipe differs from target config"
+            )
+        records = checkpoint.get("metrics", {}).get("records", [])
+        if len(records) != 1 or int(records[0].get("session_id", -1)) != 0:
+            raise ValueError("base checkpoint must contain exactly one S0 metric")
+        class_means = checkpoint.get("class_means")
+        expected_classes = self.protocol.session(0).stop
+        if (
+            not isinstance(class_means, Tensor)
+            or class_means.shape[0] != expected_classes
+        ):
+            raise ValueError("base checkpoint has invalid S0 class means")
+
+    def validate_base_checkpoint(self) -> dict[str, Any] | None:
+        """Validate a configured shared base without mutating trainer state."""
+
+        if self.base_checkpoint_path is None:
+            return None
+        checkpoint = load_checkpoint(self.base_checkpoint_path, map_location="cpu")
+        self._validate_base_checkpoint(checkpoint)
+        return {
+            "path": str(self.base_checkpoint_path),
+            "method": checkpoint["method"],
+            "session_id": int(checkpoint["session_id"]),
+            "seed": int(checkpoint["config"].get("seed", 1)),
+        }
+
+    def _bootstrap_from_base_checkpoint(self) -> dict[str, Any]:
+        if self.base_checkpoint_path is None:
+            raise RuntimeError("base checkpoint path is missing")
+        checkpoint = load_checkpoint(self.base_checkpoint_path, map_location="cpu")
+        self._validate_base_checkpoint(checkpoint)
+        base_classes = self.protocol.session(0).stop
+        model = self._new_model(base_classes)
+        if type(model).__name__ != str(checkpoint.get("model_type", "")):
+            raise ValueError("base checkpoint model type does not match config")
+        model.load_state_dict(checkpoint["model"], strict=True)
+        self.model = model.to(self.device)
+        self.memory = ExemplarMemory.from_state_dict(checkpoint["memory"])
+        self.metrics = CILMetricsTracker.from_state_dict(checkpoint["metrics"])
+        self.class_means = checkpoint["class_means"].detach().cpu().clone()
+
+        source_hierarchy = (
+            checkpoint.get("config", {})
+            .get("method", {})
+            .get("hierarchy", {})
+        )
+        target_hierarchy = self.config["method"].get("hierarchy", {})
+        has_artifacts = all(
+            key in checkpoint for key in ("tree", "prototypes", "anchors")
+        )
+        if self.geometry_mode == "none":
+            self.sacil_tree = None
+            self.sacil_prototypes = None
+            self.sacil_anchors = None
+        elif has_artifacts and source_hierarchy == target_hierarchy:
+            self.sacil_tree = HierarchyTree.from_state_dict(checkpoint["tree"])
+            self.sacil_prototypes = PrototypeBank.from_state_dict(
+                checkpoint["prototypes"]
+            )
+            self.sacil_anchors = HierarchicalAnchorBank.from_state_dict(
+                checkpoint["anchors"]
+            )
+            dump_json(
+                self.sacil_tree.state_dict(),
+                self.run_dir / "tree_session_00.json",
+            )
+        else:
+            self._build_sacil_artifacts(0)
+
+        if "rng_state" not in checkpoint:
+            raise ValueError("base checkpoint has no RNG state")
+        restore_rng_state(checkpoint["rng_state"])
+        self.start_session = 1
+
+        record = copy.deepcopy(self._source_base_record(checkpoint))
+        record.update(
+            method=self.method,
+            geometry_mode=self.geometry_mode,
+            geometry_options=copy.deepcopy(self.geometry_options),
+            casper_options=copy.deepcopy(self.casper_options),
+            checkpoint=str(self.checkpoint_dir / "session_00.pt"),
+            base_reused=True,
+            shared_from_checkpoint=str(self.base_checkpoint_path),
+        )
+        self._save_checkpoint(0, session_record=record)
+        return record
+
     def run(self) -> dict[str, Any]:
         session_log = self.run_dir / "sessions.jsonl"
         metrics_path = self.run_dir / "metrics.json"
@@ -422,7 +852,11 @@ class UnifiedTable1Trainer:
                 "the unified run directory already contains training "
                 f"artifacts: {self.run_dir}; choose a new --run-name"
             )
-        for session_id in range(self.max_sessions):
+        if self.base_checkpoint_path is not None:
+            base_record = self._bootstrap_from_base_checkpoint()
+            with session_log.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(base_record, ensure_ascii=False) + "\n")
+        for session_id in range(self.start_session, self.max_sessions):
             started = time.time()
             record = self._run_session(session_id)
             record["elapsed_seconds"] = time.time() - started
@@ -482,22 +916,28 @@ class UnifiedTable1Trainer:
         self._build_evaluation_state(session_id)
         evaluation = self._evaluate_session(session_id)
         metric = self.metrics.update(session_id, evaluation)
-        checkpoint = self._save_checkpoint(session_id)
-        return {
+        record = {
             "session_id": session_id,
             "method": self.method,
+            "geometry_mode": self.geometry_mode,
+            "geometry_options": copy.deepcopy(self.geometry_options),
+            "casper_options": copy.deepcopy(self.casper_options),
             "seen_class_count": session.stop,
             "memory_size": len(self.memory),
             "training": training,
             "post_training": post,
             "evaluation": metric,
-            "checkpoint": str(checkpoint),
         }
+        checkpoint = self._save_checkpoint(
+            session_id, session_record=record
+        )
+        record["checkpoint"] = str(checkpoint)
+        return record
 
     def _prepare_sacil_geometry(
         self, session_id: int, teacher: nn.Module | None
     ) -> AnchorGeometryLoss | None:
-        if self.method != "sacil" or session_id == 0:
+        if self.geometry_mode == "none" or session_id == 0:
             return None
         if (
             teacher is None
@@ -505,31 +945,101 @@ class UnifiedTable1Trainer:
             or self.sacil_tree is None
         ):
             raise RuntimeError("SACIL incremental session lacks old anchors")
-        collection = self._incoming_collection(session_id)
-        incoming = compute_prototypes(
-            collection.features,
-            collection.original_targets,
-            self.protocol.classes_for_session(session_id),
-        )
         conflict = self.config["method"].get("conflict", {})
-        weights = compute_conflict_weights(
-            incoming,
-            self.sacil_anchors,
-            self.sacil_tree,
-            max_neighbors=int(conflict.get("max_neighbors", 5)),
-            old_class_ratio=float(conflict.get("old_class_ratio", 0.1)),
-            temperature=float(conflict.get("temperature", 0.05)),
-            min_preservation_weight=float(
-                conflict.get("min_preservation_weight", 0.1)
-            ),
-            ancestor_decay=float(conflict.get("ancestor_decay", 0.5)),
-        )
+        if self.geometry_mode == "global":
+            weights = global_preservation_weights(self.sacil_anchors)
+        else:
+            collection = self._incoming_collection(session_id)
+            incoming = compute_prototypes(
+                collection.features,
+                collection.original_targets,
+                self.protocol.classes_for_session(session_id),
+            )
+            weights = compute_conflict_weights(
+                incoming,
+                self.sacil_anchors,
+                self.sacil_tree,
+                max_neighbors=int(conflict.get("max_neighbors", 5)),
+                old_class_ratio=float(conflict.get("old_class_ratio", 0.1)),
+                temperature=float(conflict.get("temperature", 0.05)),
+                min_preservation_weight=float(
+                    conflict.get("min_preservation_weight", 0.1)
+                ),
+                ancestor_decay=float(conflict.get("ancestor_decay", 0.5)),
+            )
+        if self.geometry_options["reliability"] == "inverse_angular_dispersion":
+            memory_loader = self._memory_loader(session_id, augment=False)
+            old_collection = collect_features(teacher, memory_loader, self.device)
+            leaf_reliability, internal_reliability = (
+                inverse_angular_dispersion_reliability(
+                    old_collection.features,
+                    old_collection.original_targets,
+                    self.sacil_anchors,
+                    self.sacil_tree,
+                    power=self.geometry_options["reliability_power"],
+                    epsilon=self.geometry_options["reliability_epsilon"],
+                    min_weight=self.geometry_options[
+                        "reliability_min_weight"
+                    ],
+                    max_weight=self.geometry_options[
+                        "reliability_max_weight"
+                    ],
+                )
+            )
+            weights.leaf_weights = weights.leaf_weights * leaf_reliability
+            weights.internal_weights = (
+                weights.internal_weights * internal_reliability
+            )
         return AnchorGeometryLoss(
             self.sacil_anchors,
             weights.leaf_weights,
             weights.internal_weights,
-            use_internal_anchors=True,
+            use_internal_anchors=self.geometry_mode != "flat",
+            anchor_frame=self.geometry_options["anchor_frame"],
+            fixed_mix=self.geometry_options["fixed_mix"],
+            objective=self.geometry_options["objective"],
+            weight_normalization=self.geometry_options[
+                "weight_normalization"
+            ],
+            triplet_margin_scale=self.geometry_options[
+                "triplet_margin_scale"
+            ],
+            rank_tolerance=self.geometry_options["rank_tolerance"],
         ).to(self.device)
+
+    def _refresh_geometry_current_anchors(
+        self,
+        session_id: int,
+        geometry: AnchorGeometryLoss,
+    ) -> None:
+        """Rebuild current anchors on old memory without changing the tree."""
+
+        if not geometry.requires_current_anchor_refresh:
+            return
+        if (
+            self.model is None
+            or self.sacil_tree is None
+            or self.sacil_anchors is None
+        ):
+            raise RuntimeError("current-anchor refresh lacks SACIL state")
+        collection = collect_features(
+            self.model,
+            self._memory_loader(session_id, augment=False),
+            self.device,
+        )
+        class_ids = self.sacil_anchors.leaf_class_ids
+        prototypes = PrototypeBank(
+            class_ids,
+            compute_prototypes(
+                collection.features,
+                collection.original_targets,
+                class_ids,
+            ),
+        )
+        current_anchors = HierarchicalAnchorBank.from_tree(
+            prototypes, self.sacil_tree
+        )
+        geometry.update_current_anchors(current_anchors)
 
     def _train_session(
         self,
@@ -585,10 +1095,20 @@ class UnifiedTable1Trainer:
             None if max_batches_value is None else int(max_batches_value)
         )
         logs = []
+        geometry_anchor_refreshes = 0
         progress = tqdm(
             range(epochs), disable=bool(self.config.get("disable_tqdm", False))
         )
         for epoch in progress:
+            if (
+                geometry is not None
+                and geometry.requires_current_anchor_refresh
+                and epoch
+                % int(self.geometry_options["refresh_interval_epochs"])
+                == 0
+            ):
+                self._refresh_geometry_current_anchors(session_id, geometry)
+                geometry_anchor_refreshes += 1
             if self.method == "cscct":
                 # The CSCCT release advances both schedulers at the start of
                 # every epoch, including the zeroth phase.  Preserve that
@@ -662,7 +1182,12 @@ class UnifiedTable1Trainer:
                 f"{self.method} s{session_id} e{epoch + 1}/{epochs} "
                 f"loss={record['loss']:.4f} acc={record['train_accuracy']:.3f}"
             )
-        return {"epochs": epochs, "samples": len(loader.dataset), "epoch_logs": logs}
+        return {
+            "epochs": epochs,
+            "samples": len(loader.dataset),
+            "geometry_anchor_refreshes": geometry_anchor_refreshes,
+            "epoch_logs": logs,
+        }
 
     def _main_parameters(self) -> list[nn.Parameter]:
         if self.model is None:
@@ -687,6 +1212,45 @@ class UnifiedTable1Trainer:
                 parameter.requires_grad_(False)
             return list(self.model.backbone.parameters())
         return [p for p in self.model.parameters() if p.requires_grad]
+
+    def _add_geometry_component(
+        self,
+        components: dict[str, Tensor],
+        current_features: Tensor,
+        reference_features: Tensor | None,
+        replay_mask: Tensor,
+        geometry: AnchorGeometryLoss | None,
+    ) -> None:
+        value = geometry_preservation_component(
+            geometry,
+            current_features,
+            reference_features,
+            replay_mask,
+            weight=float(self.config["method"].get("lambda_geo", 1.0)),
+        )
+        if value is not None:
+            components["geometry"] = value
+
+    def _add_casper_component(
+        self,
+        components: dict[str, Tensor],
+        replay_images: Tensor | None,
+    ) -> None:
+        """Append the author CaSpeR spectral term on a balanced replay graph."""
+
+        if not self.casper_options["enabled"] or replay_images is None:
+            return
+        if self.model is None:
+            raise RuntimeError("CaSpeR regularization has no model")
+        replay_features = self.model.extract_features(replay_images)
+        components["spectral"] = float(
+            self.casper_options["weight"]
+        ) * casper_spectral_loss(
+            replay_features,
+            num_classes=int(self.casper_options["classes_per_graph"]),
+            k=int(self.casper_options["knn"]),
+            solver=str(self.casper_options["solver"]),
+        )
 
     def _loss_components(
         self,
@@ -740,6 +1304,14 @@ class UnifiedTable1Trainer:
                             self.config["method"].get("kd_temperature", 2.0)
                         ),
                     )
+                self._add_geometry_component(
+                    components,
+                    output.features,
+                    None if reference is None else reference.features,
+                    replay_mask,
+                    geometry,
+                )
+                self._add_casper_component(components, replay_images)
                 return components, output.logits
             if self.method == "casper":
                 loss = icarl_bce_loss(
@@ -749,21 +1321,11 @@ class UnifiedTable1Trainer:
                     known_classes=known,
                 )
                 components = {"classification": loss}
-                casper = self.config["method"].get("casper", {})
                 components["regularization"] = parameter_l2_regularization(
                     self.model,
-                    float(casper.get("wd_reg", 1e-5)),
+                    float(self.casper_options["wd_reg"]),
                 )
-                if replay_images is not None:
-                    replay_features = self.model.extract_features(replay_images)
-                    components["spectral"] = float(
-                        casper.get("weight", 0.01)
-                    ) * casper_spectral_loss(
-                        replay_features,
-                        num_classes=int(casper.get("classes_per_graph", new_count)),
-                        k=int(casper.get("knn", 10)),
-                        solver=str(casper.get("solver", "partial")),
-                    )
+                self._add_casper_component(components, replay_images)
                 return components, output.logits
             if self.method == "sacil":
                 if prototypes is None:
@@ -777,17 +1339,13 @@ class UnifiedTable1Trainer:
                     ),
                 )
                 components = {"classification": classification}
-                if (
-                    geometry is not None
-                    and reference is not None
-                    and bool(replay_mask.any())
-                ):
-                    components["geometry"] = float(
-                        self.config["method"].get("lambda_geo", 1.0)
-                    ) * geometry(
-                        output.features[replay_mask],
-                        reference.features[replay_mask],
-                    )
+                self._add_geometry_component(
+                    components,
+                    output.features,
+                    None if reference is None else reference.features,
+                    replay_mask,
+                    geometry,
+                )
                 return components, prediction
             raise RuntimeError(f"unhandled linear method: {self.method}")
 
@@ -835,6 +1393,13 @@ class UnifiedTable1Trainer:
                     reference.attentions,
                     output.attentions,
                     reference.importance[:-1],
+                )
+                self._add_geometry_component(
+                    components,
+                    output.features,
+                    reference.features,
+                    replay_mask,
+                    geometry,
                 )
             return components, output.logits
 
@@ -929,7 +1494,7 @@ class UnifiedTable1Trainer:
     def _casper_loader(
         self, session_id: int, batches: int
     ) -> DataLoader | None:
-        if self.method != "casper" or session_id == 0:
+        if not self.casper_options["enabled"] or session_id == 0:
             return None
         indices = self.memory.all_indices(self.protocol.class_order)
         dataset = self.data.replay_dataset(indices, augment=True)
@@ -937,15 +1502,10 @@ class UnifiedTable1Trainer:
             self.protocol.incremental_label(self.data.train_aug.targets[index])
             for index in indices
         ]
-        config = self.config["method"].get("casper", {})
         sampler = BalancedClassBatchSampler(
             labels,
-            batch_size=int(config.get("replay_batch_size", 64)),
-            classes_per_batch=int(
-                config.get(
-                    "classes_per_graph", self.protocol.session(session_id).size
-                )
-            ),
+            batch_size=int(self.casper_options["replay_batch_size"]),
+            classes_per_batch=int(self.casper_options["classes_per_graph"]),
             batches=batches,
             seed=self.seed * 10000 + session_id * 100,
         )
@@ -1250,7 +1810,7 @@ class UnifiedTable1Trainer:
                     )
                 ),
             ).cpu()
-        if self.method == "sacil":
+        if self.geometry_mode != "none":
             self._build_sacil_artifacts(session_id)
 
     def _build_sacil_artifacts(self, session_id: int) -> None:
@@ -1299,7 +1859,12 @@ class UnifiedTable1Trainer:
             self.model, loader, self.device, old, self.class_means
         )
 
-    def _save_checkpoint(self, session_id: int) -> Path:
+    def _save_checkpoint(
+        self,
+        session_id: int,
+        *,
+        session_record: dict[str, Any] | None = None,
+    ) -> Path:
         if self.model is None:
             raise RuntimeError("checkpoint has no model")
         path = self.checkpoint_dir / f"session_{session_id:02d}.pt"
@@ -1310,6 +1875,8 @@ class UnifiedTable1Trainer:
             "reference_code_executed": False,
             "method_contract": self.method_contract.as_dict(),
             "method": self.method,
+            "geometry_mode": self.geometry_mode,
+            "casper_options": copy.deepcopy(self.casper_options),
             "session_id": session_id,
             "protocol_id": self.protocol.protocol_id,
             "config": self.config,
@@ -1318,6 +1885,11 @@ class UnifiedTable1Trainer:
             "memory": self.memory.state_dict(),
             "metrics": self.metrics.state_dict(),
             "class_means": self.class_means,
+            "session_record": (
+                None
+                if session_record is None
+                else copy.deepcopy(session_record)
+            ),
         }
         if self.sacil_tree is not None:
             payload.update(

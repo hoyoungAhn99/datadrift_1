@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,11 @@ from torch.nn import functional as F
 from sacil.engine.table1_trainer import (
     BalancedClassBatchSampler,
     StandaloneTable1Trainer,
+    base_recipe_signature,
+    geometry_preservation_component,
+    resolve_casper_options,
+    resolve_geometry_mode,
+    resolve_geometry_options,
 )
 from sacil.methods import casper_spectral_loss
 from sacil.methods import (
@@ -106,6 +112,197 @@ def test_casper_partial_eigensolver_has_finite_gradient() -> None:
     assert torch.isfinite(features.grad).all()
 
 
+def test_casper_plugin_options_preserve_the_icarl_substrate() -> None:
+    disabled = resolve_casper_options("icarl", {})
+    assert disabled["enabled"] is False
+    options = resolve_casper_options(
+        "icarl",
+        {
+            "casper": {
+                "enabled": True,
+                "weight": 0.001,
+                "knn": 8,
+                "classes_per_graph": 8,
+                "replay_batch_size": 64,
+                "solver": "xitorch",
+                "wd_reg": 0.0,
+            }
+        },
+    )
+    assert options == {
+        "enabled": True,
+        "weight": 0.001,
+        "knn": 8,
+        "classes_per_graph": 8,
+        "replay_batch_size": 64,
+        "solver": "xitorch",
+        "wd_reg": 0.0,
+    }
+    with pytest.raises(ValueError, match="wd_reg=0"):
+        resolve_casper_options(
+            "icarl", {"casper": {"enabled": True, "wd_reg": 1e-5}}
+        )
+    with pytest.raises(ValueError, match="unsupported for substrate"):
+        resolve_casper_options(
+            "replay", {"casper": {"enabled": True}}
+        )
+
+
+def test_geometry_mode_keeps_the_cil_substrate_independent() -> None:
+    assert resolve_geometry_mode("icarl", {}) == "none"
+    assert resolve_geometry_mode("icarl", {"geometry_mode": "sacil"}) == "sacil"
+    assert resolve_geometry_mode("afc", {"geometry_mode": "flat"}) == "flat"
+    assert resolve_geometry_mode(
+        "sacil", {"local_relaxation": False}
+    ) == "global"
+    assert resolve_geometry_mode(
+        "sacil", {"use_internal_anchors": False}
+    ) == "flat"
+    with pytest.raises(ValueError, match="unsupported for substrate"):
+        resolve_geometry_mode("replay", {"geometry_mode": "sacil"})
+
+
+def test_geometry_anchor_ablation_options_are_explicit_and_validated() -> None:
+    assert resolve_geometry_options({})["anchor_frame"] == "fixed"
+    assert resolve_geometry_options({})["reliability"] == "uniform"
+    assert resolve_geometry_options({})["objective"] == "mse"
+    assert (
+        resolve_geometry_options({})["weight_normalization"]
+        == "weight_sum"
+    )
+    options = resolve_geometry_options(
+        {
+            "geometry": {
+                "anchor_frame": "hybrid",
+                "fixed_mix": 0.25,
+                "reliability": "inverse_angular_dispersion",
+                "refresh_interval_epochs": 2,
+                "objective": "correlation",
+                "weight_normalization": "anchor_count",
+            }
+        }
+    )
+    assert options["anchor_frame"] == "hybrid"
+    assert options["fixed_mix"] == 0.25
+    assert options["reliability"] == "inverse_angular_dispersion"
+    assert options["refresh_interval_epochs"] == 2
+    assert options["objective"] == "correlation"
+    assert options["weight_normalization"] == "anchor_count"
+    with pytest.raises(ValueError, match="anchor_frame"):
+        resolve_geometry_options({"geometry": {"anchor_frame": "invalid"}})
+    with pytest.raises(ValueError, match="objective"):
+        resolve_geometry_options({"geometry": {"objective": "invalid"}})
+    with pytest.raises(ValueError, match="weight_normalization"):
+        resolve_geometry_options(
+            {"geometry": {"weight_normalization": "invalid"}}
+        )
+
+
+def test_geometry_component_is_weighted_and_replay_only() -> None:
+    class SquaredDifference(torch.nn.Module):
+        def forward(
+            self, current: torch.Tensor, reference: torch.Tensor
+        ) -> torch.Tensor:
+            return (current - reference).square().mean()
+
+    current = torch.tensor(
+        [[1.0, 2.0], [4.0, 6.0], [3.0, 5.0]], requires_grad=True
+    )
+    reference = torch.zeros_like(current)
+    replay = torch.tensor([False, True, True])
+    value = geometry_preservation_component(
+        SquaredDifference(), current, reference, replay, weight=4.0
+    )
+    expected = 4.0 * current[replay].square().mean()
+    assert value is not None
+    assert torch.allclose(value, expected)
+    assert geometry_preservation_component(
+        SquaredDifference(),
+        current,
+        reference,
+        torch.zeros_like(replay),
+        weight=4.0,
+    ) is None
+
+
+def test_shared_base_signature_ignores_only_post_base_geometry() -> None:
+    root = Path(__file__).resolve().parents[1]
+    base = load_config_tree(
+        root
+        / "configs"
+        / "ablations"
+        / "cifar100"
+        / "icarl_sacil.yaml"
+    )
+    variant = copy.deepcopy(base)
+    variant["method"].update(
+        geometry_mode="flat",
+        lambda_geo=64.0,
+        hierarchy={"temperature": 0.05},
+        conflict={"max_neighbors": 2},
+        geometry={"anchor_frame": "co_moving"},
+    )
+    assert base_recipe_signature(variant) == base_recipe_signature(base)
+
+    incompatible = copy.deepcopy(base)
+    incompatible["training"]["base"]["epochs"] += 1
+    assert base_recipe_signature(incompatible) != base_recipe_signature(base)
+
+    incompatible = copy.deepcopy(base)
+    incompatible["seed"] += 1
+    assert base_recipe_signature(incompatible) != base_recipe_signature(base)
+
+
+def test_icarl_casper_config_matches_icarl_except_for_incremental_regularizer() -> None:
+    root = Path(__file__).resolve().parents[1]
+    control = load_config_tree(
+        root
+        / "configs"
+        / "table1"
+        / "cifar100"
+        / "icarl_nme_b50_inc5_resnet32.yaml"
+    )
+    casper = load_config_tree(
+        root
+        / "configs"
+        / "table1"
+        / "cifar100"
+        / "icarl_casper_nme_b50_inc5_resnet32.yaml"
+    )
+    for section in ("data", "model", "memory", "evaluation", "training"):
+        assert casper[section] == control[section]
+    assert casper["method"]["name"] == "icarl"
+    assert resolve_geometry_mode("icarl", casper["method"]) == "none"
+    assert resolve_casper_options("icarl", casper["method"])["enabled"]
+    assert base_recipe_signature(casper) == base_recipe_signature(control)
+
+
+@pytest.mark.parametrize(
+    ("filename", "frame", "reliability"),
+    [
+        ("icarl_sacil_fixed_lambda_16.yaml", "fixed", "uniform"),
+        (
+            "icarl_sacil_variance_fixed_lambda_16.yaml",
+            "fixed",
+            "inverse_angular_dispersion",
+        ),
+        ("icarl_sacil_co_moving_lambda_16.yaml", "co_moving", "uniform"),
+        ("icarl_sacil_hybrid_lambda_16.yaml", "hybrid", "uniform"),
+    ],
+)
+def test_anchor_frame_ablation_configs(
+    filename: str, frame: str, reliability: str
+) -> None:
+    root = Path(__file__).resolve().parents[1]
+    config = load_config_tree(
+        root / "configs" / "ablations" / "cifar100" / filename
+    )
+    options = resolve_geometry_options(config["method"])
+    assert config["method"]["geometry_mode"] == "sacil"
+    assert config["method"]["lambda_geo"] == 16.0
+    assert options["anchor_frame"] == frame
+    assert options["reliability"] == reliability
+
 def test_standalone_runner_import_graph_does_not_reference_pycil() -> None:
     root = Path(__file__).resolve().parents[1]
     sources = (
@@ -201,3 +398,46 @@ def test_recursive_config_extends_preserves_method_and_debug_overrides(
     assert config["method"]["name"] == "replay"
     assert config["training"]["base"]["epochs"] == 2
     assert config["debug"]["max_sessions"] == 2
+
+
+@pytest.mark.parametrize(
+    ("substrate", "variant", "expected_mode", "expected_lambda"),
+    [
+        ("icarl", "control", "none", 0.0),
+        ("icarl", "global_hap", "global", 1.0),
+        ("icarl", "flat_lrhap", "flat", 1.0),
+        ("icarl", "sacil", "sacil", 1.0),
+        ("afc", "control", "none", 0.0),
+        ("afc", "global_hap", "global", 1.0),
+        ("afc", "flat_lrhap", "flat", 1.0),
+        ("afc", "sacil", "sacil", 1.0),
+    ],
+)
+def test_geometry_ablation_configs_preserve_substrate_recipe(
+    substrate: str,
+    variant: str,
+    expected_mode: str,
+    expected_lambda: float,
+) -> None:
+    root = Path(__file__).resolve().parents[1]
+    base = load_config_tree(
+        root
+        / "configs"
+        / "table1"
+        / "cifar100"
+        / f"{substrate}_nme_b50_inc5_resnet32.yaml"
+    )
+    ablation = load_config_tree(
+        root
+        / "configs"
+        / "ablations"
+        / "cifar100"
+        / f"{substrate}_{variant}.yaml"
+    )
+    for section in ("data", "model", "memory", "evaluation", "training"):
+        assert ablation[section] == base[section]
+    assert ablation["method"]["name"] == substrate
+    assert resolve_geometry_mode(substrate, ablation["method"]) == expected_mode
+    assert ablation["method"]["lambda_geo"] == expected_lambda
+    native_key = "afc" if substrate == "afc" else "kd_temperature"
+    assert ablation["method"][native_key] == base["method"][native_key]
