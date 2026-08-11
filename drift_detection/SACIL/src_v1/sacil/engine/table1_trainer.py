@@ -266,6 +266,9 @@ def resolve_sacil_v1_options(method_config: dict[str, Any]) -> dict[str, Any]:
     path_scope = str(raw.get("path_scope", "all_ancestors")).lower().replace(
         "-", "_"
     )
+    path_normalization = str(
+        raw.get("path_normalization", "relation_mean")
+    ).lower().replace("-", "_")
     relaxation_mode = str(
         raw.get("relaxation_mode", "local_margin")
     ).lower().replace("-", "_")
@@ -292,6 +295,11 @@ def resolve_sacil_v1_options(method_config: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(
             "method.sacil_v1.path_scope must be parent_only or all_ancestors"
         )
+    if path_normalization not in {"relation_mean", "sample_mean"}:
+        raise ValueError(
+            "method.sacil_v1.path_normalization must be relation_mean or "
+            "sample_mean"
+        )
     if relaxation_mode not in {"none", "global_margin", "local_margin"}:
         raise ValueError(
             "method.sacil_v1.relaxation_mode must be none, global_margin, "
@@ -314,6 +322,7 @@ def resolve_sacil_v1_options(method_config: dict[str, Any]) -> dict[str, Any]:
         "hierarchy_source": hierarchy_source,
         "initial_hierarchy_data": initial_data,
         "path_scope": path_scope,
+        "path_normalization": path_normalization,
         "relaxation_mode": relaxation_mode,
         "radius_quantile": radius_quantile,
         "minimum_radius": minimum_radius,
@@ -1225,6 +1234,9 @@ class UnifiedTable1Trainer:
             self.sacil_tree,
             plan,
             path_scope=str(self.sacil_v1_options["path_scope"]),
+            path_normalization=str(
+                self.sacil_v1_options["path_normalization"]
+            ),
             include_root=bool(self.sacil_v1_options["include_root"]),
         ).to(self.device)
 

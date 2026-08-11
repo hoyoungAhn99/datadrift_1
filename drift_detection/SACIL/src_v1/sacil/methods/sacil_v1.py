@@ -15,6 +15,7 @@ from sacil.hierarchy.tree import HierarchyTree, TreeNode
 
 RELAXATION_MODES = frozenset({"none", "global_margin", "local_margin"})
 PATH_SCOPES = frozenset({"parent_only", "all_ancestors"})
+PATH_NORMALIZATIONS = frozenset({"relation_mean", "sample_mean"})
 
 
 @dataclass(frozen=True)
@@ -490,8 +491,9 @@ class SACILV1PathLoss(nn.Module):
 
     Every old exemplar is compared only with anchors on its own ancestor path.
     Conflict-local entries receive a tolerance margin; all other entries keep a
-    zero margin.  The denominator is the fixed number of active relations, so
-    relaxing one branch never amplifies or weakens unrelated branches.
+    zero margin. ``relation_mean`` averages all active relations, while
+    ``sample_mean`` first averages each exemplar's path and then averages the
+    exemplars so that tree depth does not change an exemplar's total weight.
     """
 
     def __init__(
@@ -501,6 +503,7 @@ class SACILV1PathLoss(nn.Module):
         conflict_plan: ConflictPlan,
         *,
         path_scope: str = "all_ancestors",
+        path_normalization: str = "relation_mean",
         include_root: bool = False,
         epsilon: float = 1e-12,
     ) -> None:
@@ -508,6 +511,11 @@ class SACILV1PathLoss(nn.Module):
         scope = str(path_scope).lower().replace("-", "_")
         if scope not in PATH_SCOPES:
             raise ValueError(f"unknown path scope: {path_scope}")
+        normalization = str(path_normalization).lower().replace("-", "_")
+        if normalization not in PATH_NORMALIZATIONS:
+            raise ValueError(
+                f"unknown path normalization: {path_normalization}"
+            )
         if anchor_bank.leaf_class_ids != tree.class_order:
             raise ValueError("tree and anchor class orders differ")
         internal_ids = tuple(
@@ -544,6 +552,7 @@ class SACILV1PathLoss(nn.Module):
         self.class_ids = class_ids
         self.internal_node_ids = internal_ids
         self.path_scope = scope
+        self.path_normalization = normalization
         self.include_root = bool(include_root)
         self.conflict_plan = conflict_plan
         self.epsilon = float(epsilon)
@@ -611,6 +620,11 @@ class SACILV1PathLoss(nn.Module):
         current = anchor_affinity(current_features, self.current_anchors)
         deviation = (current - reference).abs()
         error = F.relu(deviation - margins).square() * mask
+        if self.path_normalization == "sample_mean":
+            per_sample = error.sum(dim=1) / mask.sum(dim=1).clamp_min(
+                self.epsilon
+            )
+            return per_sample.mean()
         return error.sum() / mask.sum().clamp_min(self.epsilon)
 
     @torch.no_grad()
@@ -621,6 +635,7 @@ class SACILV1PathLoss(nn.Module):
         ).sum().item()
         return {
             "path_scope": self.path_scope,
+            "path_normalization": self.path_normalization,
             "include_root": self.include_root,
             "active_relation_count": int(active),
             "relaxed_relation_count": int(relaxed),

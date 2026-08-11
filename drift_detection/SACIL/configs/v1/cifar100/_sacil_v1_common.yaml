@@ -15,6 +15,7 @@ method:
     hierarchy_source: visual_confusion
     initial_hierarchy_data: full
     path_scope: all_ancestors
+    path_normalization: relation_mean
     relaxation_mode: local_margin
     radius_quantile: 0.9
     minimum_radius: 0.0

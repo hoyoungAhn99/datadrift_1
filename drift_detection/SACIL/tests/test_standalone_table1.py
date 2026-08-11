@@ -101,6 +101,22 @@ def test_casper_balanced_sampler_uses_exact_class_count() -> None:
         assert len({labels[position] for position in batch}) == 5
 
 
+def test_casper_balanced_sampler_matches_author_without_replacement() -> None:
+    labels = [label for label in range(8) for _ in range(20)]
+    sampler = BalancedClassBatchSampler(
+        labels,
+        batch_size=128,
+        classes_per_batch=8,
+        batches=2,
+        seed=11,
+    )
+    for batch in sampler:
+        for label in set(labels[position] for position in batch):
+            positions = [position for position in batch if labels[position] == label]
+            assert len(positions) == 16
+            assert len(set(positions)) == len(positions)
+
+
 def test_casper_partial_eigensolver_has_finite_gradient() -> None:
     features = torch.randn(64, 8, requires_grad=True)
     loss = casper_spectral_loss(

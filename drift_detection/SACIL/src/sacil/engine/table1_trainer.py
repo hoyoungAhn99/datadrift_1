@@ -403,8 +403,13 @@ class BalancedClassBatchSampler(Sampler[list[int]]):
             batch: list[int] = []
             for offset, class_id in enumerate(selected.tolist()):
                 count = base + int(offset < remainder)
+                candidates = self.positions[int(class_id)]
                 choices = rng.choice(
-                    self.positions[int(class_id)], size=count, replace=True
+                    candidates,
+                    size=count,
+                    # Match CaSpeR Buffer.get_balanced_data: sample each
+                    # selected class without replacement whenever possible.
+                    replace=count > len(candidates),
                 )
                 batch.extend(int(value) for value in choices.tolist())
             rng.shuffle(batch)

@@ -8,7 +8,9 @@ method:
     knn: 8
     classes_per_graph: 8
     replay_batch_size: 64
-    solver: partial
+    # Author implementation: xitorch.symeig. Do not replace this with the
+    # earlier numerical fallback in a reference-parity run.
+    solver: xitorch
     wd_reg: 0.00001
 training:
   batch_size: 64
