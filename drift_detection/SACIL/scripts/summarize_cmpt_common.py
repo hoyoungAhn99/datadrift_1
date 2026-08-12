@@ -31,6 +31,8 @@ CIFAR100_BASELINE_RESULTS = (
     / "outputs/cmpt/common_recipe/evaluation/podnet/seed_1/cmpt_rigid_matched_nme.json",
     PROJECT_ROOT
     / "outputs/cmpt/common_recipe/evaluation/afc/seed_1/cmpt_rigid_matched_nme.json",
+    PROJECT_ROOT
+    / "outputs/cmpt/common_recipe/evaluation/cscct/seed_1/cmpt_rigid_matched_nme.json",
 )
 CIFAR100_BASELINE_AFFINE_RESULTS = (
     PROJECT_ROOT
@@ -41,6 +43,8 @@ CIFAR100_BASELINE_AFFINE_RESULTS = (
     / "outputs/cmpt/common_recipe/evaluation/podnet_affine_ridge1e-2/seed_1/cmpt_affine_matched_nme.json",
     PROJECT_ROOT
     / "outputs/cmpt/common_recipe/evaluation/afc_affine_ridge1e-2/seed_1/cmpt_affine_matched_nme.json",
+    PROJECT_ROOT
+    / "outputs/cmpt/common_recipe/evaluation/cscct_affine_ridge1e-2/seed_1/cmpt_affine_matched_nme.json",
 )
 IMAGENET100_RESULTS = (
     PROJECT_ROOT
@@ -106,7 +110,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--all-learners",
         action="store_true",
-        help="include iCaRL, Replay, PODNet, and AFC paired evaluations",
+        help=(
+            "include iCaRL, Replay, PODNet, AFC, and CIFAR-100 CSCCT "
+            "paired evaluations"
+        ),
     )
     parser.add_argument(
         "--output",
@@ -145,19 +152,29 @@ def _markdown(
     lines = [
         f"# {transport} {dataset} shared-protocol results (seed 1)",
         "",
-        "| Learner | NME AIA | CMPT AIA | Delta AIA | NME Final | CMPT Final | Delta Final | Mean fit residual |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|",
+        "| Learner | Native classifier | Native AIA | NME AIA | CMPT AIA | CMPT−NME | Native Final | NME Final | CMPT Final | CMPT−NME | Mean fit residual |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for payload in payloads:
         summary = payload["summary"]
+        if "native_aia_percent" not in summary:
+            raise ValueError(
+                f"{payload['learner']} lacks native-classifier metrics; "
+                "rerun its existing evaluate_cmpt.py command once to "
+                "upgrade the result"
+            )
         lines.append(
-            "| {learner} | {baseline_aia:.3f} | {cmpt_aia:.3f} | "
-            "{aia_delta:+.3f} | {baseline_final:.3f} | {cmpt_final:.3f} | "
-            "{final_delta:+.3f} | {residual:.5f} |".format(
+            "| {learner} | {native_classifier} | {native_aia:.3f} | "
+            "{baseline_aia:.3f} | {cmpt_aia:.3f} | {aia_delta:+.3f} | "
+            "{native_final:.3f} | {baseline_final:.3f} | "
+            "{cmpt_final:.3f} | {final_delta:+.3f} | {residual:.5f} |".format(
                 learner=payload["learner"],
+                native_classifier=payload["native_classifier"]["classifier"],
+                native_aia=float(summary["native_aia_percent"]),
                 baseline_aia=float(summary["baseline_aia_percent"]),
                 cmpt_aia=float(summary["cmpt_aia_percent"]),
                 aia_delta=float(summary["aia_delta_percent_points"]),
+                native_final=float(summary["native_final_percent"]),
                 baseline_final=float(summary["baseline_final_percent"]),
                 cmpt_final=float(summary["cmpt_final_percent"]),
                 final_delta=float(summary["final_delta_percent_points"]),

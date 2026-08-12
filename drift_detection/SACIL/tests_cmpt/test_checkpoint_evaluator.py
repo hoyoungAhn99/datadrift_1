@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 import torch
 
 from sacil.cmpt import (
+    CMPTCheckpointEvaluator,
     CMPTExperimentSettings,
     audit_checkpoint_trajectory,
     build_old_class_cmpt_means,
     discover_checkpoint_paths,
+    resolve_native_classifier,
 )
 
 
@@ -162,3 +165,103 @@ def test_affine_transport_rejects_nonpositive_ridge(tmp_path: Path) -> None:
     }
     with pytest.raises(ValueError, match="affine_ridge must be positive"):
         CMPTExperimentSettings.from_config(config, tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("method", "classifier", "distinct"),
+    [
+        ("icarl", "exemplar_nme", False),
+        ("casper", "exemplar_nme", False),
+        ("replay", "learned_classification_head", True),
+        ("podnet", "learned_classification_head", True),
+        ("afc", "learned_classification_head", True),
+        ("fgp", "learned_classification_head", True),
+        ("cscct", "learned_classification_head", True),
+    ],
+)
+def test_native_classifier_contracts(
+    method: str, classifier: str, distinct: bool
+) -> None:
+    checkpoint = {
+        "method_contract": {"name": method},
+        "config": {"method": {"name": method}},
+    }
+    spec = resolve_native_classifier(checkpoint)
+    assert spec.classifier == classifier
+    assert spec.distinct_from_nme is distinct
+
+
+def test_lucir_native_classifier_reuses_training_cosine_logits() -> None:
+    checkpoint = {
+        "method_contract": {"name": "icarl"},
+        "config": {
+            "method": {
+                "name": "icarl",
+                "feature_cosine_distillation": {
+                    "enabled": True,
+                    "training_classifier": "normalized_cosine",
+                    "cosine_scale": 12.0,
+                    "epsilon": 1e-10,
+                },
+            }
+        },
+    }
+    spec = resolve_native_classifier(checkpoint)
+    assert spec.classifier == "normalized_cosine_head"
+    assert spec.implementation == "lucir_training_cosine_logits"
+    assert spec.distinct_from_nme is True
+    assert spec.scale == 12.0
+    assert spec.epsilon == 1e-10
+
+
+def test_existing_result_is_upgraded_with_native_nme_alias(
+    tmp_path: Path,
+) -> None:
+    result_path = tmp_path / "schema1.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "complete",
+                "records": [
+                    {
+                        "session_id": 0,
+                        "baseline": {"accuracy": 0.8},
+                        "cmpt": {"accuracy": 0.8},
+                        "parity_error": 0.0,
+                    },
+                    {
+                        "session_id": 1,
+                        "baseline": {"accuracy": 0.6},
+                        "cmpt": {"accuracy": 0.65},
+                        "parity_error": 0.0,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    evaluator = object.__new__(CMPTCheckpointEvaluator)
+    evaluator.settings = _settings(tmp_path)
+    evaluator.project_root = Path(__file__).resolve().parents[1]
+    evaluator.source_root = evaluator.project_root / "src_cmpt"
+    evaluator.checkpoints = [{"session_id": 0}, {"session_id": 1}]
+    evaluator.native_classifier = resolve_native_classifier(
+        {
+            "method_contract": {"name": "icarl"},
+            "config": {"method": {"name": "icarl"}},
+        }
+    )
+    evaluator.progress = lambda _: None
+
+    payload = evaluator._upgrade_existing_native_output(result_path)
+    assert payload["schema_version"] == 2
+    assert payload["native_classifier"]["classifier"] == "exemplar_nme"
+    assert payload["records"][0]["native"] == payload["records"][0][
+        "baseline"
+    ]
+    assert payload["summary"]["native_aia_percent"] == pytest.approx(70.0)
+    assert payload["summary"]["cmpt_aia_percent"] == pytest.approx(72.5)
+    assert not result_path.with_suffix(
+        result_path.suffix + ".native-upgrade.tmp"
+    ).exists()

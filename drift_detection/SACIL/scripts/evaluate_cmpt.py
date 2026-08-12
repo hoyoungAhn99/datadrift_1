@@ -21,8 +21,8 @@ from sacil.config import load_config_tree  # noqa: E402
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Evaluate current-memory NME and checkpoint-frozen CMPT-NCM "
-            "without retraining the CIL learner"
+            "Evaluate the native classifier, current-memory NME, and "
+            "checkpoint-frozen CMPT-NCM without retraining the CIL learner"
         )
     )
     parser.add_argument("config", type=Path, help="CMPT YAML config")
@@ -81,8 +81,10 @@ def main() -> int:
         output = _smoke_output(settings.output_file, args.max_sessions)
     payload = evaluator.run(output_file=output, force=args.force)
     summary = payload["summary"]
+    native_name = payload["native_classifier"]["classifier"]
     print(
         f"complete: {settings.learner} | "
+        f"Native[{native_name}] AIA={summary['native_aia_percent']:.3f} | "
         f"NME AIA={summary['baseline_aia_percent']:.3f} | "
         f"CMPT AIA={summary['cmpt_aia_percent']:.3f} | "
         f"delta={summary['aia_delta_percent_points']:+.3f} pp"

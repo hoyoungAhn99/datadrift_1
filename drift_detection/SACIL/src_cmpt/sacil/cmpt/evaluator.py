@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -13,10 +14,12 @@ from torch import Tensor, nn
 
 from sacil.anchors import compute_prototypes
 from sacil.engine.checkpoint import load_checkpoint
+from sacil.engine.evaluator import evaluate as evaluate_classifier
 from sacil.engine.evaluator import evaluate_nme
 from sacil.engine.table1_trainer import UnifiedTable1Trainer
 from sacil.features import collect_features
 from sacil.memory import ExemplarMemory
+from sacil.methods import normalized_cosine_classifier_logits
 from sacil.methods.prototype_transport import (
     affine_ridge_transport,
     rigid_procrustes_transport,
@@ -46,6 +49,7 @@ class CMPTExperimentSettings:
     center_strength: float = 0.0
     strict_parity: bool = True
     parity_tolerance: float = 1.0e-6
+    cpu_threads: int = 6
 
     @classmethod
     def from_config(
@@ -56,6 +60,14 @@ class CMPTExperimentSettings:
         root = Path(project_root).expanduser().resolve()
         experiment = _required_mapping(config, "experiment")
         cmpt = _required_mapping(config, "cmpt")
+        runtime = config.get("runtime", {})
+        if runtime is None:
+            runtime = {}
+        if not isinstance(runtime, Mapping):
+            raise ValueError("runtime must be a mapping")
+        cpu_threads = int(runtime.get("cpu_threads", torch.get_num_threads()))
+        if cpu_threads <= 0:
+            raise ValueError("runtime.cpu_threads must be positive")
 
         def project_path(value: str | Path) -> Path:
             path = Path(value).expanduser()
@@ -111,6 +123,7 @@ class CMPTExperimentSettings:
             center_strength=center_strength,
             strict_parity=bool(cmpt.get("strict_parity", True)),
             parity_tolerance=parity_tolerance,
+            cpu_threads=cpu_threads,
         )
 
 
@@ -132,6 +145,141 @@ class TrajectoryAudit:
         payload = asdict(self)
         payload["session_ids"] = list(self.session_ids)
         return payload
+
+
+@dataclass(frozen=True)
+class NativeClassifierSpec:
+    """Test-time classifier that belongs to a learner's native contract."""
+
+    classifier: str
+    implementation: str
+    distinct_from_nme: bool
+    uses_learned_parameters: bool
+    query_horizontal_flip: bool = False
+    scale: float | None = None
+    epsilon: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def resolve_native_classifier(
+    checkpoint: Mapping[str, Any],
+) -> NativeClassifierSpec:
+    """Resolve native inference without confusing a training-only FC with it.
+
+    The common-recipe LUCIR adapter intentionally uses the iCaRL substrate
+    name, so its normalized-cosine native head is identified from the saved
+    feature-cosine configuration rather than from a learner-name string.
+    """
+
+    contract = _required_mapping(checkpoint, "method_contract")
+    method = str(contract.get("name", "")).lower()
+    config = _required_mapping(checkpoint, "config")
+    method_config = config.get("method", {})
+    if not isinstance(method_config, Mapping):
+        raise ValueError("checkpoint config.method must be a mapping")
+
+    if method == "icarl":
+        feature_cosine = method_config.get(
+            "feature_cosine_distillation", {}
+        )
+        if feature_cosine is None:
+            feature_cosine = {}
+        if not isinstance(feature_cosine, Mapping):
+            raise ValueError(
+                "method.feature_cosine_distillation must be a mapping"
+            )
+        if bool(feature_cosine.get("enabled", False)):
+            training_classifier = str(
+                feature_cosine.get("training_classifier", "")
+            ).lower()
+            if training_classifier != "normalized_cosine":
+                raise ValueError(
+                    "enabled LUCIR feature distillation requires its saved "
+                    "normalized_cosine training classifier"
+                )
+            return NativeClassifierSpec(
+                classifier="normalized_cosine_head",
+                implementation="lucir_training_cosine_logits",
+                distinct_from_nme=True,
+                uses_learned_parameters=True,
+                scale=float(feature_cosine.get("cosine_scale", 10.0)),
+                epsilon=float(feature_cosine.get("epsilon", 1.0e-12)),
+            )
+        return NativeClassifierSpec(
+            classifier="exemplar_nme",
+            implementation="native_nme_alias",
+            distinct_from_nme=False,
+            uses_learned_parameters=False,
+        )
+
+    if method in {"casper", "sacil"}:
+        return NativeClassifierSpec(
+            classifier="exemplar_nme",
+            implementation="native_nme_alias",
+            distinct_from_nme=False,
+            uses_learned_parameters=False,
+        )
+
+    if method == "create":
+        return NativeClassifierSpec(
+            classifier="classwise_reconstruction_error",
+            implementation="model_forward_logits",
+            distinct_from_nme=True,
+            uses_learned_parameters=True,
+        )
+
+    if method in {
+        "joint",
+        "finetune",
+        "replay",
+        "podnet",
+        "afc",
+        "fgp",
+        "cscct",
+    }:
+        return NativeClassifierSpec(
+            classifier="learned_classification_head",
+            implementation="model_forward_logits",
+            distinct_from_nme=True,
+            uses_learned_parameters=True,
+        )
+
+    raise ValueError(f"unsupported native classifier contract: {method}")
+
+
+class _NativeClassifierView(nn.Module):
+    """Expose exactly the saved learner's native logits to the evaluator."""
+
+    def __init__(self, model: nn.Module, spec: NativeClassifierSpec) -> None:
+        super().__init__()
+        self.model = model
+        self.spec = spec
+        self.eval()
+
+    def forward(self, images: Tensor) -> Tensor:
+        if self.spec.implementation == "model_forward_logits":
+            logits = self.model(images)
+        elif self.spec.implementation == "lucir_training_cosine_logits":
+            classifier = getattr(self.model, "classifier", None)
+            class_weights = getattr(classifier, "weight", None)
+            if not isinstance(class_weights, Tensor):
+                raise TypeError("LUCIR native evaluation requires FC weights")
+            features = self.model.extract_features(images)
+            logits = normalized_cosine_classifier_logits(
+                features,
+                class_weights,
+                scale=float(self.spec.scale),
+                epsilon=float(self.spec.epsilon),
+            )
+        else:
+            raise RuntimeError(
+                "NME aliases must not be sent through a native-head view"
+            )
+        if not isinstance(logits, Tensor) or logits.ndim != 2:
+            raise TypeError("native classifier must return a logits matrix")
+        return logits
 
 
 def _required_mapping(
@@ -427,24 +575,40 @@ def _paired_support_features(
 def _aggregate(records: Sequence[Mapping[str, Any]]) -> dict[str, float]:
     baseline = [float(record["baseline"]["accuracy"]) for record in records]
     cmpt = [float(record["cmpt"]["accuracy"]) for record in records]
+    native = [float(record["native"]["accuracy"]) for record in records]
     parity = [abs(float(record["parity_error"])) for record in records]
     incremental_baseline = baseline[1:] if len(baseline) > 1 else baseline
     incremental_cmpt = cmpt[1:] if len(cmpt) > 1 else cmpt
+    incremental_native = native[1:] if len(native) > 1 else native
+    baseline_aia = sum(baseline) / len(baseline)
+    cmpt_aia = sum(cmpt) / len(cmpt)
+    native_aia = sum(native) / len(native)
     return {
-        "baseline_aia_percent": 100.0 * sum(baseline) / len(baseline),
-        "cmpt_aia_percent": 100.0 * sum(cmpt) / len(cmpt),
-        "aia_delta_percent_points": 100.0
-        * (sum(cmpt) - sum(baseline))
-        / len(baseline),
+        "native_aia_percent": 100.0 * native_aia,
+        "baseline_aia_percent": 100.0 * baseline_aia,
+        "cmpt_aia_percent": 100.0 * cmpt_aia,
+        "aia_delta_percent_points": 100.0 * (cmpt_aia - baseline_aia),
+        "nme_minus_native_aia_percent_points": 100.0
+        * (baseline_aia - native_aia),
+        "cmpt_minus_native_aia_percent_points": 100.0
+        * (cmpt_aia - native_aia),
+        "native_incremental_aia_percent": 100.0
+        * sum(incremental_native)
+        / len(incremental_native),
         "baseline_incremental_aia_percent": 100.0
         * sum(incremental_baseline)
         / len(incremental_baseline),
         "cmpt_incremental_aia_percent": 100.0
         * sum(incremental_cmpt)
         / len(incremental_cmpt),
+        "native_final_percent": 100.0 * native[-1],
         "baseline_final_percent": 100.0 * baseline[-1],
         "cmpt_final_percent": 100.0 * cmpt[-1],
         "final_delta_percent_points": 100.0 * (cmpt[-1] - baseline[-1]),
+        "nme_minus_native_final_percent_points": 100.0
+        * (baseline[-1] - native[-1]),
+        "cmpt_minus_native_final_percent_points": 100.0
+        * (cmpt[-1] - native[-1]),
         "max_parity_error_percent_points": 100.0 * max(parity),
     }
 
@@ -470,7 +634,7 @@ def build_old_class_cmpt_means(
 
 
 class CMPTCheckpointEvaluator:
-    """Evaluate current-memory NME and CMPT-NCM on one frozen trajectory."""
+    """Evaluate native, current-memory NME, and CMPT on one trajectory."""
 
     def __init__(
         self,
@@ -485,6 +649,7 @@ class CMPTCheckpointEvaluator:
         self.project_root = Path(project_root).expanduser().resolve()
         self.source_root = Path(source_root).expanduser().resolve()
         self.progress = progress or (lambda _: None)
+        torch.set_num_threads(int(settings.cpu_threads))
         self.checkpoint_paths = discover_checkpoint_paths(
             settings.checkpoint_directory
         )
@@ -493,6 +658,18 @@ class CMPTCheckpointEvaluator:
             for path in self.checkpoint_paths
         ]
         self.audit = audit_checkpoint_trajectory(self.checkpoints, settings)
+        native_specs = [
+            resolve_native_classifier(checkpoint)
+            for checkpoint in self.checkpoints
+        ]
+        self.native_classifier = native_specs[0]
+        if any(
+            spec != self.native_classifier for spec in native_specs[1:]
+        ):
+            raise ValueError(
+                f"{settings.learner}: native classifier contract changes "
+                "across sessions"
+            )
         if max_sessions is not None:
             count = int(max_sessions)
             if count <= 0:
@@ -509,6 +686,7 @@ class CMPTCheckpointEvaluator:
             ),
             "output_file": str(self.settings.output_file),
             "cmpt": self._cmpt_metadata(),
+            "native_classifier": self.native_classifier.to_dict(),
         }
 
     def _cmpt_metadata(self) -> dict[str, Any]:
@@ -530,6 +708,7 @@ class CMPTCheckpointEvaluator:
             "center_strength": self.settings.center_strength,
             "strict_parity": self.settings.strict_parity,
             "parity_tolerance": self.settings.parity_tolerance,
+            "cpu_threads": self.settings.cpu_threads,
             "training_reused_without_changes": True,
         }
 
@@ -558,10 +737,11 @@ class CMPTCheckpointEvaluator:
         elapsed_seconds: float,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "status": status,
             "learner": self.settings.learner,
             "trajectory": self.audit.to_dict(),
+            "native_classifier": self.native_classifier.to_dict(),
             "checkpoint_directory": str(
                 self.settings.checkpoint_directory
             ),
@@ -581,6 +761,110 @@ class CMPTCheckpointEvaluator:
             payload["summary"] = _aggregate(records)
         return payload
 
+    def _evaluate_native(
+        self,
+        model: nn.Module,
+        loader: Any,
+        device: torch.device,
+        old_class_count: int,
+        baseline: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if not self.native_classifier.distinct_from_nme:
+            return copy.deepcopy(dict(baseline))
+        view = _NativeClassifierView(model, self.native_classifier)
+        return evaluate_classifier(
+            view,
+            loader,
+            device,
+            old_class_count,
+        ).to_dict()
+
+    def _upgrade_existing_native_output(
+        self,
+        output: Path,
+    ) -> dict[str, Any]:
+        """Add native metrics to a completed schema-v1 result atomically."""
+
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        if payload.get("status") != "complete":
+            raise FileExistsError(
+                f"CMPT output exists but is not complete: {output}; "
+                "pass --force to replace it"
+            )
+        records = payload.get("records")
+        if not isinstance(records, list) or len(records) != len(
+            self.checkpoints
+        ):
+            raise ValueError(
+                "existing CMPT result does not match the checkpoint count"
+            )
+        if any("native" in record for record in records):
+            raise FileExistsError(
+                f"CMPT output already contains native results: {output}; "
+                "pass --force to replace it"
+            )
+
+        trainer = (
+            self._trainer()
+            if self.native_classifier.distinct_from_nme
+            else None
+        )
+        started = time.perf_counter()
+        for record, checkpoint in zip(records, self.checkpoints):
+            session_id = int(checkpoint["session_id"])
+            if int(record.get("session_id", -1)) != session_id:
+                raise ValueError(
+                    "existing CMPT record order does not match checkpoints"
+                )
+            baseline = record.get("baseline")
+            if not isinstance(baseline, Mapping):
+                raise ValueError("existing CMPT record lacks its NME result")
+            if self.native_classifier.distinct_from_nme:
+                assert trainer is not None
+                old_class_count = trainer.protocol.session(session_id).start
+                model = _load_model(trainer, checkpoint, session_id)
+                test_dataset = trainer.data.cumulative_test_dataset(session_id)
+                test_loader = trainer._loader(
+                    test_dataset,
+                    shuffle=False,
+                    session_id=session_id + 11000,
+                )
+                native = self._evaluate_native(
+                    model,
+                    test_loader,
+                    trainer.device,
+                    old_class_count,
+                    baseline,
+                )
+                del model
+            else:
+                native = copy.deepcopy(dict(baseline))
+            record["native"] = native
+            self.progress(
+                f"{self.settings.learner} S{session_id}: "
+                f"Native={100.0 * float(native['accuracy']):.3f} "
+                "(existing NME/CMPT preserved)"
+            )
+
+        payload["schema_version"] = 2
+        payload["native_classifier"] = self.native_classifier.to_dict()
+        payload["summary"] = _aggregate(records)
+        payload["native_evaluation"] = {
+            "added_to_existing_result": True,
+            "training_reused_without_changes": True,
+            "checkpoint_weights_modified": False,
+            "test_labels_used_for_selection": False,
+            "elapsed_seconds": time.perf_counter() - started,
+            "git_commit": git_commit(self.project_root),
+            "source_provenance": build_exploration_provenance(
+                self.source_root, self.project_root / "src_explore"
+            ),
+        }
+        temporary = output.with_suffix(output.suffix + ".native-upgrade.tmp")
+        dump_json(payload, temporary)
+        temporary.replace(output)
+        return payload
+
     def run(
         self,
         *,
@@ -593,9 +877,7 @@ class CMPTCheckpointEvaluator:
             else Path(output_file).expanduser().resolve()
         )
         if output.exists() and not force:
-            raise FileExistsError(
-                f"CMPT output already exists: {output}; pass --force to replace"
-            )
+            return self._upgrade_existing_native_output(output)
         trainer = self._trainer()
         records: list[dict[str, Any]] = []
         transported: Tensor | None = None
@@ -751,6 +1033,13 @@ class CMPTCheckpointEvaluator:
                 center_strength=self.settings.center_strength,
                 horizontal_flip_query=self.settings.query_horizontal_flip,
             ).to_dict()
+            native = self._evaluate_native(
+                current_model,
+                test_loader,
+                trainer.device,
+                old_class_count,
+                baseline,
+            )
             stored = _checkpoint_session_metric(checkpoint, session_id)
             parity_error = float(baseline["accuracy"]) - float(
                 stored["accuracy"]
@@ -770,6 +1059,7 @@ class CMPTCheckpointEvaluator:
                 "checkpoint": str(checkpoint_path),
                 "session_id": session_id,
                 "seen_classes": seen,
+                "native": native,
                 "baseline": baseline,
                 "cmpt": cmpt,
                 "delta_accuracy": float(cmpt["accuracy"])
@@ -790,6 +1080,7 @@ class CMPTCheckpointEvaluator:
             )
             self.progress(
                 f"{self.settings.learner} S{session_id}: "
+                f"Native={100.0 * float(native['accuracy']):.3f}, "
                 f"NME={100.0 * float(baseline['accuracy']):.3f}, "
                 f"CMPT={100.0 * float(cmpt['accuracy']):.3f}, "
                 f"delta={100.0 * record['delta_accuracy']:+.3f} pp"

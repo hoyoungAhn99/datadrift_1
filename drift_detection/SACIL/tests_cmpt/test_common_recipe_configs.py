@@ -105,12 +105,13 @@ def test_affine_evaluators_reuse_the_same_frozen_trajectories() -> None:
         assert affine["cmpt"]["affine_ridge"] == 0.01
 
 
-def test_four_baselines_use_shared_cifar_contract_and_native_schedules() -> None:
+def test_five_baselines_use_shared_cifar_contract_and_native_schedules() -> None:
     expected = {
         "icarl": (200, 170, "multistep"),
         "replay": (200, 70, "multistep"),
         "podnet": (160, 160, "cosine"),
         "afc": (160, 160, "cosine"),
+        "cscct": (160, 160, "multistep"),
     }
     for method, (base_epochs, incremental_epochs, scheduler) in expected.items():
         config = _training_config(f"train_{method}.yaml")
@@ -123,8 +124,8 @@ def test_four_baselines_use_shared_cifar_contract_and_native_schedules() -> None
         assert replay["enabled"] is False
 
 
-def test_four_baseline_evaluators_pair_rigid_and_affine_checkpoints() -> None:
-    for method in ("icarl", "replay", "podnet", "afc"):
+def test_five_baseline_evaluators_pair_rigid_and_affine_checkpoints() -> None:
+    for method in ("icarl", "replay", "podnet", "afc", "cscct"):
         rigid = load_config_tree(CONFIG_ROOT / f"evaluate_{method}.yaml")
         affine = load_config_tree(
             CONFIG_ROOT / f"evaluate_{method}_affine.yaml"

@@ -37,6 +37,15 @@ def parse_args() -> argparse.Namespace:
             "iCaRL-shaped LUCIR and CaSpeR common-recipe runs"
         ),
     )
+    parser.add_argument(
+        "--resume-checkpoint",
+        type=Path,
+        default=None,
+        help=(
+            "resume an interrupted run in place from a completed session "
+            "checkpoint (for example session_07.pt starts at S8)"
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -58,6 +67,7 @@ def main() -> int:
         PROJECT_ROOT,
         max_sessions=args.max_sessions,
         base_checkpoint=args.base_checkpoint,
+        resume_checkpoint=args.resume_checkpoint,
     )
     if args.dry_run:
         result = {
@@ -67,10 +77,12 @@ def main() -> int:
             "reference_code_executed": False,
             "method": trainer.method,
             "base_checkpoint": trainer.validate_base_checkpoint(),
+            "resume_checkpoint": trainer.validate_resume_checkpoint(),
             "method_contract": trainer.method_contract_payload,
             "protocol_id": trainer.protocol.protocol_id,
             "sessions": trainer.max_sessions,
             "device": str(trainer.device),
+            "cpu_threads": trainer.cpu_threads,
             "run_dir": str(trainer.run_dir),
             "replay_batching": trainer.replay_batching_options,
             "training": config["training"],

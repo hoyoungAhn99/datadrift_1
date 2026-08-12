@@ -1214,6 +1214,7 @@ class UnifiedTable1Trainer:
         *,
         max_sessions: int | None = None,
         base_checkpoint: str | Path | None = None,
+        resume_checkpoint: str | Path | None = None,
     ) -> None:
         self.config = copy.deepcopy(config)
         self.project_root = Path(project_root).resolve()
@@ -1317,6 +1318,18 @@ class UnifiedTable1Trainer:
             if base_checkpoint is None
             else self._project_path(base_checkpoint)
         )
+        self.resume_checkpoint_path = (
+            None
+            if resume_checkpoint is None
+            else self._project_path(resume_checkpoint)
+        )
+        if (
+            self.base_checkpoint_path is not None
+            and self.resume_checkpoint_path is not None
+        ):
+            raise ValueError(
+                "--base-checkpoint and --resume-checkpoint are mutually exclusive"
+            )
         self.start_session = 0
         self.method_contract = unified_method_contract(self.method)
         self.seed = int(config.get("seed", 1))
@@ -1327,6 +1340,13 @@ class UnifiedTable1Trainer:
             runtime_options = {}
         if not isinstance(runtime_options, dict):
             raise ValueError("runtime must be a mapping")
+        cpu_threads = int(
+            runtime_options.get("cpu_threads", torch.get_num_threads())
+        )
+        if cpu_threads <= 0:
+            raise ValueError("runtime.cpu_threads must be positive")
+        torch.set_num_threads(cpu_threads)
+        self.cpu_threads = cpu_threads
         throttle_ms = float(runtime_options.get("gpu_throttle_ms", 0.0))
         if not math.isfinite(throttle_ms) or throttle_ms < 0 or throttle_ms > 1000:
             raise ValueError("runtime.gpu_throttle_ms must be in [0, 1000]")
@@ -1442,6 +1462,12 @@ class UnifiedTable1Trainer:
                     if self.base_checkpoint_path is None
                     else str(self.base_checkpoint_path)
                 ),
+                "resume_checkpoint": (
+                    None
+                    if self.resume_checkpoint_path is None
+                    else str(self.resume_checkpoint_path)
+                ),
+                "cpu_threads": self.cpu_threads,
                 "protocol_id": self.protocol.protocol_id,
                 "device": str(self.device),
                 "git_commit": git_commit(self.project_root),
@@ -1873,6 +1899,151 @@ class UnifiedTable1Trainer:
             "seed": int(checkpoint["config"].get("seed", 1)),
         }
 
+    @staticmethod
+    def _resume_compatible_config(config: dict[str, Any]) -> dict[str, Any]:
+        """Return trajectory-defining options while allowing CUDA remapping."""
+
+        compatible = copy.deepcopy(config)
+        compatible.pop("device", None)
+        runtime = compatible.get("runtime")
+        if isinstance(runtime, dict):
+            runtime.pop("cpu_threads", None)
+            if not runtime:
+                compatible.pop("runtime")
+        return compatible
+
+    def _validate_resume_checkpoint(
+        self, checkpoint: dict[str, Any]
+    ) -> int:
+        if checkpoint.get("framework") != "sacil-unified":
+            raise ValueError("resume checkpoint is not from the unified runner")
+        session_id = int(checkpoint.get("session_id", -1))
+        if not 0 <= session_id < self.protocol.num_sessions:
+            raise ValueError("resume checkpoint has an invalid session ID")
+        if session_id + 1 >= self.max_sessions:
+            raise ValueError(
+                "resume checkpoint already reaches the requested session limit"
+            )
+        if checkpoint.get("protocol_id") != self.protocol.protocol_id:
+            raise ValueError("resume checkpoint protocol does not match config")
+        if str(checkpoint.get("method", "")).lower() != self.method:
+            raise ValueError("resume checkpoint method does not match config")
+        source_config = checkpoint.get("config")
+        if not isinstance(source_config, dict):
+            raise ValueError("resume checkpoint has no resolved config")
+        if self._resume_compatible_config(
+            source_config
+        ) != self._resume_compatible_config(self.config):
+            raise ValueError(
+                "resume checkpoint training config differs from target config"
+            )
+        if "rng_state" not in checkpoint:
+            raise ValueError("resume checkpoint has no RNG state")
+
+        expected_classes = self.protocol.session(session_id).stop
+        class_means = checkpoint.get("class_means")
+        if (
+            not isinstance(class_means, Tensor)
+            or class_means.ndim != 2
+            or class_means.shape[0] != expected_classes
+        ):
+            raise ValueError("resume checkpoint has invalid class means")
+        records = checkpoint.get("metrics", {}).get("records", [])
+        expected_ids = list(range(session_id + 1))
+        record_ids = [int(record.get("session_id", -1)) for record in records]
+        if record_ids != expected_ids:
+            raise ValueError("resume checkpoint has incomplete metric history")
+
+        if self.resume_checkpoint_path is None:
+            raise RuntimeError("resume checkpoint path is missing")
+        if self.resume_checkpoint_path.parent.resolve() != self.checkpoint_dir:
+            raise ValueError(
+                "resume checkpoint must belong to the configured run directory"
+            )
+        expected_name = f"session_{session_id:02d}.pt"
+        if self.resume_checkpoint_path.name != expected_name:
+            raise ValueError(
+                f"resume checkpoint filename must be {expected_name}"
+            )
+
+        session_log = self.run_dir / "sessions.jsonl"
+        if not session_log.exists():
+            raise ValueError("resume run has no sessions.jsonl history")
+        log_records = [
+            json.loads(line)
+            for line in session_log.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        log_ids = [int(record.get("session_id", -1)) for record in log_records]
+        if log_ids != expected_ids:
+            raise ValueError(
+                "sessions.jsonl does not end exactly at the resume checkpoint"
+            )
+        checkpoint_ids = sorted(
+            int(path.stem.split("_")[-1])
+            for path in self.checkpoint_dir.glob("session_*.pt")
+        )
+        if checkpoint_ids != expected_ids:
+            raise ValueError(
+                "checkpoint directory contains missing or later session files"
+            )
+        if (self.run_dir / "metrics.json").exists():
+            raise ValueError("run already has a final metrics.json")
+        return session_id
+
+    def validate_resume_checkpoint(self) -> dict[str, Any] | None:
+        """Validate an interrupted-run checkpoint without restoring state."""
+
+        if self.resume_checkpoint_path is None:
+            return None
+        checkpoint = load_checkpoint(
+            self.resume_checkpoint_path, map_location="cpu"
+        )
+        session_id = self._validate_resume_checkpoint(checkpoint)
+        return {
+            "path": str(self.resume_checkpoint_path),
+            "method": checkpoint["method"],
+            "session_id": session_id,
+            "next_session": session_id + 1,
+            "seed": int(checkpoint["config"].get("seed", 1)),
+        }
+
+    def _bootstrap_from_resume_checkpoint(self) -> int:
+        if self.resume_checkpoint_path is None:
+            raise RuntimeError("resume checkpoint path is missing")
+        checkpoint = load_checkpoint(
+            self.resume_checkpoint_path, map_location="cpu"
+        )
+        session_id = self._validate_resume_checkpoint(checkpoint)
+        seen_classes = self.protocol.session(session_id).stop
+        model = self._new_model(seen_classes)
+        if type(model).__name__ != str(checkpoint.get("model_type", "")):
+            raise ValueError("resume checkpoint model type does not match config")
+        model.load_state_dict(checkpoint["model"], strict=True)
+        self.model = model.to(self.device)
+        self.memory = ExemplarMemory.from_state_dict(checkpoint["memory"])
+        self.metrics = CILMetricsTracker.from_state_dict(checkpoint["metrics"])
+        self.class_means = checkpoint["class_means"].detach().cpu().clone()
+        transported = checkpoint.get("transported_class_means")
+        if isinstance(transported, Tensor):
+            self.transported_class_means = transported.detach().cpu().clone()
+
+        if all(key in checkpoint for key in ("tree", "prototypes", "anchors")):
+            self.sacil_tree = HierarchyTree.from_state_dict(checkpoint["tree"])
+            self.sacil_prototypes = PrototypeBank.from_state_dict(
+                checkpoint["prototypes"]
+            )
+            self.sacil_anchors = HierarchicalAnchorBank.from_state_dict(
+                checkpoint["anchors"]
+            )
+        restore_rng_state(
+            checkpoint["rng_state"],
+            source_cuda_device=checkpoint["config"].get("device"),
+            target_cuda_device=self.device,
+        )
+        self.start_session = session_id + 1
+        return session_id
+
     def _bootstrap_from_base_checkpoint(self) -> dict[str, Any]:
         if self.base_checkpoint_path is None:
             raise RuntimeError("base checkpoint path is missing")
@@ -1958,12 +2129,21 @@ class UnifiedTable1Trainer:
         session_log = self.run_dir / "sessions.jsonl"
         metrics_path = self.run_dir / "metrics.json"
         existing_checkpoints = tuple(self.checkpoint_dir.glob("session_*.pt"))
-        if session_log.exists() or metrics_path.exists() or existing_checkpoints:
+        if (
+            self.resume_checkpoint_path is None
+            and (
+                session_log.exists()
+                or metrics_path.exists()
+                or existing_checkpoints
+            )
+        ):
             raise FileExistsError(
                 "the unified run directory already contains training "
                 f"artifacts: {self.run_dir}; choose a new --run-name"
             )
-        if self.base_checkpoint_path is not None:
+        if self.resume_checkpoint_path is not None:
+            self._bootstrap_from_resume_checkpoint()
+        elif self.base_checkpoint_path is not None:
             base_record = self._bootstrap_from_base_checkpoint()
             with session_log.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(base_record, ensure_ascii=False) + "\n")
@@ -3775,6 +3955,7 @@ class UnifiedTable1Trainer:
             "epochs": epochs,
             "samples": len(loader.dataset),
             "gpu_throttle_ms": self.gpu_throttle_seconds * 1000.0,
+            "cpu_threads": self.cpu_threads,
             "geometry_anchor_refreshes": geometry_anchor_refreshes,
             "edge_topology_updates": edge_topology_updates,
             "edge_topology_representatives": (

@@ -12,6 +12,7 @@ CONFIG_ROOT = PROJECT_ROOT / "configs" / "table1" / "cifar100"
 VALIDATION_ROOT = (
     PROJECT_ROOT / "configs" / "validation" / "two_session_25spc"
 )
+CMPT_COMMON_ROOT = PROJECT_ROOT / "configs" / "cmpt" / "common_recipe"
 
 
 def _resolved(name: str) -> dict:
@@ -70,6 +71,34 @@ def test_casper_uses_paper_topology_hyperparameters():
     assert casper["classes_per_graph"] == 8
     assert casper["replay_batch_size"] == 64
     assert casper["wd_reg"] == 1e-5
+
+
+def test_cmpt_common_cscct_keeps_author_recipe_and_shared_protocol():
+    config = load_config_tree(CMPT_COMMON_ROOT / "train_cscct.yaml")
+    assert config["method"] == {
+        "name": "cscct",
+        "replay_batching": {"enabled": False},
+        "kd_weight": 0.25,
+        "kd_temperature": 2.0,
+        "csc_weight": 3.0,
+        "ct_weight": 1.5,
+        "ct_temperature": 2.0,
+        "fusion_lr": 1e-8,
+    }
+    assert config["model"]["backbone"] == "cscct_modified_resnet32"
+    assert config["training"]["batch_size"] == 128
+    for phase in ("base", "incremental"):
+        recipe = config["training"][phase]
+        assert recipe["epochs"] == 160
+        assert recipe["lr"] == 0.1
+        assert recipe["momentum"] == 0.9
+        assert recipe["weight_decay"] == 5e-4
+        assert recipe["milestones"] == [80, 120]
+    assert config["memory"]["exemplars_per_class"] == 20
+    assert config["memory"]["selection"] == "icarl_herding"
+    assert config["data"]["protocol"].endswith(
+        "cifar100_b50_t10_afc_order1.json"
+    )
 
 
 def test_create_uses_author_cosine_floor():
