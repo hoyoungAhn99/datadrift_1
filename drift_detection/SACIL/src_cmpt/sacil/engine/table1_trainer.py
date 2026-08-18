@@ -1573,7 +1573,12 @@ class UnifiedTable1Trainer:
                 ),
             )
         if self.method == "cscct":
-            return CSCCTIncrementalNet(num_classes)
+            return CSCCTIncrementalNet(
+                num_classes,
+                backbone=str(
+                    model.get("backbone", "cscct_modified_resnet32")
+                ),
+            )
         return ExpandableLinearNet(
             num_classes, backbone=str(model.get("backbone", "resnet32"))
         )
@@ -3307,11 +3312,23 @@ class UnifiedTable1Trainer:
             and fusion_loader is not None
             else None
         )
-        fusion_scheduler = (
-            self._scheduler(fusion_optimizer, phase, epochs)
-            if fusion_optimizer is not None
-            else None
-        )
+        fusion_scheduler = None
+        if fusion_optimizer is not None:
+            fusion_phase = dict(phase)
+            if "fusion_scheduler" in phase:
+                fusion_phase["scheduler"] = phase["fusion_scheduler"]
+                fusion_phase["milestones"] = phase.get(
+                    "fusion_milestones", phase.get("milestones", [])
+                )
+                fusion_phase["lr_decay"] = phase.get(
+                    "fusion_lr_decay", phase.get("lr_decay", 0.1)
+                )
+                fusion_phase["eta_min"] = phase.get(
+                    "fusion_eta_min", phase.get("eta_min", 0.0)
+                )
+            fusion_scheduler = self._scheduler(
+                fusion_optimizer, fusion_phase, epochs
+            )
         casper_loader = self._casper_loader(session_id, max(1, len(loader)))
         max_batches_value = self.config.get("debug", {}).get(
             "max_batches_per_epoch"

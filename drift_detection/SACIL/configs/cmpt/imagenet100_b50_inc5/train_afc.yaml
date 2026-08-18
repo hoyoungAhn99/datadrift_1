@@ -18,7 +18,10 @@ method:
       weight_decay: 0.0001
 
 training:
-  batch_size: 128
+  # The AFC release uses 128, but its ImageNet ResNet-18 activations exceed
+  # the 8 GiB capacity of the local RTX 2080 SUPER even during S0.  Use the
+  # largest standard physical batch that fits this hardware.
+  batch_size: 64
   base:
     epochs: 90
     lr: 0.1

@@ -21,6 +21,7 @@ from .takp_resnet18 import (
 )
 from .table1_models import (
     CREATEIncrementalNet,
+    CSCCTImageNetResNet18,
     CSCCTIncrementalNet,
     CSCCTResNet32,
     ChunkedCosineClassifier,
@@ -40,6 +41,7 @@ __all__ = [
     "AFCResNet32",
     "CosineClassifier",
     "CREATEIncrementalNet",
+    "CSCCTImageNetResNet18",
     "CSCCTIncrementalNet",
     "CSCCTResNet32",
     "ChunkedCosineClassifier",

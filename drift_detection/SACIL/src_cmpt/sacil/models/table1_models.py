@@ -446,6 +446,82 @@ class CSCCTResNet32(nn.Module):
         return self.pool(map3), (map1, map2, map3)
 
 
+class CSCCTImageNetResNet18(nn.Module):
+    """Author-aligned CSCCT ResNet-18 backbone for ImageNet-Subset.
+
+    This mirrors ``models/modified_resnet.py`` from the CSCCT release: the
+    ImageNet stem is followed by four residual stages, the last residual
+    block omits its final ReLU, and 224px inputs are pooled with a 7x7 average
+    pool.  The classifier remains in :class:`CSCCTIncrementalNet` so one
+    shared split-cosine implementation can serve both datasets.
+    """
+
+    output_dim = 512
+
+    def __init__(self, *, initialize: bool = True) -> None:
+        super().__init__()
+        self.in_channels = 64
+        self.conv1 = nn.Conv2d(
+            3, 64, kernel_size=7, stride=2, padding=3, bias=False
+        )
+        self.bn1 = nn.BatchNorm2d(64)
+        self.relu = nn.ReLU(inplace=True)
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        self.layer1 = self._stage(64, blocks=2, stride=1)
+        self.layer2 = self._stage(128, blocks=2, stride=2)
+        self.layer3 = self._stage(256, blocks=2, stride=2)
+        self.layer4 = self._stage(
+            512, blocks=2, stride=2, remove_final_relu=True
+        )
+        self.avgpool = nn.AvgPool2d(7, stride=1)
+        if initialize:
+            self.initialize_parameters()
+
+    def _stage(
+        self,
+        out_channels: int,
+        *,
+        blocks: int,
+        stride: int,
+        remove_final_relu: bool = False,
+    ) -> nn.Sequential:
+        layers: list[nn.Module] = []
+        for index in range(blocks):
+            layers.append(
+                _CSCCTBasicBlock(
+                    self.in_channels,
+                    out_channels,
+                    stride=stride if index == 0 else 1,
+                    last=remove_final_relu and index == blocks - 1,
+                )
+            )
+            self.in_channels = out_channels
+        return nn.Sequential(*layers)
+
+    def initialize_parameters(self) -> None:
+        for module in self.modules():
+            if isinstance(module, nn.Conv2d):
+                nn.init.kaiming_normal_(
+                    module.weight, mode="fan_out", nonlinearity="relu"
+                )
+            elif isinstance(module, nn.BatchNorm2d):
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+
+    def stem(self, images: Tensor) -> Tensor:
+        return self.maxpool(self.relu(self.bn1(self.conv1(images))))
+
+    def pool(self, features: Tensor) -> Tensor:
+        return torch.flatten(self.avgpool(features), 1)
+
+    def forward(self, images: Tensor) -> tuple[Tensor, tuple[Tensor, ...]]:
+        map1 = self.layer1(self.stem(images))
+        map2 = self.layer2(map1)
+        map3 = self.layer3(map2)
+        map4 = self.layer4(map3)
+        return self.pool(map4), (map1, map2, map3, map4)
+
+
 class ScaleShiftConv2d(nn.Conv2d):
     def __init__(self, source: nn.Conv2d) -> None:
         super().__init__(
@@ -507,21 +583,35 @@ def _convert_scale_shift(module: nn.Module) -> None:
 
 
 class CSCCTIncrementalNet(nn.Module):
-    def __init__(self, num_classes: int) -> None:
+    def __init__(
+        self,
+        num_classes: int,
+        backbone: str = "cscct_modified_resnet32",
+    ) -> None:
         super().__init__()
         # The reference ResNet constructs its cosine FC before applying the
         # explicit Kaiming initialization to convolution layers.  Defer the
         # backbone initialization until after the separate wrapper head has
         # been constructed so the seeded parameter stream is identical.
-        self.first = CSCCTResNet32(initialize=False)
-        self.second: CSCCTResNet32 | None = None
+        self.backbone_name = str(backbone)
+        if self.backbone_name == "cscct_modified_resnet32":
+            backbone_type: type[CSCCTResNet32 | CSCCTImageNetResNet18] = (
+                CSCCTResNet32
+            )
+        elif self.backbone_name == "cscct_modified_resnet18_imagenet":
+            backbone_type = CSCCTImageNetResNet18
+        else:
+            raise ValueError(f"unsupported CSCCT backbone: {self.backbone_name}")
+        self.first = backbone_type(initialize=False)
+        self.second: CSCCTResNet32 | CSCCTImageNetResNet18 | None = None
         self.feature_dim = self.first.output_dim
         self.classifier = ChunkedCosineClassifier(
             self.feature_dim, [int(num_classes)]
         )
         self.first.initialize_parameters()
+        fusion_levels = 4 if isinstance(self.first, CSCCTImageNetResNet18) else 3
         self.fusion = nn.ParameterList(
-            nn.Parameter(torch.tensor([0.5])) for _ in range(3)
+            nn.Parameter(torch.tensor([0.5])) for _ in range(fusion_levels)
         )
 
     @property
@@ -544,6 +634,13 @@ class CSCCTIncrementalNet(nn.Module):
         map3 = self._mix(
             2, self.first.layer3(map2), self.second.layer3(map2)
         )
+        if isinstance(self.first, CSCCTImageNetResNet18):
+            if not isinstance(self.second, CSCCTImageNetResNet18):
+                raise TypeError("CSCCT ImageNet branches have different types")
+            map4 = self._mix(
+                3, self.first.layer4(map3), self.second.layer4(map3)
+            )
+            return self.first.pool(map4), (map1, map2, map3, map4)
         return self.first.pool(map3), (map1, map2, map3)
 
     def extract_features(self, images: Tensor) -> Tensor:
