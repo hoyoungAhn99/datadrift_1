@@ -1906,9 +1906,16 @@ class UnifiedTable1Trainer:
 
     @staticmethod
     def _resume_compatible_config(config: dict[str, Any]) -> dict[str, Any]:
-        """Return trajectory-defining options while allowing CUDA remapping."""
+        """Return trajectory options without machine-local runtime metadata."""
 
         compatible = copy.deepcopy(config)
+        # ``load_config_tree`` records the absolute source file for
+        # provenance.  A Windows checkpoint therefore contains ``C:\\...``
+        # while the identical config loaded on Linux contains ``/home/...``.
+        # The source location has no effect on the training trajectory and
+        # must not make an otherwise portable checkpoint impossible to
+        # resume.
+        compatible.pop("_config_path", None)
         compatible.pop("device", None)
         runtime = compatible.get("runtime")
         if isinstance(runtime, dict):
