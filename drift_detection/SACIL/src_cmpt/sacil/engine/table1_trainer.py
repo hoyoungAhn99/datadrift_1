@@ -1583,6 +1583,52 @@ class UnifiedTable1Trainer:
             num_classes, backbone=str(model.get("backbone", "resnet32"))
         )
 
+    @staticmethod
+    def _cscct_model_from_checkpoint_state(
+        state: dict[str, Tensor],
+        *,
+        backbone: str,
+        expected_classes: int,
+    ) -> CSCCTIncrementalNet:
+        """Rebuild CSCCT's expanded branch/head topology before strict load.
+
+        CSCCT does not represent an S4 model as one 70-class head.  Its first
+        incremental expansion creates the second backbone, converts the first
+        backbone to scale-shift convolutions, and every expansion appends a
+        separate classifier chunk.  Those structural operations must be
+        replayed when resuming from a checkpoint; their temporary values are
+        immediately replaced by ``load_state_dict``.
+        """
+
+        prefix = "classifier.weights."
+        chunks: dict[int, Tensor] = {}
+        for key, value in state.items():
+            if not key.startswith(prefix):
+                continue
+            suffix = key[len(prefix) :]
+            if suffix.isdigit():
+                chunks[int(suffix)] = value
+        if not chunks or sorted(chunks) != list(range(len(chunks))):
+            raise ValueError(
+                "CSCCT resume checkpoint has invalid classifier chunks"
+            )
+        values = [chunks[index] for index in range(len(chunks))]
+        if any(value.ndim != 2 for value in values):
+            raise ValueError(
+                "CSCCT resume checkpoint has invalid classifier weights"
+            )
+
+        model = CSCCTIncrementalNet(
+            int(values[0].shape[0]), backbone=str(backbone)
+        )
+        for value in values[1:]:
+            model.expand_classes(torch.empty_like(value, device="cpu"))
+        if model.num_classes != int(expected_classes):
+            raise ValueError(
+                "CSCCT resume checkpoint class count does not match protocol"
+            )
+        return model
+
     def _phase(self, session_id: int) -> dict[str, Any]:
         name = "base" if session_id == 0 else "incremental"
         return dict(self.config["training"][name])
@@ -2028,7 +2074,18 @@ class UnifiedTable1Trainer:
         )
         session_id = self._validate_resume_checkpoint(checkpoint)
         seen_classes = self.protocol.session(session_id).stop
-        model = self._new_model(seen_classes)
+        if self.method == "cscct":
+            model = self._cscct_model_from_checkpoint_state(
+                checkpoint["model"],
+                backbone=str(
+                    self.config.get("model", {}).get(
+                        "backbone", "cscct_modified_resnet32"
+                    )
+                ),
+                expected_classes=seen_classes,
+            )
+        else:
+            model = self._new_model(seen_classes)
         if type(model).__name__ != str(checkpoint.get("model_type", "")):
             raise ValueError("resume checkpoint model type does not match config")
         model.load_state_dict(checkpoint["model"], strict=True)
