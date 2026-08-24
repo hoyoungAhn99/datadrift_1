@@ -89,6 +89,59 @@ def main() -> int:
         f"CMPT AIA={summary['cmpt_aia_percent']:.3f} | "
         f"delta={summary['aia_delta_percent_points']:+.3f} pp"
     )
+    interpolation = summary.get("prototype_interpolation")
+    if interpolation:
+        values = " | ".join(
+            f"alpha={entry['alpha']:.2f}: "
+            f"AIA={entry['aia_percent']:.3f}, "
+            f"final={entry['final_percent']:.3f}"
+            for entry in interpolation.values()
+        )
+        print(f"prototype interpolation sweep | {values}")
+    adaptive = summary.get("adaptive_alpha")
+    if adaptive:
+        values = " | ".join(
+            f"{mode}: AIA={entry['aia_percent']:.3f}, "
+            f"delta={entry['aia_delta_vs_nme_percent_points']:+.3f}, "
+            f"mean-alpha={entry['mean_incremental_alpha']:.3f}"
+            for mode, entry in adaptive.items()
+        )
+        print(f"adaptive alpha | {values}")
+    accuracy_oracle = summary.get("accuracy_oracle")
+    if accuracy_oracle:
+        global_oracle = accuracy_oracle["learner_global"]
+        session_oracle = accuracy_oracle["session"]
+        print(
+            "accuracy oracle (test-label upper bound) | "
+            f"global alpha={global_oracle['alpha']:.2f}, "
+            f"AIA={global_oracle['aia_percent']:.3f} | "
+            f"session AIA={session_oracle['aia_percent']:.3f}, "
+            "alphas="
+            f"{session_oracle['alphas']}"
+        )
+    geometric_oracle = summary.get("class_geometric_oracle")
+    if geometric_oracle:
+        print(
+            "class-geometric oracle (full-old-data upper bound) | "
+            f"AIA={geometric_oracle['aia_percent']:.3f}, "
+            f"delta-vs-CMPT="
+            f"{geometric_oracle['aia_delta_vs_pure_cmpt_percent_points']:+.3f}"
+        )
+    components = summary.get("component_ablation")
+    if components:
+        class_translation = components["class_translation"]
+        combined = components["combined_cmpt"]
+        print(
+            "CMPT component ablation | "
+            f"Class-T AIA={class_translation['aia_percent']:.3f}, "
+            f"final={class_translation['final_percent']:.3f} | "
+            f"Combined AIA={combined['aia_percent']:.3f}, "
+            f"final={combined['final_percent']:.3f}, "
+            "delta-vs-Global="
+            f"{combined['aia_delta_vs_global_percent_points']:+.3f}, "
+            "delta-vs-Class="
+            f"{combined['aia_delta_vs_class_percent_points']:+.3f}"
+        )
     return 0
 
 

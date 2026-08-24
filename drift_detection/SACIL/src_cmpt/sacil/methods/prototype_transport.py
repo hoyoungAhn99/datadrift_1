@@ -318,6 +318,166 @@ def affine_ridge_transport(
     return transported, mapping, residual
 
 
+def apply_affine_mapping(
+    prototypes: Tensor,
+    mapping: Tensor,
+    *,
+    epsilon: float = 1.0e-12,
+) -> Tensor:
+    """Apply a fitted row-vector affine map and normalize its outputs."""
+
+    if prototypes.ndim != 2 or mapping.ndim != 2:
+        raise ValueError("prototypes and affine mapping must be matrices")
+    feature_dim = int(prototypes.shape[1])
+    if tuple(mapping.shape) != (feature_dim + 1, feature_dim):
+        raise ValueError("affine mapping has an incompatible shape")
+    if epsilon <= 0.0:
+        raise ValueError("affine mapping epsilon must be positive")
+    values = F.normalize(prototypes.detach().float(), dim=1)
+    design = torch.cat(
+        [
+            values,
+            torch.ones(
+                values.shape[0],
+                1,
+                device=values.device,
+                dtype=values.dtype,
+            ),
+        ],
+        dim=1,
+    )
+    return F.normalize(
+        design @ mapping.to(device=design.device, dtype=design.dtype),
+        dim=1,
+        eps=float(epsilon),
+    )
+
+
+def paired_class_means(
+    old_features: Tensor,
+    current_features: Tensor,
+    targets: Tensor,
+    *,
+    num_classes: int,
+    epsilon: float,
+) -> tuple[Tensor, Tensor]:
+    """Compute matched old/current exemplar means for every old class."""
+
+    if old_features.ndim != 2 or current_features.ndim != 2:
+        raise ValueError("paired exemplar features must be matrices")
+    if old_features.shape != current_features.shape:
+        raise ValueError("paired exemplar features must have one shape")
+    if old_features.shape[0] != targets.numel():
+        raise ValueError("paired exemplar feature and target counts differ")
+    count = int(num_classes)
+    if count <= 0:
+        raise ValueError("class-wise transport requires old classes")
+    old = F.normalize(old_features.detach().float(), dim=1)
+    current = F.normalize(current_features.detach().float(), dim=1)
+    labels = targets.detach().long().to(old.device)
+    expected = set(range(count))
+    observed = set(int(value) for value in labels.unique().tolist())
+    if observed != expected:
+        raise ValueError(
+            "class-wise transport targets must cover contiguous old labels"
+        )
+
+    old_means: list[Tensor] = []
+    current_means: list[Tensor] = []
+    for class_index in range(count):
+        mask = labels == class_index
+        old_means.append(
+            F.normalize(
+                old[mask].mean(dim=0, keepdim=True),
+                dim=1,
+                eps=float(epsilon),
+            )[0]
+        )
+        current_means.append(
+            F.normalize(
+                current[mask].mean(dim=0, keepdim=True),
+                dim=1,
+                eps=float(epsilon),
+            )[0]
+        )
+    return torch.stack(old_means), torch.stack(current_means)
+
+
+def classwise_translation_transport(
+    prototypes: Tensor,
+    old_exemplar_features: Tensor,
+    current_exemplar_features: Tensor,
+    targets: Tensor,
+    *,
+    epsilon: float = 1.0e-12,
+) -> tuple[Tensor, Tensor]:
+    """Move each old prototype by its paired exemplar-mean translation."""
+
+    if prototypes.ndim != 2:
+        raise ValueError("class-wise transport prototypes must be a matrix")
+    if prototypes.shape[1] != old_exemplar_features.shape[1]:
+        raise ValueError("class-wise transport feature dimensions do not match")
+    old_means, current_means = paired_class_means(
+        old_exemplar_features,
+        current_exemplar_features,
+        targets,
+        num_classes=int(prototypes.shape[0]),
+        epsilon=float(epsilon),
+    )
+    translations = current_means - old_means
+    transported = F.normalize(
+        F.normalize(prototypes.detach().float(), dim=1)
+        + translations.to(prototypes.device),
+        dim=1,
+        eps=float(epsilon),
+    )
+    return transported, translations
+
+
+def affine_class_residual_transport(
+    prototypes: Tensor,
+    mapping: Tensor,
+    old_exemplar_features: Tensor,
+    current_exemplar_features: Tensor,
+    targets: Tensor,
+    *,
+    epsilon: float = 1.0e-12,
+) -> tuple[Tensor, Tensor]:
+    """Add class-specific residual translations to a global affine map.
+
+    For class ``c``, this implements
+
+    ``T(p_c) + [m_c_current - T(m_c_old)]``
+
+    using the same retained exemplar identities in the two feature frames.
+    """
+
+    if prototypes.ndim != 2:
+        raise ValueError("affine-residual prototypes must be a matrix")
+    if prototypes.shape[1] != old_exemplar_features.shape[1]:
+        raise ValueError("affine-residual feature dimensions do not match")
+    old_means, current_means = paired_class_means(
+        old_exemplar_features,
+        current_exemplar_features,
+        targets,
+        num_classes=int(prototypes.shape[0]),
+        epsilon=float(epsilon),
+    )
+    globally_transported = apply_affine_mapping(
+        prototypes, mapping, epsilon=epsilon
+    )
+    predicted_old_means = apply_affine_mapping(
+        old_means, mapping, epsilon=epsilon
+    )
+    residuals = current_means - predicted_old_means
+    combined = F.normalize(
+        globally_transported + residuals.to(globally_transported.device),
+        dim=1,
+        eps=float(epsilon),
+    )
+    return combined, residuals
+
+
 def _representative_weights(
     old_features: Tensor,
     targets: Tensor,
