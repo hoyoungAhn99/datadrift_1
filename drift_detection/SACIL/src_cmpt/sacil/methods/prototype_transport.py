@@ -318,6 +318,86 @@ def affine_ridge_transport(
     return transported, mapping, residual
 
 
+def local_neighbor_affine_transport(
+    prototypes: Tensor,
+    old_features: Tensor,
+    current_features: Tensor,
+    targets: Tensor,
+    *,
+    classes_per_neighborhood: int = 5,
+    ridge: float = 1.0e-2,
+    epsilon: float = 1.0e-12,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Transport each prototype with an affine map fitted to nearby classes.
+
+    For every old class, the neighborhood contains the class itself and its
+    nearest classes according to cosine similarity between old-frame exemplar
+    means.  Neighborhoods may overlap.  One affine map is fitted from the
+    paired exemplars in each neighborhood and is applied only to the center
+    class's prototype.
+
+    Returns the transported prototypes, the class-index neighborhoods, and
+    one in-neighborhood fit residual per class.
+    """
+
+    if prototypes.ndim != 2 or old_features.ndim != 2:
+        raise ValueError("local-affine prototypes and features must be matrices")
+    if old_features.shape != current_features.shape:
+        raise ValueError("local-affine feature pairs must have one shape")
+    if old_features.shape[0] != targets.numel():
+        raise ValueError("local-affine feature and target counts differ")
+    if prototypes.shape[1] != old_features.shape[1]:
+        raise ValueError("local-affine feature dimensions do not match")
+    class_count = int(prototypes.shape[0])
+    neighborhood_size = int(classes_per_neighborhood)
+    if neighborhood_size < 2:
+        raise ValueError("local-affine neighborhoods require at least 2 classes")
+    if neighborhood_size > class_count:
+        raise ValueError(
+            "local-affine neighborhood cannot exceed the old-class count"
+        )
+    if ridge <= 0.0:
+        raise ValueError("local-affine ridge must be positive")
+
+    old_means, _ = paired_class_means(
+        old_features,
+        current_features,
+        targets,
+        num_classes=class_count,
+        epsilon=float(epsilon),
+    )
+    similarities = old_means @ old_means.T
+    # topk includes each class itself because its diagonal cosine is one.
+    neighborhoods = similarities.topk(
+        k=neighborhood_size, dim=1, largest=True, sorted=True
+    ).indices
+    labels = targets.detach().long().to(old_features.device)
+    transported_rows: list[Tensor] = []
+    residuals: list[float] = []
+    for class_index in range(class_count):
+        neighbor_ids = neighborhoods[class_index].to(labels.device)
+        support_mask = (labels[:, None] == neighbor_ids[None, :]).any(dim=1)
+        transported, _, residual = affine_ridge_transport(
+            prototypes[class_index : class_index + 1],
+            old_features[support_mask],
+            current_features[support_mask],
+            ridge=float(ridge),
+            epsilon=float(epsilon),
+        )
+        transported_rows.append(transported[0])
+        residuals.append(residual)
+
+    return (
+        torch.stack(transported_rows, dim=0),
+        neighborhoods,
+        torch.tensor(
+            residuals,
+            device=old_features.device,
+            dtype=old_features.dtype,
+        ),
+    )
+
+
 def apply_affine_mapping(
     prototypes: Tensor,
     mapping: Tensor,

@@ -27,6 +27,7 @@ from sacil.methods.prototype_transport import (
     affine_class_residual_transport,
     affine_ridge_transport,
     classwise_translation_transport,
+    local_neighbor_affine_transport,
     rigid_procrustes_transport,
 )
 from sacil.provenance import build_exploration_provenance
@@ -60,8 +61,11 @@ class CMPTExperimentSettings:
     adaptive_alpha_folds: int = 5
     accuracy_oracle_enabled: bool = False
     class_geometric_oracle_enabled: bool = False
+    full_mean_oracle_enabled: bool = False
     oracle_alpha_grid: tuple[float, ...] = ()
     component_ablation_enabled: bool = False
+    neighbor_affine_enabled: bool = False
+    neighbor_affine_classes: int = 5
 
     @classmethod
     def from_config(
@@ -168,6 +172,7 @@ class CMPTExperimentSettings:
         class_geometric_oracle_enabled = bool(
             oracle.get("class_geometric", False)
         )
+        full_mean_oracle_enabled = bool(oracle.get("full_mean", False))
         if (accuracy_oracle_enabled or class_geometric_oracle_enabled) and not (
             oracle_alpha_grid
             and 0.0 in oracle_alpha_grid
@@ -198,6 +203,21 @@ class CMPTExperimentSettings:
             raise ValueError(
                 "CMPT component ablation requires affine_ridge transport"
             )
+        neighbor_affine = cmpt.get("neighbor_affine", {})
+        if neighbor_affine is None:
+            neighbor_affine = {}
+        if not isinstance(neighbor_affine, Mapping):
+            raise ValueError("cmpt.neighbor_affine must be a mapping")
+        neighbor_affine_enabled = bool(neighbor_affine.get("enabled", False))
+        neighbor_affine_classes = int(
+            neighbor_affine.get("classes_per_neighborhood", 5)
+        )
+        if neighbor_affine_classes < 2:
+            raise ValueError(
+                "cmpt.neighbor_affine.classes_per_neighborhood must be at least 2"
+            )
+        if neighbor_affine_enabled and transport != "affine_ridge":
+            raise ValueError("neighbor affine comparison requires affine_ridge")
 
         return cls(
             learner=str(experiment["learner"]),
@@ -238,8 +258,11 @@ class CMPTExperimentSettings:
             class_geometric_oracle_enabled=(
                 class_geometric_oracle_enabled
             ),
+            full_mean_oracle_enabled=full_mean_oracle_enabled,
             oracle_alpha_grid=oracle_alpha_grid,
             component_ablation_enabled=component_ablation_enabled,
+            neighbor_affine_enabled=neighbor_affine_enabled,
+            neighbor_affine_classes=neighbor_affine_classes,
         )
 
 
@@ -674,18 +697,18 @@ def _full_introduction_prototypes(
     return compute_prototypes(features, targets, class_ids).cpu()
 
 
-def _full_current_old_prototypes(
+def _full_current_prototypes(
     trainer: UnifiedTable1Trainer,
     model: nn.Module,
     session_id: int,
+    class_ids: Sequence[int],
     *,
     horizontal_flip: bool,
 ) -> tuple[Tensor, int]:
-    """Oracle-only current means from all old-class training images."""
+    """Oracle-only current means from every requested training image."""
 
-    class_ids = trainer.protocol.old_classes(session_id)
     if not class_ids:
-        raise ValueError("class-geometric oracle requires old classes")
+        raise ValueError("full-mean oracle requires at least one class")
     dataset = trainer.data.train_eval_dataset_for_classes(
         class_ids,
         samples_per_class=trainer.debug_train_samples_per_class,
@@ -709,6 +732,27 @@ def _full_current_old_prototypes(
     return (
         compute_prototypes(features, targets, class_ids).cpu(),
         len(dataset),
+    )
+
+
+def _full_current_old_prototypes(
+    trainer: UnifiedTable1Trainer,
+    model: nn.Module,
+    session_id: int,
+    *,
+    horizontal_flip: bool,
+) -> tuple[Tensor, int]:
+    """Oracle-only current means from all old-class training images."""
+
+    class_ids = trainer.protocol.old_classes(session_id)
+    if not class_ids:
+        raise ValueError("class-geometric oracle requires old classes")
+    return _full_current_prototypes(
+        trainer,
+        model,
+        session_id,
+        class_ids,
+        horizontal_flip=horizontal_flip,
     )
 
 
@@ -877,6 +921,37 @@ def _aggregate_component_ablation(
     }
 
 
+def _aggregate_neighbor_affine(
+    records: Sequence[Mapping[str, Any]],
+) -> dict[str, float]:
+    """Aggregate matched local-neighborhood affine classification results."""
+
+    baseline = [float(record["baseline"]["accuracy"]) for record in records]
+    global_affine = [float(record["cmpt"]["accuracy"]) for record in records]
+    local_affine = [
+        float(record["neighbor_affine"]["accuracy"]) for record in records
+    ]
+    incremental = local_affine[1:] if len(local_affine) > 1 else local_affine
+    local_aia = sum(local_affine) / len(local_affine)
+    baseline_aia = sum(baseline) / len(baseline)
+    global_aia = sum(global_affine) / len(global_affine)
+    return {
+        "aia_percent": 100.0 * local_aia,
+        "incremental_aia_percent": 100.0
+        * sum(incremental)
+        / len(incremental),
+        "final_percent": 100.0 * local_affine[-1],
+        "aia_delta_vs_nme_percent_points": 100.0
+        * (local_aia - baseline_aia),
+        "aia_delta_vs_global_percent_points": 100.0
+        * (local_aia - global_aia),
+        "final_delta_vs_nme_percent_points": 100.0
+        * (local_affine[-1] - baseline[-1]),
+        "final_delta_vs_global_percent_points": 100.0
+        * (local_affine[-1] - global_affine[-1]),
+    }
+
+
 def _aggregate_interpolation(
     records: Sequence[Mapping[str, Any]],
     alphas: Sequence[float],
@@ -1035,6 +1110,61 @@ def _aggregate_class_geometric_oracle(
             sum(alpha_means) / len(alpha_means) if alpha_means else 0.0
         ),
         "uses_full_old_training_data": True,
+        "oracle_only": True,
+    }
+
+
+def _aggregate_full_mean_oracle(
+    records: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Aggregate the direct full-training-data NME upper bounds."""
+
+    baseline = [float(record["baseline"]["accuracy"]) for record in records]
+    old_only = [
+        float(record["full_mean_oracle"]["old_only"]["accuracy"])
+        for record in records
+    ]
+    all_seen = [
+        float(record["full_mean_oracle"]["all_seen"]["accuracy"])
+        for record in records
+    ]
+
+    def metrics(values: Sequence[float]) -> dict[str, float]:
+        incremental = values[1:] if len(values) > 1 else values
+        aia = sum(values) / len(values)
+        baseline_aia = sum(baseline) / len(baseline)
+        return {
+            "aia_percent": 100.0 * aia,
+            "incremental_aia_percent": 100.0
+            * sum(incremental)
+            / len(incremental),
+            "final_percent": 100.0 * values[-1],
+            "aia_delta_vs_nme_percent_points": 100.0
+            * (aia - baseline_aia),
+            "final_delta_vs_nme_percent_points": 100.0
+            * (values[-1] - baseline[-1]),
+        }
+
+    incremental_records = list(records[1:])
+    old_gaps = [
+        float(record["full_mean_oracle"]["diagnostics"]["old_mean_cosine_distance"])
+        for record in incremental_records
+    ]
+    all_gaps = [
+        float(record["full_mean_oracle"]["diagnostics"]["all_seen_mean_cosine_distance"])
+        for record in records
+    ]
+    return {
+        "old_only": metrics(old_only),
+        "all_seen": metrics(all_seen),
+        "mean_incremental_old_prototype_cosine_distance": (
+            sum(old_gaps) / len(old_gaps) if old_gaps else 0.0
+        ),
+        "mean_all_seen_prototype_cosine_distance": (
+            sum(all_gaps) / len(all_gaps) if all_gaps else 0.0
+        ),
+        "uses_full_training_data": True,
+        "uses_test_labels_for_selection": False,
         "oracle_only": True,
     }
 
@@ -1682,16 +1812,23 @@ class CMPTCheckpointEvaluator:
                 "class_geometric_enabled": (
                     self.settings.class_geometric_oracle_enabled
                 ),
+                "full_mean_enabled": (
+                    self.settings.full_mean_oracle_enabled
+                ),
                 "alpha_grid": list(self.settings.oracle_alpha_grid),
                 "oracle_only": bool(
                     self.settings.accuracy_oracle_enabled
                     or self.settings.class_geometric_oracle_enabled
+                    or self.settings.full_mean_oracle_enabled
                 ),
                 "accuracy_oracle_uses_test_labels": (
                     self.settings.accuracy_oracle_enabled
                 ),
                 "class_geometric_uses_full_old_training_data": (
                     self.settings.class_geometric_oracle_enabled
+                ),
+                "full_mean_uses_all_seen_training_data": (
+                    self.settings.full_mean_oracle_enabled
                 ),
             },
             "component_ablation": {
@@ -1705,6 +1842,17 @@ class CMPTCheckpointEvaluator:
                     "mean_current_exemplar - T(mean_old_exemplar))"
                 ),
                 "paired_old_exemplars_only": True,
+                "uses_test_data": False,
+            },
+            "neighbor_affine": {
+                "enabled": self.settings.neighbor_affine_enabled,
+                "classes_per_neighborhood": (
+                    self.settings.neighbor_affine_classes
+                ),
+                "selection_space": "previous-model exemplar class means",
+                "similarity": "cosine",
+                "overlapping_neighborhoods": True,
+                "includes_center_class": True,
                 "uses_test_data": False,
             },
             "training_reused_without_changes": True,
@@ -1747,6 +1895,7 @@ class CMPTCheckpointEvaluator:
             "cmpt": self._cmpt_metadata(),
             "cil_valid_data_access": not (
                 self.settings.class_geometric_oracle_enabled
+                or self.settings.full_mean_oracle_enabled
             ),
             "test_labels_used_for_selection": (
                 self.settings.accuracy_oracle_enabled
@@ -1754,6 +1903,7 @@ class CMPTCheckpointEvaluator:
             "oracle_only": bool(
                 self.settings.accuracy_oracle_enabled
                 or self.settings.class_geometric_oracle_enabled
+                or self.settings.full_mean_oracle_enabled
             ),
             "checkpoint_weights_modified": False,
             "elapsed_seconds": elapsed_seconds,
@@ -1786,9 +1936,17 @@ class CMPTCheckpointEvaluator:
                 payload["summary"]["class_geometric_oracle"] = (
                     _aggregate_class_geometric_oracle(records)
                 )
+            if self.settings.full_mean_oracle_enabled:
+                payload["summary"]["full_mean_oracle"] = (
+                    _aggregate_full_mean_oracle(records)
+                )
             if self.settings.component_ablation_enabled:
                 payload["summary"]["component_ablation"] = (
                     _aggregate_component_ablation(records)
+                )
+            if self.settings.neighbor_affine_enabled:
+                payload["summary"]["neighbor_affine"] = (
+                    _aggregate_neighbor_affine(records)
                 )
         return payload
 
@@ -1914,6 +2072,7 @@ class CMPTCheckpointEvaluator:
         transported: Tensor | None = None
         class_translation_bank: Tensor | None = None
         combined_bank: Tensor | None = None
+        neighbor_affine_bank: Tensor | None = None
         previous_checkpoint: Mapping[str, Any] | None = None
         started = time.perf_counter()
 
@@ -1954,6 +2113,16 @@ class CMPTCheckpointEvaluator:
                         "class_translation_max_norm": None,
                         "class_residual_mean_norm": None,
                         "class_residual_max_norm": None,
+                    }
+                if self.settings.neighbor_affine_enabled:
+                    neighbor_affine_bank = transported.detach().clone()
+                    neighbor_affine_diagnostics = {
+                        "initialized": True,
+                        "classes_per_neighborhood": (
+                            self.settings.neighbor_affine_classes
+                        ),
+                        "fit_residual_mean": None,
+                        "fit_residual_max": None,
                     }
             else:
                 if previous_checkpoint is None or transported is None:
@@ -2021,6 +2190,38 @@ class CMPTCheckpointEvaluator:
                         ),
                         "bias_norm": float(bias.norm().item()),
                     }
+                if self.settings.neighbor_affine_enabled:
+                    if neighbor_affine_bank is None:
+                        raise RuntimeError(
+                            "neighbor-affine transition lacks prototype bank"
+                        )
+                    (
+                        neighbor_affine_old,
+                        neighborhoods,
+                        neighbor_residuals,
+                    ) = local_neighbor_affine_transport(
+                        neighbor_affine_bank,
+                        paired_support.old_fit_features,
+                        paired_support.current_fit_features,
+                        paired_support.fit_targets,
+                        classes_per_neighborhood=(
+                            self.settings.neighbor_affine_classes
+                        ),
+                        ridge=self.settings.affine_ridge,
+                    )
+                    neighbor_affine_diagnostics = {
+                        "initialized": False,
+                        "classes_per_neighborhood": (
+                            self.settings.neighbor_affine_classes
+                        ),
+                        "fit_residual_mean": float(
+                            neighbor_residuals.mean().item()
+                        ),
+                        "fit_residual_max": float(
+                            neighbor_residuals.max().item()
+                        ),
+                        "neighborhoods": neighborhoods.tolist(),
+                    }
                 if self.settings.component_ablation_enabled:
                     if (
                         class_translation_bank is None
@@ -2086,6 +2287,10 @@ class CMPTCheckpointEvaluator:
                     combined_bank = torch.cat(
                         [combined_old.cpu(), new_full.cpu()], dim=0
                     )
+                if self.settings.neighbor_affine_enabled:
+                    neighbor_affine_bank = torch.cat(
+                        [neighbor_affine_old.cpu(), new_full.cpu()], dim=0
+                    )
                 del previous_model
 
             if transported is None or transported.shape[0] != seen:
@@ -2106,6 +2311,7 @@ class CMPTCheckpointEvaluator:
             )
             class_translation_means: Tensor | None = None
             combined_means: Tensor | None = None
+            neighbor_affine_means: Tensor | None = None
             if self.settings.component_ablation_enabled:
                 if (
                     class_translation_bank is None
@@ -2129,6 +2335,20 @@ class CMPTCheckpointEvaluator:
                 combined_means = build_old_class_cmpt_means(
                     baseline_means,
                     combined_bank,
+                    old_class_count,
+                )
+            if self.settings.neighbor_affine_enabled:
+                if neighbor_affine_bank is None:
+                    raise RuntimeError(
+                        "neighbor-affine evaluation prototype bank is missing"
+                    )
+                if neighbor_affine_bank.shape != transported.shape:
+                    raise RuntimeError(
+                        "neighbor-affine and global prototype-bank shapes differ"
+                    )
+                neighbor_affine_means = build_old_class_cmpt_means(
+                    baseline_means,
+                    neighbor_affine_bank,
                     old_class_count,
                 )
             adaptive_estimate: AdaptiveAlphaEstimate | None = None
@@ -2183,6 +2403,51 @@ class CMPTCheckpointEvaluator:
                             )
                         ),
                     }
+            full_mean_all_seen: Tensor | None = None
+            full_mean_old_only: Tensor | None = None
+            full_mean_diagnostics: dict[str, Any] | None = None
+            if self.settings.full_mean_oracle_enabled:
+                full_mean_all_seen, full_training_image_count = (
+                    _full_current_prototypes(
+                        trainer,
+                        current_model,
+                        session_id,
+                        trainer.protocol.seen_classes(session_id),
+                        horizontal_flip=(
+                            self.settings.prototype_horizontal_flip
+                        ),
+                    )
+                )
+                if full_mean_all_seen.shape != baseline_means.shape:
+                    raise RuntimeError(
+                        "full-mean oracle and NME prototype banks differ"
+                    )
+                full_mean_old_only = baseline_means.detach().clone()
+                if old_class_count > 0:
+                    full_mean_old_only[:old_class_count] = (
+                        full_mean_all_seen[:old_class_count]
+                    )
+                per_class_distance = 1.0 - F.cosine_similarity(
+                    F.normalize(baseline_means.float(), dim=1),
+                    F.normalize(full_mean_all_seen.float(), dim=1),
+                    dim=1,
+                )
+                old_distance = (
+                    float(per_class_distance[:old_class_count].mean().item())
+                    if old_class_count > 0
+                    else 0.0
+                )
+                full_mean_diagnostics = {
+                    "full_training_image_count": full_training_image_count,
+                    "old_class_count": old_class_count,
+                    "old_mean_cosine_distance": old_distance,
+                    "all_seen_mean_cosine_distance": float(
+                        per_class_distance.mean().item()
+                    ),
+                    "per_class_cosine_distances": [
+                        float(value) for value in per_class_distance.tolist()
+                    ],
+                }
             geometric_alphas = torch.empty(0)
             geometric_diagnostics: dict[str, Any] | None = None
             geometric_bank: Tensor | None = None
@@ -2235,11 +2500,14 @@ class CMPTCheckpointEvaluator:
             prototype_interpolation: dict[str, dict[str, Any]] | None = None
             adaptive_metrics: dict[str, dict[str, Any]] | None = None
             component_metrics: dict[str, dict[str, Any]] | None = None
+            neighbor_affine_metrics: dict[str, Any] | None = None
             if (
                 self.settings.prototype_interpolation_alphas
                 or self.settings.adaptive_alpha_enabled
                 or self.settings.class_geometric_oracle_enabled
+                or self.settings.full_mean_oracle_enabled
                 or self.settings.component_ablation_enabled
+                or self.settings.neighbor_affine_enabled
             ):
                 evaluation_banks: dict[str, Tensor] = {
                     "__baseline": baseline_means,
@@ -2259,10 +2527,32 @@ class CMPTCheckpointEvaluator:
                             "combined_cmpt": combined_means,
                         }
                     )
+                if self.settings.neighbor_affine_enabled:
+                    if neighbor_affine_means is None:
+                        raise RuntimeError(
+                            "neighbor-affine evaluation bank is missing"
+                        )
+                    evaluation_banks["neighbor_affine"] = (
+                        neighbor_affine_means
+                    )
                 evaluation_banks.update(adaptive_banks)
                 if geometric_bank is not None:
                     evaluation_banks["class_geometric_oracle"] = (
                         geometric_bank
+                    )
+                if self.settings.full_mean_oracle_enabled:
+                    if (
+                        full_mean_old_only is None
+                        or full_mean_all_seen is None
+                    ):
+                        raise RuntimeError(
+                            "full-mean oracle prototype banks are missing"
+                        )
+                    evaluation_banks["full_mean_old_only"] = (
+                        full_mean_old_only
+                    )
+                    evaluation_banks["full_mean_all_seen"] = (
+                        full_mean_all_seen
                     )
                 evaluation_banks.update(
                     {
@@ -2322,6 +2612,10 @@ class CMPTCheckpointEvaluator:
                             evaluated_banks["combined_cmpt"]
                         ),
                     }
+                if self.settings.neighbor_affine_enabled:
+                    neighbor_affine_metrics = copy.deepcopy(
+                        evaluated_banks["neighbor_affine"]
+                    )
                 geometric_metrics = (
                     copy.deepcopy(
                         evaluated_banks["class_geometric_oracle"]
@@ -2329,8 +2623,21 @@ class CMPTCheckpointEvaluator:
                     if self.settings.class_geometric_oracle_enabled
                     else None
                 )
+                full_mean_metrics = (
+                    {
+                        "old_only": copy.deepcopy(
+                            evaluated_banks["full_mean_old_only"]
+                        ),
+                        "all_seen": copy.deepcopy(
+                            evaluated_banks["full_mean_all_seen"]
+                        ),
+                    }
+                    if self.settings.full_mean_oracle_enabled
+                    else None
+                )
             else:
                 geometric_metrics = None
+                full_mean_metrics = None
                 baseline = evaluate_nme(
                     current_model,
                     test_loader,
@@ -2463,6 +2770,18 @@ class CMPTCheckpointEvaluator:
                     "uses_full_old_training_data": session_id > 0,
                 }
 
+            full_mean_record: dict[str, Any] | None = None
+            if self.settings.full_mean_oracle_enabled:
+                if full_mean_metrics is None or full_mean_diagnostics is None:
+                    raise RuntimeError("full-mean oracle result is missing")
+                full_mean_record = {
+                    **full_mean_metrics,
+                    "diagnostics": full_mean_diagnostics,
+                    "oracle_only": True,
+                    "uses_full_training_data": True,
+                    "uses_test_labels_for_selection": False,
+                }
+
             record = {
                 "checkpoint": str(checkpoint_path),
                 "session_id": session_id,
@@ -2510,6 +2829,21 @@ class CMPTCheckpointEvaluator:
                     ),
                     "diagnostics": component_diagnostics,
                 }
+            if self.settings.neighbor_affine_enabled:
+                if neighbor_affine_metrics is None:
+                    raise RuntimeError("neighbor-affine metrics are missing")
+                record["neighbor_affine"] = neighbor_affine_metrics
+                record["neighbor_affine_comparison"] = {
+                    "delta_vs_nme": float(
+                        neighbor_affine_metrics["accuracy"]
+                    )
+                    - float(baseline["accuracy"]),
+                    "delta_vs_global": float(
+                        neighbor_affine_metrics["accuracy"]
+                    )
+                    - float(cmpt["accuracy"]),
+                    "diagnostics": neighbor_affine_diagnostics,
+                }
             if prototype_interpolation is not None:
                 record["prototype_interpolation"] = (
                     prototype_interpolation
@@ -2518,6 +2852,8 @@ class CMPTCheckpointEvaluator:
                 record["adaptive_alpha"] = adaptive_alpha_record
             if class_geometric_record is not None:
                 record["class_geometric_oracle"] = class_geometric_record
+            if full_mean_record is not None:
+                record["full_mean_oracle"] = full_mean_record
             records.append(record)
             elapsed = time.perf_counter() - started
             dump_json(
@@ -2542,6 +2878,14 @@ class CMPTCheckpointEvaluator:
                     ", Geo-Oracle="
                     f"{100.0 * float(class_geometric_record['metrics']['accuracy']):.3f}"
                 )
+            full_mean_progress = ""
+            if full_mean_record is not None:
+                full_mean_progress = (
+                    ", Full-Old="
+                    f"{100.0 * float(full_mean_record['old_only']['accuracy']):.3f}"
+                    ", Full-All="
+                    f"{100.0 * float(full_mean_record['all_seen']['accuracy']):.3f}"
+                )
             component_progress = ""
             if self.settings.component_ablation_enabled:
                 assert component_metrics is not None
@@ -2551,6 +2895,13 @@ class CMPTCheckpointEvaluator:
                     ", Combined="
                     f"{100.0 * float(component_metrics['combined_cmpt']['accuracy']):.3f}"
                 )
+            neighbor_progress = ""
+            if self.settings.neighbor_affine_enabled:
+                assert neighbor_affine_metrics is not None
+                neighbor_progress = (
+                    ", Local-Affine="
+                    f"{100.0 * float(neighbor_affine_metrics['accuracy']):.3f}"
+                )
             self.progress(
                 f"{self.settings.learner} S{session_id}: "
                 f"Native={100.0 * float(native['accuracy']):.3f}, "
@@ -2559,7 +2910,9 @@ class CMPTCheckpointEvaluator:
                 f"delta={100.0 * record['delta_accuracy']:+.3f} pp"
                 f"{adaptive_progress}"
                 f"{oracle_progress}"
+                f"{full_mean_progress}"
                 f"{component_progress}"
+                f"{neighbor_progress}"
             )
             previous_checkpoint = checkpoint
             del current_model

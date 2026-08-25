@@ -25,6 +25,7 @@ from sacil.methods.prototype_transport import (  # noqa: E402
     affine_class_residual_transport,
     apply_affine_mapping,
     classwise_translation_transport,
+    local_neighbor_affine_transport,
 )
 from sacil.cmpt.drift_grouping import (  # noqa: E402
     direction_similarity_correlation,
@@ -174,6 +175,21 @@ def test_settings_parse_accuracy_oracle_grid() -> None:
     assert settings.oracle_alpha_grid == (0.0, 0.5, 1.0)
 
 
+def test_settings_parse_full_mean_oracle_without_alpha_grid() -> None:
+    config = {
+        "experiment": {
+            "learner": "test",
+            "checkpoints": "checkpoints",
+            "output": "result.json",
+            "expected_checkpoint_method": "icarl",
+        },
+        "cmpt": {"oracle_diagnostics": {"full_mean": True}},
+    }
+    settings = CMPTExperimentSettings.from_config(config, PROJECT_ROOT)
+    assert settings.full_mean_oracle_enabled
+    assert settings.oracle_alpha_grid == ()
+
+
 def test_classwise_translation_uses_matched_class_mean_drifts() -> None:
     prototypes = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
     old = torch.tensor(
@@ -284,3 +300,50 @@ def test_drift_similarity_correlation_detects_matched_geometry() -> None:
     assert result["spearman_rho"] == pytest.approx(1.0)
     assert result["pearson_r"] == pytest.approx(1.0)
     assert result["permutation_p_positive"] <= 0.05
+
+
+def test_local_neighbor_affine_uses_center_and_nearest_classes() -> None:
+    prototypes = F.normalize(
+        torch.tensor(
+            [[1.0, 0.0], [0.9, 0.1], [-1.0, 0.0], [-0.9, 0.1]]
+        ),
+        dim=1,
+    )
+    old = prototypes.repeat_interleave(2, dim=0)
+    current = old.clone()
+    targets = torch.arange(4).repeat_interleave(2)
+
+    transported, neighborhoods, residuals = local_neighbor_affine_transport(
+        prototypes,
+        old,
+        current,
+        targets,
+        classes_per_neighborhood=2,
+        ridge=1.0e-6,
+    )
+
+    assert set(neighborhoods[0].tolist()) == {0, 1}
+    assert set(neighborhoods[2].tolist()) == {2, 3}
+    assert torch.allclose(transported, prototypes, atol=2.0e-3)
+    assert bool((residuals < 1.0e-5).all())
+
+
+def test_settings_parse_neighbor_affine() -> None:
+    config = {
+        "experiment": {
+            "learner": "test",
+            "checkpoints": "checkpoints",
+            "output": "result.json",
+            "expected_checkpoint_method": "icarl",
+        },
+        "cmpt": {
+            "transport": "affine_ridge",
+            "neighbor_affine": {
+                "enabled": True,
+                "classes_per_neighborhood": 5,
+            },
+        },
+    }
+    settings = CMPTExperimentSettings.from_config(config, PROJECT_ROOT)
+    assert settings.neighbor_affine_enabled
+    assert settings.neighbor_affine_classes == 5

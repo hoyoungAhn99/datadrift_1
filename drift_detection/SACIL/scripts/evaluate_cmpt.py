@@ -127,6 +127,19 @@ def main() -> int:
             f"delta-vs-CMPT="
             f"{geometric_oracle['aia_delta_vs_pure_cmpt_percent_points']:+.3f}"
         )
+    full_mean_oracle = summary.get("full_mean_oracle")
+    if full_mean_oracle:
+        old_only = full_mean_oracle["old_only"]
+        all_seen = full_mean_oracle["all_seen"]
+        print(
+            "full-training-mean NME oracle | "
+            f"old-only AIA={old_only['aia_percent']:.3f}, "
+            "delta-vs-NME="
+            f"{old_only['aia_delta_vs_nme_percent_points']:+.3f} | "
+            f"all-seen AIA={all_seen['aia_percent']:.3f}, "
+            "delta-vs-NME="
+            f"{all_seen['aia_delta_vs_nme_percent_points']:+.3f}"
+        )
     components = summary.get("component_ablation")
     if components:
         class_translation = components["class_translation"]
@@ -141,6 +154,17 @@ def main() -> int:
             f"{combined['aia_delta_vs_global_percent_points']:+.3f}, "
             "delta-vs-Class="
             f"{combined['aia_delta_vs_class_percent_points']:+.3f}"
+        )
+    neighbor = summary.get("neighbor_affine")
+    if neighbor:
+        print(
+            "local-neighbor affine | "
+            f"AIA={neighbor['aia_percent']:.3f}, "
+            f"final={neighbor['final_percent']:.3f}, "
+            "delta-vs-NME="
+            f"{neighbor['aia_delta_vs_nme_percent_points']:+.3f}, "
+            "delta-vs-Global="
+            f"{neighbor['aia_delta_vs_global_percent_points']:+.3f}"
         )
     return 0
 
