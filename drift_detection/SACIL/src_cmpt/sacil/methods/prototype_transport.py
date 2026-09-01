@@ -318,6 +318,78 @@ def affine_ridge_transport(
     return transported, mapping, residual
 
 
+def population_weighted_affine_transport(
+    prototypes: Tensor,
+    old_features: Tensor,
+    current_features: Tensor,
+    sample_weights: Tensor,
+    *,
+    ridge: float = 1.0e-2,
+    epsilon: float = 1.0e-12,
+) -> tuple[Tensor, Tensor, float]:
+    """Fit affine drift under persistent population-mass quadrature.
+
+    Uniform affine fitting treats each retained exemplar as equal population
+    mass even though herding is a deterministic coreset.  The supplied
+    non-negative weights are learned while the full class population is
+    available and remain attached to the same exemplar identities.  Their
+    mean is normalized to one so ``ridge`` has the same scale as the ordinary
+    affine objective.
+    """
+
+    if ridge <= 0:
+        raise ValueError("affine ridge must be positive")
+    if prototypes.ndim != 2 or old_features.ndim != 2:
+        raise ValueError("prototype and weighted-affine inputs must be matrices")
+    if old_features.shape != current_features.shape:
+        raise ValueError("weighted-affine feature pairs must have one shape")
+    if prototypes.shape[1] != old_features.shape[1]:
+        raise ValueError("weighted-affine feature dimensions do not match")
+    weights = sample_weights.detach().float().flatten().to(old_features.device)
+    if weights.numel() != old_features.shape[0]:
+        raise ValueError("weighted-affine sample-weight count differs")
+    if bool((weights < 0.0).any()) or float(weights.sum().item()) <= 0.0:
+        raise ValueError("weighted-affine weights must be non-negative")
+    weights = weights / weights.mean().clamp_min(float(epsilon))
+
+    old = F.normalize(old_features.detach().float(), dim=1)
+    current = F.normalize(current_features.detach().float(), dim=1)
+    design = torch.cat(
+        [old, torch.ones(old.shape[0], 1, device=old.device)], dim=1
+    )
+    regularizer = torch.eye(
+        design.shape[1], device=design.device, dtype=design.dtype
+    ) * float(ridge)
+    regularizer[-1, -1] = 0.0
+    weighted_design = weights[:, None] * design
+    mapping = torch.linalg.solve(
+        design.T @ weighted_design + regularizer,
+        design.T @ (weights[:, None] * current),
+    )
+    prototype_design = torch.cat(
+        [
+            F.normalize(prototypes.detach().float(), dim=1),
+            torch.ones(
+                prototypes.shape[0],
+                1,
+                device=prototypes.device,
+                dtype=prototypes.dtype,
+            ),
+        ],
+        dim=1,
+    )
+    transported = F.normalize(
+        prototype_design @ mapping, dim=1, eps=float(epsilon)
+    )
+    residual = float(
+        (
+            weights
+            * (design @ mapping - current).square().sum(dim=1)
+        ).mean().item()
+    )
+    return transported, mapping, residual
+
+
 def local_neighbor_affine_transport(
     prototypes: Tensor,
     old_features: Tensor,

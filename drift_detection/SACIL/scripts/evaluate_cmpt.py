@@ -166,6 +166,92 @@ def main() -> int:
             "delta-vs-Global="
             f"{neighbor['aia_delta_vs_global_percent_points']:+.3f}"
         )
+    herding = summary.get("herding_extrapolation")
+    if herding:
+        print(
+            "herding Richardson extrapolation | "
+            f"AIA={herding['aia_percent']:.3f}, "
+            f"final={herding['final_percent']:.3f}, "
+            "delta-vs-NME="
+            f"{herding['aia_delta_vs_nme_percent_points']:+.3f}, "
+            "delta-vs-CMPT="
+            f"{herding['aia_delta_vs_cmpt_percent_points']:+.3f}"
+        )
+    quadrature = summary.get("persistent_quadrature")
+    if quadrature:
+        print(
+            "persistent exemplar quadrature | "
+            f"AIA={quadrature['aia_percent']:.3f}, "
+            f"final={quadrature['final_percent']:.3f}, "
+            "delta-vs-NME="
+            f"{quadrature['aia_delta_vs_nme_percent_points']:+.3f}, "
+            "delta-vs-CMPT="
+            f"{quadrature['aia_delta_vs_cmpt_percent_points']:+.3f}, "
+            "mean-ESS="
+            f"{quadrature['mean_effective_sample_size']:.2f}"
+        )
+    canonical = summary.get("canonical_reference")
+    if canonical:
+        print(
+            "canonical-reference direct transport | "
+            f"AIA={canonical['aia_percent']:.3f}, "
+            f"final={canonical['final_percent']:.3f}, "
+            "delta-vs-NME="
+            f"{canonical['aia_delta_vs_nme_percent_points']:+.3f}, "
+            "delta-vs-sequential-affine="
+            f"{canonical['aia_delta_vs_sequential_affine_percent_points']:+.3f}"
+        )
+    population_mass = summary.get("population_mass_transport")
+    if population_mass:
+        print(
+            "population-mass weighted affine transport | "
+            f"AIA={population_mass['aia_percent']:.3f}, "
+            f"final={population_mass['final_percent']:.3f}, "
+            "delta-vs-NME="
+            f"{population_mass['aia_delta_vs_nme_percent_points']:+.3f}, "
+            "delta-vs-uniform-affine="
+            f"{population_mass['aia_delta_vs_uniform_affine_percent_points']:+.3f}"
+        )
+    calibrated = summary.get("moment_calibrated_affine")
+    if calibrated:
+        print(
+            "moment-calibrated affine | "
+            f"Uniform={calibrated['uniform_affine']['aia_percent']:.3f}, "
+            f"Mean={calibrated['mean']['aia_percent']:.3f} "
+            f"({calibrated['mean']['aia_delta_vs_uniform_affine_percent_points']:+.3f}), "
+            f"Second={calibrated['second']['aia_percent']:.3f} "
+            f"({calibrated['second']['aia_delta_vs_uniform_affine_percent_points']:+.3f}), "
+            f"Combined={calibrated['combined']['aia_percent']:.3f} "
+            f"({calibrated['combined']['aia_delta_vs_uniform_affine_percent_points']:+.3f})"
+        )
+    moment = summary.get("moment_transport")
+    if moment:
+        print(
+            "moment-aware transport | "
+            f"AIA={moment['aia_percent']:.3f}, "
+            f"final={moment['final_percent']:.3f}, "
+            "delta-vs-NME="
+            f"{moment['aia_delta_vs_nme_percent_points']:+.3f}, "
+            "delta-vs-affine="
+            f"{moment['aia_delta_vs_affine_percent_points']:+.3f}, "
+            "mean-fit-reduction="
+            f"{100.0 * moment['mean_support_residual_reduction']:.2f}%"
+        )
+    moment_grid = summary.get("moment_transport_grid")
+    if moment_grid:
+        selected = moment_grid["validation_selected"]
+        oracle = moment_grid["test_oracle"]
+        print(
+            "moment hyperparameter grid | "
+            f"validation-selected={moment_grid['validation_selected_key']}, "
+            f"AIA={selected['aia_percent']:.3f}, "
+            "delta-vs-affine="
+            f"{selected['aia_delta_vs_affine_percent_points']:+.3f} | "
+            f"test-oracle={moment_grid['test_oracle_key']}, "
+            f"AIA={oracle['aia_percent']:.3f}, "
+            "delta-vs-affine="
+            f"{oracle['aia_delta_vs_affine_percent_points']:+.3f}"
+        )
     return 0
 
 

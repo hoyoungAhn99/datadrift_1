@@ -23,11 +23,33 @@ from sacil.engine.table1_trainer import UnifiedTable1Trainer
 from sacil.features import collect_features
 from sacil.memory import ExemplarMemory
 from sacil.methods import normalized_cosine_classifier_logits
+from .herding_extrapolation import (
+    herding_prefix_extrapolated_means,
+)
+from .persistent_quadrature import (
+    fit_multiview_persistent_quadrature_weights,
+    weighted_class_prototypes,
+)
+from .moment_transport import (
+    apply_low_rank_moment_transport,
+    apply_polynomial_kernel_moment_transport,
+    class_first_second_moments,
+    fit_low_rank_moment_transport,
+    fit_low_rank_moment_transport_grid,
+    fit_polynomial_kernel_moment_transport,
+)
+from .moment_calibrated_affine import (
+    CALIBRATION_MODES,
+    expand_exemplar_weights,
+    fit_moment_calibration_weights,
+    transport_first_second_moments_affine,
+)
 from sacil.methods.prototype_transport import (
     affine_class_residual_transport,
     affine_ridge_transport,
     classwise_translation_transport,
     local_neighbor_affine_transport,
+    population_weighted_affine_transport,
     rigid_procrustes_transport,
 )
 from sacil.provenance import build_exploration_provenance
@@ -66,6 +88,34 @@ class CMPTExperimentSettings:
     component_ablation_enabled: bool = False
     neighbor_affine_enabled: bool = False
     neighbor_affine_classes: int = 5
+    herding_extrapolation_enabled: bool = False
+    herding_full_prefix: int = 20
+    herding_reference_prefix: int = 10
+    persistent_quadrature_enabled: bool = False
+    persistent_quadrature_ridge: float = 1.0e-3
+    persistent_quadrature_iterations: int = 1000
+    persistent_quadrature_multiview: bool = False
+    persistent_quadrature_previous_model_view: bool = False
+    canonical_reference_enabled: bool = False
+    canonical_reference_ridge: float = 1.0e-2
+    population_mass_transport_enabled: bool = False
+    population_mass_transport_ridge: float = 1.0e-2
+    moment_calibrated_affine_enabled: bool = False
+    moment_calibrated_affine_uniform_ridge: float = 1.0e-3
+    moment_calibrated_affine_iterations: int = 1000
+    moment_calibrated_affine_ridge: float = 1.0e-2
+    moment_transport_enabled: bool = False
+    moment_transport_mode: str = "low_rank_pca"
+    moment_transport_rank: int = 6
+    moment_transport_affine_ridge: float = 1.0e-2
+    moment_transport_quadratic_ridge: float = 1.0
+    moment_transport_residual_covariance_scale: float = 0.0
+    moment_grid_enabled: bool = False
+    moment_grid_ranks: tuple[int, ...] = ()
+    moment_grid_quadratic_ridges: tuple[float, ...] = ()
+    moment_grid_correction_scales: tuple[float, ...] = ()
+    moment_grid_validation_folds: int = 5
+    moment_grid_validation_fold: int = 0
 
     @classmethod
     def from_config(
@@ -218,6 +268,263 @@ class CMPTExperimentSettings:
             )
         if neighbor_affine_enabled and transport != "affine_ridge":
             raise ValueError("neighbor affine comparison requires affine_ridge")
+        herding_extrapolation = cmpt.get("herding_extrapolation", {})
+        if herding_extrapolation is None:
+            herding_extrapolation = {}
+        if not isinstance(herding_extrapolation, Mapping):
+            raise ValueError("cmpt.herding_extrapolation must be a mapping")
+        herding_extrapolation_enabled = bool(
+            herding_extrapolation.get("enabled", False)
+        )
+        herding_full_prefix = int(
+            herding_extrapolation.get(
+                "full_prefix",
+                experiment.get("expected_exemplars_per_class", 20),
+            )
+        )
+        herding_reference_prefix = int(
+            herding_extrapolation.get(
+                "reference_prefix", herding_full_prefix // 2
+            )
+        )
+        if not 0 < herding_reference_prefix < herding_full_prefix:
+            raise ValueError(
+                "herding reference_prefix must lie between 0 and full_prefix"
+            )
+        expected_exemplars = int(
+            experiment.get("expected_exemplars_per_class", 20)
+        )
+        if herding_extrapolation_enabled and (
+            herding_full_prefix != expected_exemplars
+        ):
+            raise ValueError(
+                "herding full_prefix must equal expected_exemplars_per_class"
+            )
+        persistent_quadrature = cmpt.get("persistent_quadrature", {})
+        if persistent_quadrature is None:
+            persistent_quadrature = {}
+        if not isinstance(persistent_quadrature, Mapping):
+            raise ValueError("cmpt.persistent_quadrature must be a mapping")
+        persistent_quadrature_enabled = bool(
+            persistent_quadrature.get("enabled", False)
+        )
+        persistent_quadrature_ridge = float(
+            persistent_quadrature.get("uniform_ridge", 1.0e-3)
+        )
+        persistent_quadrature_iterations = int(
+            persistent_quadrature.get("max_iterations", 1000)
+        )
+        persistent_quadrature_multiview = bool(
+            persistent_quadrature.get("multiview", False)
+        )
+        persistent_quadrature_previous_model_view = bool(
+            persistent_quadrature.get("previous_model_view", False)
+        )
+        if (
+            persistent_quadrature_previous_model_view
+            and not persistent_quadrature_multiview
+        ):
+            raise ValueError(
+                "previous_model_view requires persistent quadrature multiview"
+            )
+        if persistent_quadrature_ridge < 0.0:
+            raise ValueError(
+                "persistent quadrature uniform_ridge must be non-negative"
+            )
+        if persistent_quadrature_iterations <= 0:
+            raise ValueError(
+                "persistent quadrature max_iterations must be positive"
+            )
+        canonical_reference = cmpt.get("canonical_reference", {})
+        if canonical_reference is None:
+            canonical_reference = {}
+        if not isinstance(canonical_reference, Mapping):
+            raise ValueError("cmpt.canonical_reference must be a mapping")
+        canonical_reference_enabled = bool(
+            canonical_reference.get("enabled", False)
+        )
+        canonical_reference_ridge = float(
+            canonical_reference.get("affine_ridge", affine_ridge)
+        )
+        if canonical_reference_ridge <= 0.0:
+            raise ValueError(
+                "canonical reference affine_ridge must be positive"
+            )
+        population_mass_transport = cmpt.get(
+            "population_mass_transport", {}
+        )
+        if population_mass_transport is None:
+            population_mass_transport = {}
+        if not isinstance(population_mass_transport, Mapping):
+            raise ValueError(
+                "cmpt.population_mass_transport must be a mapping"
+            )
+        population_mass_transport_enabled = bool(
+            population_mass_transport.get("enabled", False)
+        )
+        population_mass_transport_ridge = float(
+            population_mass_transport.get("affine_ridge", affine_ridge)
+        )
+        if population_mass_transport_ridge <= 0.0:
+            raise ValueError(
+                "population-mass transport affine_ridge must be positive"
+            )
+        if (
+            population_mass_transport_enabled
+            and not persistent_quadrature_enabled
+        ):
+            raise ValueError(
+                "population-mass transport requires persistent quadrature"
+            )
+        moment_calibrated_affine = cmpt.get(
+            "moment_calibrated_affine", {}
+        )
+        if moment_calibrated_affine is None:
+            moment_calibrated_affine = {}
+        if not isinstance(moment_calibrated_affine, Mapping):
+            raise ValueError(
+                "cmpt.moment_calibrated_affine must be a mapping"
+            )
+        moment_calibrated_affine_enabled = bool(
+            moment_calibrated_affine.get("enabled", False)
+        )
+        moment_calibrated_affine_uniform_ridge = float(
+            moment_calibrated_affine.get("uniform_ridge", 1.0e-3)
+        )
+        moment_calibrated_affine_iterations = int(
+            moment_calibrated_affine.get("max_iterations", 1000)
+        )
+        moment_calibrated_affine_ridge = float(
+            moment_calibrated_affine.get("affine_ridge", affine_ridge)
+        )
+        if moment_calibrated_affine_uniform_ridge < 0.0:
+            raise ValueError(
+                "moment-calibrated affine uniform_ridge must be non-negative"
+            )
+        if moment_calibrated_affine_iterations <= 0:
+            raise ValueError(
+                "moment-calibrated affine max_iterations must be positive"
+            )
+        if moment_calibrated_affine_ridge <= 0.0:
+            raise ValueError(
+                "moment-calibrated affine affine_ridge must be positive"
+            )
+        if moment_calibrated_affine_enabled and transport != "affine_ridge":
+            raise ValueError(
+                "moment-calibrated comparison requires affine_ridge transport"
+            )
+        moment_transport = cmpt.get("moment_transport", {})
+        if moment_transport is None:
+            moment_transport = {}
+        if not isinstance(moment_transport, Mapping):
+            raise ValueError("cmpt.moment_transport must be a mapping")
+        moment_transport_enabled = bool(
+            moment_transport.get("enabled", False)
+        )
+        moment_transport_mode = str(
+            moment_transport.get("mode", "low_rank_pca")
+        ).lower()
+        if moment_transport_mode not in {
+            "low_rank_pca",
+            "polynomial_kernel",
+        }:
+            raise ValueError(
+                "moment transport mode must be low_rank_pca or "
+                "polynomial_kernel"
+            )
+        moment_transport_rank = int(moment_transport.get("rank", 6))
+        moment_transport_affine_ridge = float(
+            moment_transport.get("affine_ridge", affine_ridge)
+        )
+        moment_transport_quadratic_ridge = float(
+            moment_transport.get("quadratic_ridge", 1.0)
+        )
+        moment_transport_residual_covariance_scale = float(
+            moment_transport.get("residual_covariance_scale", 0.0)
+        )
+        if moment_transport_rank <= 0:
+            raise ValueError("moment transport rank must be positive")
+        if (
+            moment_transport_affine_ridge <= 0.0
+            or moment_transport_quadratic_ridge <= 0.0
+        ):
+            raise ValueError("moment transport ridges must be positive")
+        if moment_transport_residual_covariance_scale < 0.0:
+            raise ValueError(
+                "moment transport residual covariance scale must be non-negative"
+            )
+        moment_grid = moment_transport.get("grid", {})
+        if moment_grid is None:
+            moment_grid = {}
+        if not isinstance(moment_grid, Mapping):
+            raise ValueError("cmpt.moment_transport.grid must be a mapping")
+        moment_grid_enabled = bool(moment_grid.get("enabled", False))
+
+        def numeric_sequence(
+            key: str,
+            default: Sequence[int | float],
+            cast: Callable[[Any], int | float],
+        ) -> tuple[int | float, ...]:
+            raw = moment_grid.get(key, default)
+            if isinstance(raw, (str, bytes)) or not isinstance(raw, Sequence):
+                raise ValueError(
+                    f"cmpt.moment_transport.grid.{key} must be a sequence"
+                )
+            values = tuple(cast(value) for value in raw)
+            if not values or len(set(values)) != len(values):
+                raise ValueError(
+                    f"moment transport grid {key} must be non-empty and unique"
+                )
+            return values
+
+        moment_grid_ranks = tuple(
+            int(value)
+            for value in numeric_sequence(
+                "ranks", (2, 4, 6, 8, 12, 16), int
+            )
+        )
+        moment_grid_quadratic_ridges = tuple(
+            float(value)
+            for value in numeric_sequence(
+                "quadratic_ridges", (0.1, 1.0, 10.0), float
+            )
+        )
+        moment_grid_correction_scales = tuple(
+            float(value)
+            for value in numeric_sequence(
+                "correction_scales", (0.25, 0.5, 0.75, 1.0), float
+            )
+        )
+        moment_grid_validation_folds = int(
+            moment_grid.get("validation_folds", 5)
+        )
+        moment_grid_validation_fold = int(
+            moment_grid.get("validation_fold", 0)
+        )
+        if any(value <= 0 for value in moment_grid_ranks):
+            raise ValueError("moment transport grid ranks must be positive")
+        if any(value <= 0.0 for value in moment_grid_quadratic_ridges):
+            raise ValueError("moment transport grid ridges must be positive")
+        if any(
+            not 0.0 < value <= 1.0
+            for value in moment_grid_correction_scales
+        ):
+            raise ValueError(
+                "moment transport correction scales must lie in (0, 1]"
+            )
+        if moment_grid_validation_folds < 2:
+            raise ValueError("moment grid validation_folds must be at least 2")
+        if not 0 <= moment_grid_validation_fold < moment_grid_validation_folds:
+            raise ValueError(
+                "moment grid validation_fold must lie inside validation_folds"
+            )
+        if moment_grid_enabled and (
+            not moment_transport_enabled
+            or moment_transport_mode != "low_rank_pca"
+        ):
+            raise ValueError(
+                "moment grid requires enabled low_rank_pca moment transport"
+            )
 
         return cls(
             learner=str(experiment["learner"]),
@@ -263,6 +570,66 @@ class CMPTExperimentSettings:
             component_ablation_enabled=component_ablation_enabled,
             neighbor_affine_enabled=neighbor_affine_enabled,
             neighbor_affine_classes=neighbor_affine_classes,
+            herding_extrapolation_enabled=herding_extrapolation_enabled,
+            herding_full_prefix=herding_full_prefix,
+            herding_reference_prefix=herding_reference_prefix,
+            persistent_quadrature_enabled=(
+                persistent_quadrature_enabled
+            ),
+            persistent_quadrature_ridge=(
+                persistent_quadrature_ridge
+            ),
+            persistent_quadrature_iterations=(
+                persistent_quadrature_iterations
+            ),
+            persistent_quadrature_multiview=(
+                persistent_quadrature_multiview
+            ),
+            persistent_quadrature_previous_model_view=(
+                persistent_quadrature_previous_model_view
+            ),
+            canonical_reference_enabled=canonical_reference_enabled,
+            canonical_reference_ridge=canonical_reference_ridge,
+            population_mass_transport_enabled=(
+                population_mass_transport_enabled
+            ),
+            population_mass_transport_ridge=(
+                population_mass_transport_ridge
+            ),
+            moment_calibrated_affine_enabled=(
+                moment_calibrated_affine_enabled
+            ),
+            moment_calibrated_affine_uniform_ridge=(
+                moment_calibrated_affine_uniform_ridge
+            ),
+            moment_calibrated_affine_iterations=(
+                moment_calibrated_affine_iterations
+            ),
+            moment_calibrated_affine_ridge=(
+                moment_calibrated_affine_ridge
+            ),
+            moment_transport_enabled=moment_transport_enabled,
+            moment_transport_mode=moment_transport_mode,
+            moment_transport_rank=moment_transport_rank,
+            moment_transport_affine_ridge=(
+                moment_transport_affine_ridge
+            ),
+            moment_transport_quadratic_ridge=(
+                moment_transport_quadratic_ridge
+            ),
+            moment_transport_residual_covariance_scale=(
+                moment_transport_residual_covariance_scale
+            ),
+            moment_grid_enabled=moment_grid_enabled,
+            moment_grid_ranks=moment_grid_ranks,
+            moment_grid_quadratic_ridges=(
+                moment_grid_quadratic_ridges
+            ),
+            moment_grid_correction_scales=(
+                moment_grid_correction_scales
+            ),
+            moment_grid_validation_folds=moment_grid_validation_folds,
+            moment_grid_validation_fold=moment_grid_validation_fold,
         )
 
 
@@ -320,6 +687,20 @@ class PairedTransportSupport:
     @property
     def exemplar_count(self) -> int:
         return int(self.old_exemplar_features.shape[0])
+
+
+@dataclass(frozen=True)
+class MomentGridState:
+    means: Tensor
+    second_moments: Tensor
+    direct_bank: Tensor
+
+
+@dataclass(frozen=True)
+class MomentCalibratedAffineState:
+    prototypes: Tensor
+    means: Tensor
+    second_moments: Tensor
 
 
 def resolve_native_classifier(
@@ -756,6 +1137,468 @@ def _full_current_old_prototypes(
     )
 
 
+def _herding_extrapolated_prototypes(
+    trainer: UnifiedTable1Trainer,
+    model: nn.Module,
+    session_id: int,
+    *,
+    horizontal_flip: bool,
+    full_prefix: int,
+    reference_prefix: int,
+) -> tuple[Tensor, Tensor, int]:
+    """Recompute ordered-memory NME and its Richardson extrapolation."""
+
+    expected_indices = trainer.memory.all_indices(
+        trainer.protocol.class_order
+    )
+    loader = trainer._memory_loader(session_id, augment=False)
+    regular = collect_features(model, loader, trainer.device)
+    expected = torch.tensor(expected_indices, dtype=torch.long)
+    if not torch.equal(regular.indices.cpu().long(), expected):
+        raise RuntimeError(
+            "memory feature rows do not preserve stored herding order"
+        )
+    contributions = F.normalize(regular.features.float(), dim=1)
+    if horizontal_flip:
+        flipped = collect_features(
+            model, loader, trainer.device, horizontal_flip=True
+        )
+        if not torch.equal(regular.indices, flipped.indices):
+            raise RuntimeError("herding flip feature rows are misaligned")
+        contributions = 0.5 * (
+            contributions + F.normalize(flipped.features.float(), dim=1)
+        )
+    ordinary, extrapolated = herding_prefix_extrapolated_means(
+        contributions,
+        regular.targets,
+        trainer.protocol.session(session_id).stop,
+        full_prefix=full_prefix,
+        reference_prefix=reference_prefix,
+    )
+    return ordinary.cpu(), extrapolated.cpu(), len(expected_indices)
+
+
+def _nme_contributions(
+    model: nn.Module,
+    loader: Any,
+    device: torch.device,
+    *,
+    horizontal_flip: bool,
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """Collect one matched NME contribution per original image."""
+
+    views, targets, original_targets, indices = _normalized_feature_views(
+        model,
+        loader,
+        device,
+        horizontal_flip=horizontal_flip,
+    )
+    return views.mean(dim=0), targets, original_targets, indices
+
+
+def _normalized_feature_views(
+    model: nn.Module,
+    loader: Any,
+    device: torch.device,
+    *,
+    horizontal_flip: bool,
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """Return separate normalized deterministic views as [V,N,D]."""
+
+    regular = collect_features(model, loader, device)
+    contributions = [F.normalize(regular.features.float(), dim=1)]
+    if horizontal_flip:
+        flipped = collect_features(
+            model, loader, device, horizontal_flip=True
+        )
+        if not torch.equal(regular.indices, flipped.indices):
+            raise RuntimeError("quadrature flip feature rows are misaligned")
+        contributions.append(F.normalize(flipped.features.float(), dim=1))
+    return (
+        torch.stack(contributions).cpu(),
+        regular.targets.detach().cpu().long(),
+        regular.original_targets.detach().cpu().long(),
+        regular.indices.detach().cpu().long(),
+    )
+
+
+def _full_introduction_moments(
+    trainer: UnifiedTable1Trainer,
+    model: nn.Module,
+    session_id: int,
+    *,
+    horizontal_flip: bool,
+) -> tuple[Tensor, Tensor, int]:
+    original_class_ids = trainer.protocol.classes_for_session(session_id)
+    dataset = trainer.data.train_eval_dataset_for_classes(
+        original_class_ids,
+        samples_per_class=trainer.debug_train_samples_per_class,
+    )
+    loader = trainer._loader(
+        dataset, shuffle=False, session_id=session_id + 18000
+    )
+    features, _, original_targets, _ = _nme_contributions(
+        model,
+        loader,
+        trainer.device,
+        horizontal_flip=horizontal_flip,
+    )
+    means, seconds = class_first_second_moments(
+        features, original_targets, original_class_ids
+    )
+    return means.cpu(), seconds.cpu(), len(dataset)
+
+
+def _full_introduction_statistics(
+    trainer: UnifiedTable1Trainer,
+    model: nn.Module,
+    session_id: int,
+    *,
+    horizontal_flip: bool,
+) -> tuple[Tensor, Tensor, Tensor, int]:
+    """Collect introduction features once for prototypes and moments."""
+
+    original_class_ids = trainer.protocol.classes_for_session(session_id)
+    dataset = trainer.data.train_eval_dataset_for_classes(
+        original_class_ids,
+        samples_per_class=trainer.debug_train_samples_per_class,
+    )
+    loader = trainer._loader(
+        dataset, shuffle=False, session_id=session_id + 19000
+    )
+    regular = collect_features(model, loader, trainer.device)
+    prototype_features = regular.features
+    prototype_targets = regular.original_targets
+    contributions = F.normalize(regular.features.float(), dim=1)
+    original_targets = regular.original_targets.detach().cpu().long()
+    if horizontal_flip:
+        flipped = collect_features(
+            model, loader, trainer.device, horizontal_flip=True
+        )
+        if not torch.equal(regular.indices, flipped.indices):
+            raise RuntimeError(
+                "shared introduction flip rows are misaligned"
+            )
+        prototype_features = torch.cat(
+            [prototype_features, flipped.features], dim=0
+        )
+        prototype_targets = torch.cat(
+            [prototype_targets, flipped.original_targets], dim=0
+        )
+        contributions = 0.5 * (
+            contributions
+            + F.normalize(flipped.features.float(), dim=1)
+        )
+    prototypes = compute_prototypes(
+        prototype_features, prototype_targets, original_class_ids
+    )
+    means, seconds = class_first_second_moments(
+        contributions, original_targets, original_class_ids
+    )
+    return prototypes.cpu(), means.cpu(), seconds.cpu(), len(dataset)
+
+
+def _paired_moment_support(
+    trainer: UnifiedTable1Trainer,
+    previous_model: nn.Module,
+    current_model: nn.Module,
+    previous_session_id: int,
+    *,
+    horizontal_flip: bool,
+) -> tuple[Tensor, Tensor, int]:
+    loader = trainer._memory_loader(previous_session_id, augment=False)
+    old, old_targets, _, old_indices = _nme_contributions(
+        previous_model,
+        loader,
+        trainer.device,
+        horizontal_flip=horizontal_flip,
+    )
+    current, current_targets, _, current_indices = _nme_contributions(
+        current_model,
+        loader,
+        trainer.device,
+        horizontal_flip=horizontal_flip,
+    )
+    if not (
+        torch.equal(old_indices, current_indices)
+        and torch.equal(old_targets, current_targets)
+    ):
+        raise RuntimeError("moment-transport support rows are misaligned")
+    return old, current, int(old.shape[0])
+
+
+def _moment_support_from_paired(
+    support: PairedTransportSupport,
+) -> tuple[Tensor, Tensor, int]:
+    """Reuse affine feature rows as per-exemplar moment contributions."""
+
+    exemplar_count = support.exemplar_count
+
+    def contributions(values: Tensor) -> Tensor:
+        normalized = F.normalize(values.detach().cpu().float(), dim=1)
+        if normalized.shape[0] == exemplar_count:
+            return normalized
+        if normalized.shape[0] == 2 * exemplar_count:
+            return 0.5 * (
+                normalized[:exemplar_count]
+                + normalized[exemplar_count:]
+            )
+        raise ValueError(
+            "affine support rows do not align with exemplar identities"
+        )
+
+    return (
+        contributions(support.old_fit_features),
+        contributions(support.current_fit_features),
+        exemplar_count,
+    )
+
+
+def _moment_grid_key(rank: int, ridge: float, scale: float) -> str:
+    return (
+        f"r{int(rank)}_q{format(float(ridge), '.6g')}"
+        f"_g{format(float(scale), '.6g')}"
+    )
+
+
+def _moment_grid_specs(
+    ranks: Sequence[int],
+    ridges: Sequence[float],
+    scales: Sequence[float],
+) -> tuple[tuple[str, int, float, float], ...]:
+    return tuple(
+        (
+            _moment_grid_key(rank, ridge, scale),
+            int(rank),
+            float(ridge),
+            float(scale),
+        )
+        for rank in ranks
+        for ridge in ridges
+        for scale in scales
+    )
+
+
+def _stratified_moment_grid_split(
+    targets: Tensor,
+    *,
+    folds: int,
+    validation_fold: int,
+) -> tuple[Tensor, Tensor]:
+    labels = targets.detach().cpu().long().flatten()
+    fit_indices: list[Tensor] = []
+    validation_indices: list[Tensor] = []
+    for class_id in labels.unique(sorted=True).tolist():
+        indices = torch.nonzero(labels == int(class_id)).flatten()
+        mask = (
+            torch.arange(indices.numel(), dtype=torch.long) % int(folds)
+            == int(validation_fold)
+        )
+        if int(mask.sum().item()) == 0 or int((~mask).sum().item()) == 0:
+            raise ValueError(
+                f"class {class_id} cannot be split into {folds} folds"
+            )
+        validation_indices.append(indices[mask])
+        fit_indices.append(indices[~mask])
+    return torch.cat(fit_indices), torch.cat(validation_indices)
+
+
+def _moment_grid_validation_error(
+    predicted_prototypes: Tensor,
+    current_validation_features: Tensor,
+    validation_targets: Tensor,
+) -> dict[str, float]:
+    class_ids = validation_targets.detach().cpu().long().unique(sorted=True)
+    observed = compute_prototypes(
+        current_validation_features.detach().cpu().float(),
+        validation_targets.detach().cpu().long(),
+        class_ids,
+    )
+    predicted = F.normalize(predicted_prototypes.detach().cpu().float(), dim=1)
+    if predicted.shape != observed.shape:
+        raise ValueError("moment-grid validation prototype shapes differ")
+    features = F.normalize(
+        current_validation_features.detach().cpu().float(), dim=1
+    )
+    targets = validation_targets.detach().cpu().long()
+    logits = features @ predicted.T
+    predictions = logits.argmax(dim=1)
+    true_scores = logits.gather(1, targets[:, None]).squeeze(1)
+    competing = logits.clone()
+    competing.scatter_(1, targets[:, None], float("-inf"))
+    margins = true_scores - competing.max(dim=1).values
+    return {
+        "prototype_cosine_distance": float(
+            (1.0 - (predicted * observed).sum(dim=1)).mean().item()
+        ),
+        "nme_accuracy": float(predictions.eq(targets).float().mean().item()),
+        "nme_cosine_margin": float(margins.mean().item()),
+    }
+
+
+def _fit_new_persistent_quadrature_weights(
+    trainer: UnifiedTable1Trainer,
+    model: nn.Module,
+    session_id: int,
+    *,
+    horizontal_flip: bool,
+    uniform_ridge: float,
+    max_iterations: int,
+    multiview: bool,
+    previous_model: nn.Module | None,
+    previous_model_view: bool,
+) -> tuple[Tensor, list[dict[str, Any]]]:
+    """Fit weights for classes whose full training set is currently legal."""
+
+    original_class_ids = trainer.protocol.classes_for_session(session_id)
+    full_dataset = trainer.data.train_eval_dataset_for_classes(
+        original_class_ids,
+        samples_per_class=trainer.debug_train_samples_per_class,
+    )
+    full_loader = trainer._loader(
+        full_dataset, shuffle=False, session_id=session_id + 17000
+    )
+    full_views, _, full_original, full_indices = _normalized_feature_views(
+        model,
+        full_loader,
+        trainer.device,
+        horizontal_flip=horizontal_flip,
+    )
+
+    selected_indices: list[int] = []
+    for class_id in original_class_ids:
+        class_indices = trainer.memory.indices_for_class(class_id)
+        if len(class_indices) != trainer.memory.exemplars_per_class:
+            raise RuntimeError(
+                f"class {class_id} lacks a complete quadrature support"
+            )
+        selected_indices.extend(class_indices)
+    memory_dataset = trainer.data.train_eval_dataset_from_indices(
+        selected_indices,
+        is_replay=True,
+    )
+    memory_loader = trainer._loader(
+        memory_dataset, shuffle=False, session_id=session_id + 17100
+    )
+    memory_views, _, memory_original, memory_indices = (
+        _normalized_feature_views(
+        model,
+        memory_loader,
+        trainer.device,
+        horizontal_flip=horizontal_flip,
+        )
+    )
+    expected = torch.tensor(selected_indices, dtype=torch.long)
+    if not torch.equal(memory_indices, expected):
+        raise RuntimeError(
+            "quadrature support does not preserve stored exemplar order"
+        )
+    if not set(memory_indices.tolist()).issubset(set(full_indices.tolist())):
+        raise RuntimeError("quadrature exemplars are absent from full data")
+
+    if not multiview:
+        full_views = full_views.mean(dim=0, keepdim=True)
+        memory_views = memory_views.mean(dim=0, keepdim=True)
+    if previous_model_view and previous_model is not None:
+        previous_full, _, previous_full_original, previous_full_indices = (
+            _normalized_feature_views(
+                previous_model,
+                full_loader,
+                trainer.device,
+                horizontal_flip=horizontal_flip,
+            )
+        )
+        previous_memory, _, previous_memory_original, previous_memory_indices = (
+            _normalized_feature_views(
+                previous_model,
+                memory_loader,
+                trainer.device,
+                horizontal_flip=horizontal_flip,
+            )
+        )
+        if not (
+            torch.equal(previous_full_original, full_original)
+            and torch.equal(previous_full_indices, full_indices)
+            and torch.equal(previous_memory_original, memory_original)
+            and torch.equal(previous_memory_indices, memory_indices)
+        ):
+            raise RuntimeError(
+                "previous/current quadrature views are not image-aligned"
+            )
+        full_views = torch.cat([previous_full, full_views], dim=0)
+        memory_views = torch.cat([previous_memory, memory_views], dim=0)
+
+    fitted: list[Tensor] = []
+    diagnostics: list[dict[str, Any]] = []
+    for class_id in original_class_ids:
+        class_memory = memory_views[:, memory_original == int(class_id)]
+        class_full = full_views[:, full_original == int(class_id)]
+        weights, stats = fit_multiview_persistent_quadrature_weights(
+            class_memory,
+            class_full,
+            uniform_ridge=uniform_ridge,
+            max_iterations=max_iterations,
+        )
+        fitted.append(weights)
+        diagnostics.append(
+            {
+                "original_class_id": int(class_id),
+                "population_count": int(class_full.shape[1]),
+                "exemplar_count": int(class_memory.shape[1]),
+                "weights": [float(value) for value in weights.tolist()],
+                **stats,
+            }
+        )
+    return torch.stack(fitted), diagnostics
+
+
+def _persistent_quadrature_prototypes(
+    trainer: UnifiedTable1Trainer,
+    model: nn.Module,
+    session_id: int,
+    class_weights: Tensor,
+    *,
+    horizontal_flip: bool,
+) -> tuple[Tensor, int]:
+    expected_indices = trainer.memory.all_indices(
+        trainer.protocol.class_order
+    )
+    loader = trainer._memory_loader(session_id, augment=False)
+    features, targets, _, indices = _nme_contributions(
+        model,
+        loader,
+        trainer.device,
+        horizontal_flip=horizontal_flip,
+    )
+    expected = torch.tensor(expected_indices, dtype=torch.long)
+    if not torch.equal(indices, expected):
+        raise RuntimeError(
+            "current quadrature features do not preserve exemplar identity"
+        )
+    return (
+        weighted_class_prototypes(features, targets, class_weights).cpu(),
+        len(expected_indices),
+    )
+
+
+def _quadrature_fit_support_weights(
+    class_weights: Tensor,
+    fit_support_count: int,
+) -> Tensor:
+    """Align per-exemplar masses with original[/flip] support rows."""
+
+    base = class_weights.detach().float().reshape(-1)
+    count = int(fit_support_count)
+    if count == base.numel():
+        return base
+    if count == 2 * base.numel():
+        # Paired support concatenates every original row and then every flip.
+        return torch.cat([base, base], dim=0)
+    raise ValueError(
+        "quadrature weights do not align with affine fit support rows"
+    )
+
+
 def _paired_support_features(
     trainer: UnifiedTable1Trainer,
     previous_model: nn.Module,
@@ -1166,6 +2009,347 @@ def _aggregate_full_mean_oracle(
         "uses_full_training_data": True,
         "uses_test_labels_for_selection": False,
         "oracle_only": True,
+    }
+
+
+def _aggregate_herding_extrapolation(
+    records: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    baseline = [float(record["baseline"]["accuracy"]) for record in records]
+    cmpt = [float(record["cmpt"]["accuracy"]) for record in records]
+    values = [
+        float(record["herding_extrapolation"]["accuracy"])
+        for record in records
+    ]
+    baseline_aia = sum(baseline) / len(baseline)
+    cmpt_aia = sum(cmpt) / len(cmpt)
+    aia = sum(values) / len(values)
+    incremental = values[1:] if len(values) > 1 else values
+    parity = [
+        float(record["herding_extrapolation_diagnostics"]["nme_parity_max_abs"])
+        for record in records
+    ]
+    return {
+        "aia_percent": 100.0 * aia,
+        "incremental_aia_percent": 100.0
+        * sum(incremental)
+        / len(incremental),
+        "final_percent": 100.0 * values[-1],
+        "aia_delta_vs_nme_percent_points": 100.0
+        * (aia - baseline_aia),
+        "aia_delta_vs_cmpt_percent_points": 100.0 * (aia - cmpt_aia),
+        "final_delta_vs_nme_percent_points": 100.0
+        * (values[-1] - baseline[-1]),
+        "max_nme_prototype_parity_error": max(parity),
+        "uses_test_data_for_selection": False,
+        "training_reused_without_changes": True,
+    }
+
+
+def _aggregate_persistent_quadrature(
+    records: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    baseline = [float(record["baseline"]["accuracy"]) for record in records]
+    cmpt = [float(record["cmpt"]["accuracy"]) for record in records]
+    values = [
+        float(record["persistent_quadrature"]["accuracy"])
+        for record in records
+    ]
+    baseline_aia = sum(baseline) / len(baseline)
+    cmpt_aia = sum(cmpt) / len(cmpt)
+    aia = sum(values) / len(values)
+    incremental = values[1:] if len(values) > 1 else values
+    introduced = [
+        diagnostic
+        for record in records
+        for diagnostic in record[
+            "persistent_quadrature_diagnostics"
+        ]["introduced_classes"]
+    ]
+    return {
+        "aia_percent": 100.0 * aia,
+        "incremental_aia_percent": 100.0
+        * sum(incremental)
+        / len(incremental),
+        "final_percent": 100.0 * values[-1],
+        "aia_delta_vs_nme_percent_points": 100.0
+        * (aia - baseline_aia),
+        "aia_delta_vs_cmpt_percent_points": 100.0 * (aia - cmpt_aia),
+        "final_delta_vs_nme_percent_points": 100.0
+        * (values[-1] - baseline[-1]),
+        "mean_introduction_uniform_cosine_distance": sum(
+            float(value["uniform_target_cosine_distance"])
+            for value in introduced
+        )
+        / len(introduced),
+        "mean_introduction_weighted_cosine_distance": sum(
+            float(value["weighted_target_cosine_distance"])
+            for value in introduced
+        )
+        / len(introduced),
+        "mean_effective_sample_size": sum(
+            float(value["effective_sample_size"])
+            for value in introduced
+        )
+        / len(introduced),
+        "uses_test_data_for_selection": False,
+        "uses_only_class_introduction_full_data": True,
+        "training_reused_without_changes": True,
+    }
+
+
+def _aggregate_canonical_reference(
+    records: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    baseline = [float(record["baseline"]["accuracy"]) for record in records]
+    sequential = [float(record["cmpt"]["accuracy"]) for record in records]
+    values = [
+        float(record["canonical_reference"]["accuracy"])
+        for record in records
+    ]
+    baseline_aia = sum(baseline) / len(baseline)
+    sequential_aia = sum(sequential) / len(sequential)
+    aia = sum(values) / len(values)
+    incremental = values[1:] if len(values) > 1 else values
+    return {
+        "aia_percent": 100.0 * aia,
+        "incremental_aia_percent": 100.0
+        * sum(incremental)
+        / len(incremental),
+        "final_percent": 100.0 * values[-1],
+        "aia_delta_vs_nme_percent_points": 100.0
+        * (aia - baseline_aia),
+        "aia_delta_vs_sequential_affine_percent_points": 100.0
+        * (aia - sequential_aia),
+        "final_delta_vs_nme_percent_points": 100.0
+        * (values[-1] - baseline[-1]),
+        "uses_test_data_for_selection": False,
+        "reference_checkpoint": "session_00",
+        "recursive_transport": False,
+        "training_reused_without_changes": True,
+    }
+
+
+def _aggregate_population_mass_transport(
+    records: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    baseline = [float(record["baseline"]["accuracy"]) for record in records]
+    affine = [float(record["cmpt"]["accuracy"]) for record in records]
+    values = [
+        float(record["population_mass_transport"]["accuracy"])
+        for record in records
+    ]
+    baseline_aia = sum(baseline) / len(baseline)
+    affine_aia = sum(affine) / len(affine)
+    aia = sum(values) / len(values)
+    incremental = values[1:] if len(values) > 1 else values
+    return {
+        "aia_percent": 100.0 * aia,
+        "incremental_aia_percent": 100.0
+        * sum(incremental)
+        / len(incremental),
+        "final_percent": 100.0 * values[-1],
+        "aia_delta_vs_nme_percent_points": 100.0
+        * (aia - baseline_aia),
+        "aia_delta_vs_uniform_affine_percent_points": 100.0
+        * (aia - affine_aia),
+        "final_delta_vs_nme_percent_points": 100.0
+        * (values[-1] - baseline[-1]),
+        "uses_test_data_for_selection": False,
+        "support_measure": "persistent_introduction_population_mass",
+        "training_reused_without_changes": True,
+    }
+
+
+def _aggregate_moment_calibrated_affine(
+    records: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    baseline = [float(record["baseline"]["accuracy"]) for record in records]
+    uniform = [float(record["cmpt"]["accuracy"]) for record in records]
+    baseline_aia = sum(baseline) / len(baseline)
+    uniform_aia = sum(uniform) / len(uniform)
+    variants: dict[str, Any] = {}
+    for mode in CALIBRATION_MODES:
+        values = [
+            float(record["moment_calibrated_affine"][mode]["accuracy"])
+            for record in records
+        ]
+        aia = sum(values) / len(values)
+        incremental = values[1:] if len(values) > 1 else values
+        diagnostics = [
+            record["moment_calibrated_affine_diagnostics"][mode]
+            for record in records[1:]
+        ]
+
+        def diagnostic_mean(key: str) -> float:
+            return (
+                sum(float(item[key]) for item in diagnostics)
+                / len(diagnostics)
+                if diagnostics
+                else 0.0
+            )
+
+        variants[mode] = {
+            "aia_percent": 100.0 * aia,
+            "incremental_aia_percent": 100.0
+            * sum(incremental)
+            / len(incremental),
+            "final_percent": 100.0 * values[-1],
+            "aia_delta_vs_nme_percent_points": 100.0
+            * (aia - baseline_aia),
+            "aia_delta_vs_uniform_affine_percent_points": 100.0
+            * (aia - uniform_aia),
+            "final_delta_vs_uniform_affine_percent_points": 100.0
+            * (values[-1] - uniform[-1]),
+            "mean_effective_sample_size": diagnostic_mean(
+                "mean_effective_sample_size"
+            ),
+            "mean_weighted_mean_relative_error": diagnostic_mean(
+                "mean_weighted_mean_relative_error"
+            ),
+            "mean_weighted_second_relative_error": diagnostic_mean(
+                "mean_weighted_second_relative_error"
+            ),
+        }
+    return {
+        "uniform_affine": {
+            "aia_percent": 100.0 * uniform_aia,
+            "final_percent": 100.0 * uniform[-1],
+            "aia_delta_vs_nme_percent_points": 100.0
+            * (uniform_aia - baseline_aia),
+        },
+        **variants,
+        "uses_test_data_for_selection": False,
+        "full_space_second_moment_kernel": True,
+        "training_reused_without_changes": True,
+    }
+
+
+def _aggregate_moment_transport(
+    records: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    baseline = [float(record["baseline"]["accuracy"]) for record in records]
+    affine = [float(record["cmpt"]["accuracy"]) for record in records]
+    values = [
+        float(record["moment_transport"]["accuracy"])
+        for record in records
+    ]
+    baseline_aia = sum(baseline) / len(baseline)
+    affine_aia = sum(affine) / len(affine)
+    aia = sum(values) / len(values)
+    incremental = values[1:] if len(values) > 1 else values
+    reductions = [
+        float(record["moment_transport_diagnostics"]["residual_reduction"])
+        for record in records[1:]
+    ]
+    return {
+        "aia_percent": 100.0 * aia,
+        "incremental_aia_percent": 100.0
+        * sum(incremental)
+        / len(incremental),
+        "final_percent": 100.0 * values[-1],
+        "aia_delta_vs_nme_percent_points": 100.0
+        * (aia - baseline_aia),
+        "aia_delta_vs_affine_percent_points": 100.0 * (aia - affine_aia),
+        "final_delta_vs_nme_percent_points": 100.0
+        * (values[-1] - baseline[-1]),
+        "mean_support_residual_reduction": (
+            sum(reductions) / len(reductions) if reductions else 0.0
+        ),
+        "uses_test_data_for_selection": False,
+        "stores_introduction_first_and_second_moments": True,
+        "training_reused_without_changes": True,
+    }
+
+
+def _aggregate_moment_grid(
+    records: Sequence[Mapping[str, Any]],
+    specs: Sequence[tuple[str, int, float, float]],
+) -> dict[str, Any]:
+    baseline = [float(record["baseline"]["accuracy"]) for record in records]
+    affine = [float(record["cmpt"]["accuracy"]) for record in records]
+    baseline_aia = sum(baseline) / len(baseline)
+    affine_aia = sum(affine) / len(affine)
+    candidates: dict[str, dict[str, Any]] = {}
+    for key, rank, ridge, scale in specs:
+        values = [
+            float(record["moment_transport_grid"][key]["accuracy"])
+            for record in records
+        ]
+        validation_distance = [
+            float(
+                record["moment_transport_grid_validation"][key][
+                    "prototype_cosine_distance"
+                ]
+            )
+            for record in records[1:]
+        ]
+        validation_accuracy = [
+            float(
+                record["moment_transport_grid_validation"][key][
+                    "nme_accuracy"
+                ]
+            )
+            for record in records[1:]
+        ]
+        validation_margin = [
+            float(
+                record["moment_transport_grid_validation"][key][
+                    "nme_cosine_margin"
+                ]
+            )
+            for record in records[1:]
+        ]
+        aia = sum(values) / len(values)
+        candidates[key] = {
+            "rank": int(rank),
+            "quadratic_ridge": float(ridge),
+            "correction_scale": float(scale),
+            "validation_cosine_distance": (
+                sum(validation_distance) / len(validation_distance)
+                if validation_distance
+                else 0.0
+            ),
+            "validation_nme_accuracy": (
+                sum(validation_accuracy) / len(validation_accuracy)
+                if validation_accuracy
+                else 0.0
+            ),
+            "validation_nme_cosine_margin": (
+                sum(validation_margin) / len(validation_margin)
+                if validation_margin
+                else 0.0
+            ),
+            "aia_percent": 100.0 * aia,
+            "final_percent": 100.0 * values[-1],
+            "aia_delta_vs_nme_percent_points": 100.0
+            * (aia - baseline_aia),
+            "aia_delta_vs_affine_percent_points": 100.0
+            * (aia - affine_aia),
+        }
+    validation_key = min(
+        candidates,
+        key=lambda key: (
+            -candidates[key]["validation_nme_cosine_margin"],
+            -candidates[key]["validation_nme_accuracy"],
+            candidates[key]["validation_cosine_distance"],
+            key,
+        ),
+    )
+    oracle_key = max(
+        candidates,
+        key=lambda key: (candidates[key]["aia_percent"], key),
+    )
+    return {
+        "selection_metric": (
+            "class-stratified held-out exemplar NME cosine margin"
+        ),
+        "validation_selected_key": validation_key,
+        "validation_selected": candidates[validation_key],
+        "test_oracle_key": oracle_key,
+        "test_oracle": candidates[oracle_key],
+        "test_oracle_is_diagnostic_only": True,
+        "candidates": candidates,
     }
 
 
@@ -1855,6 +3039,136 @@ class CMPTCheckpointEvaluator:
                 "includes_center_class": True,
                 "uses_test_data": False,
             },
+            "herding_extrapolation": {
+                "enabled": self.settings.herding_extrapolation_enabled,
+                "full_prefix": self.settings.herding_full_prefix,
+                "reference_prefix": self.settings.herding_reference_prefix,
+                "formula": (
+                    "normalize((K*m_K-J*m_J)/(K-J))"
+                ),
+                "preserves_stored_herding_priority_order": True,
+                "uses_test_data": False,
+            },
+            "persistent_quadrature": {
+                "enabled": self.settings.persistent_quadrature_enabled,
+                "uniform_ridge": (
+                    self.settings.persistent_quadrature_ridge
+                ),
+                "max_iterations": (
+                    self.settings.persistent_quadrature_iterations
+                ),
+                "multiview": self.settings.persistent_quadrature_multiview,
+                "previous_model_view": (
+                    self.settings.persistent_quadrature_previous_model_view
+                ),
+                "fit_time": "class_introduction_only",
+                "fit_target": "full_training_population_mean",
+                "future_inputs": "same_retained_exemplar_features",
+                "simplex_weights": True,
+                "replace_old_classes_only": True,
+                "uses_test_data": False,
+            },
+            "canonical_reference": {
+                "enabled": self.settings.canonical_reference_enabled,
+                "reference_checkpoint": "session_00",
+                "affine_ridge": self.settings.canonical_reference_ridge,
+                "source_features": (
+                    "frozen_session_00_features_for_every_arriving_class"
+                ),
+                "fit_support": "retained_old_exemplar_identities",
+                "direct_reference_to_current_mapping": True,
+                "recursive_transport": False,
+                "replace_old_classes_only": True,
+                "uses_test_data": False,
+            },
+            "population_mass_transport": {
+                "enabled": self.settings.population_mass_transport_enabled,
+                "affine_ridge": (
+                    self.settings.population_mass_transport_ridge
+                ),
+                "support_weights": (
+                    "persistent_introduction_time_quadrature_mass"
+                ),
+                "same_exemplar_identity_across_sessions": True,
+                "weighted_affine_objective": True,
+                "replace_old_classes_only": True,
+                "uses_test_data": False,
+            },
+            "moment_calibrated_affine": {
+                "enabled": self.settings.moment_calibrated_affine_enabled,
+                "uniform_ridge": (
+                    self.settings.moment_calibrated_affine_uniform_ridge
+                ),
+                "max_iterations": (
+                    self.settings.moment_calibrated_affine_iterations
+                ),
+                "affine_ridge": (
+                    self.settings.moment_calibrated_affine_ridge
+                ),
+                "variants": list(CALIBRATION_MODES),
+                "stored_statistics": (
+                    "full-population first and second moments at class "
+                    "introduction"
+                ),
+                "weight_fit_time": "every incremental transition",
+                "second_moment_estimator": (
+                    "exact full-space centered degree-2 kernel"
+                ),
+                "simplex_weights": True,
+                "replace_old_classes_only": True,
+                "uses_test_data": False,
+            },
+            "moment_transport": {
+                "enabled": self.settings.moment_transport_enabled,
+                "mode": self.settings.moment_transport_mode,
+                "rank": self.settings.moment_transport_rank,
+                "affine_ridge": (
+                    self.settings.moment_transport_affine_ridge
+                ),
+                "quadratic_ridge": (
+                    self.settings.moment_transport_quadratic_ridge
+                ),
+                "residual_covariance_scale": (
+                    self.settings.moment_transport_residual_covariance_scale
+                ),
+                "stored_statistics": (
+                    "full-population first and second moments at class "
+                    "introduction"
+                ),
+                "transition_model": (
+                    "global affine plus "
+                    + (
+                        "full-space homogeneous degree-2 kernel residual"
+                        if self.settings.moment_transport_mode
+                        == "polynomial_kernel"
+                        else "low-rank quadratic conditional mean"
+                    )
+                ),
+                "fit_support": "paired retained old exemplars",
+                "replace_old_classes_only": True,
+                "uses_test_data": False,
+                "grid": {
+                    "enabled": self.settings.moment_grid_enabled,
+                    "ranks": list(self.settings.moment_grid_ranks),
+                    "quadratic_ridges": list(
+                        self.settings.moment_grid_quadratic_ridges
+                    ),
+                    "correction_scales": list(
+                        self.settings.moment_grid_correction_scales
+                    ),
+                    "validation_folds": (
+                        self.settings.moment_grid_validation_folds
+                    ),
+                    "validation_fold": (
+                        self.settings.moment_grid_validation_fold
+                    ),
+                    "selection_metric": (
+                        "held-out old-exemplar NME cosine margin"
+                    ),
+                    "selection_uses_test_data": False,
+                    "test_oracle_is_diagnostic_only": True,
+                },
+            },
             "training_reused_without_changes": True,
         }
 
@@ -1947,6 +3261,41 @@ class CMPTCheckpointEvaluator:
             if self.settings.neighbor_affine_enabled:
                 payload["summary"]["neighbor_affine"] = (
                     _aggregate_neighbor_affine(records)
+                )
+            if self.settings.herding_extrapolation_enabled:
+                payload["summary"]["herding_extrapolation"] = (
+                    _aggregate_herding_extrapolation(records)
+                )
+            if self.settings.persistent_quadrature_enabled:
+                payload["summary"]["persistent_quadrature"] = (
+                    _aggregate_persistent_quadrature(records)
+                )
+            if self.settings.canonical_reference_enabled:
+                payload["summary"]["canonical_reference"] = (
+                    _aggregate_canonical_reference(records)
+                )
+            if self.settings.population_mass_transport_enabled:
+                payload["summary"]["population_mass_transport"] = (
+                    _aggregate_population_mass_transport(records)
+                )
+            if self.settings.moment_calibrated_affine_enabled:
+                payload["summary"]["moment_calibrated_affine"] = (
+                    _aggregate_moment_calibrated_affine(records)
+                )
+            if self.settings.moment_transport_enabled:
+                payload["summary"]["moment_transport"] = (
+                    _aggregate_moment_transport(records)
+                )
+            if self.settings.moment_grid_enabled:
+                payload["summary"]["moment_transport_grid"] = (
+                    _aggregate_moment_grid(
+                        records,
+                        _moment_grid_specs(
+                            self.settings.moment_grid_ranks,
+                            self.settings.moment_grid_quadratic_ridges,
+                            self.settings.moment_grid_correction_scales,
+                        ),
+                    )
                 )
         return payload
 
@@ -2069,10 +3418,29 @@ class CMPTCheckpointEvaluator:
             return self._upgrade_existing_native_output(output)
         trainer = self._trainer()
         records: list[dict[str, Any]] = []
+        canonical_reference_model = (
+            _load_model(trainer, self.checkpoints[0], 0)
+            if self.settings.canonical_reference_enabled
+            else None
+        )
+        canonical_reference_bank: Tensor | None = None
         transported: Tensor | None = None
+        population_mass_transport_bank: Tensor | None = None
+        moment_transport_means: Tensor | None = None
+        moment_transport_seconds: Tensor | None = None
+        moment_grid_specs = _moment_grid_specs(
+            self.settings.moment_grid_ranks,
+            self.settings.moment_grid_quadratic_ridges,
+            self.settings.moment_grid_correction_scales,
+        )
+        moment_grid_states: dict[str, MomentGridState] = {}
+        moment_calibrated_states: dict[
+            str, MomentCalibratedAffineState
+        ] = {}
         class_translation_bank: Tensor | None = None
         combined_bank: Tensor | None = None
         neighbor_affine_bank: Tensor | None = None
+        persistent_quadrature_weights: list[Tensor] = []
         previous_checkpoint: Mapping[str, Any] | None = None
         started = time.perf_counter()
 
@@ -2089,9 +3457,25 @@ class CMPTCheckpointEvaluator:
                 checkpoint["memory"]
             )
             paired_support: PairedTransportSupport | None = None
-
-            if session_id == 0:
-                transported = _full_introduction_prototypes(
+            quadrature_previous_model: nn.Module | None = None
+            moment_direct_bank: Tensor | None = None
+            moment_grid_direct_banks: dict[str, Tensor] = {}
+            moment_grid_validation: dict[str, dict[str, float]] = {}
+            moment_calibrated_diagnostics: dict[str, dict[str, Any]] = {}
+            introduction_prototypes: Tensor | None = None
+            introduction_moment_means: Tensor | None = None
+            introduction_moment_seconds: Tensor | None = None
+            introduction_population_count: int | None = None
+            if (
+                self.settings.moment_transport_enabled
+                or self.settings.moment_calibrated_affine_enabled
+            ):
+                (
+                    introduction_prototypes,
+                    introduction_moment_means,
+                    introduction_moment_seconds,
+                    introduction_population_count,
+                ) = _full_introduction_statistics(
                     trainer,
                     current_model,
                     session_id,
@@ -2099,11 +3483,115 @@ class CMPTCheckpointEvaluator:
                         self.settings.prototype_horizontal_flip
                     ),
                 )
+
+            if session_id == 0:
+                transported = (
+                    introduction_prototypes
+                    if introduction_prototypes is not None
+                    else _full_introduction_prototypes(
+                        trainer,
+                        current_model,
+                        session_id,
+                        horizontal_flip=(
+                            self.settings.prototype_horizontal_flip
+                        ),
+                    )
+                )
                 transport_diagnostics = {
                     "initialized": True,
                     "support_count": 0,
                     "fit_residual": None,
                 }
+                if self.settings.population_mass_transport_enabled:
+                    population_mass_transport_bank = (
+                        transported.detach().clone()
+                    )
+                    population_mass_transport_diagnostics = {
+                        "initialized": True,
+                        "support_count": 0,
+                        "fit_residual": None,
+                        "mean_support_mass": None,
+                        "support_mass_coefficient_of_variation": None,
+                    }
+                if self.settings.moment_transport_enabled:
+                    if (
+                        introduction_moment_means is None
+                        or introduction_moment_seconds is None
+                        or introduction_population_count is None
+                    ):
+                        raise RuntimeError(
+                            "shared introduction moments are missing"
+                        )
+                    moment_transport_means = introduction_moment_means
+                    moment_transport_seconds = introduction_moment_seconds
+                    moment_population_count = (
+                        introduction_population_count
+                    )
+                    moment_direct_bank = F.normalize(
+                        moment_transport_means, dim=1
+                    )
+                    moment_transport_diagnostics = {
+                        "initialized": True,
+                        "mode": self.settings.moment_transport_mode,
+                        "rank": self.settings.moment_transport_rank,
+                        "population_count": moment_population_count,
+                        "support_count": 0,
+                        "affine_fit_residual": None,
+                        "quadratic_fit_residual": None,
+                        "residual_reduction": 0.0,
+                    }
+                    if self.settings.moment_grid_enabled:
+                        for key, _, _, _ in moment_grid_specs:
+                            moment_grid_states[key] = MomentGridState(
+                                means=moment_transport_means.detach().clone(),
+                                second_moments=(
+                                    moment_transport_seconds.detach().clone()
+                                ),
+                                direct_bank=moment_direct_bank.detach().clone(),
+                            )
+                            moment_grid_direct_banks[key] = (
+                                moment_direct_bank.detach().clone()
+                            )
+                            moment_grid_validation[key] = {
+                                "prototype_cosine_distance": 0.0,
+                                "nme_accuracy": 1.0,
+                                "nme_cosine_margin": 0.0,
+                            }
+                if self.settings.moment_calibrated_affine_enabled:
+                    if (
+                        introduction_prototypes is None
+                        or introduction_moment_means is None
+                        or introduction_moment_seconds is None
+                    ):
+                        raise RuntimeError(
+                            "moment-calibrated affine initialization lacks "
+                            "full-population statistics"
+                        )
+                    for mode in CALIBRATION_MODES:
+                        moment_calibrated_states[mode] = (
+                            MomentCalibratedAffineState(
+                                prototypes=(
+                                    introduction_prototypes.detach().clone()
+                                ),
+                                means=(
+                                    introduction_moment_means.detach().clone()
+                                ),
+                                second_moments=(
+                                    introduction_moment_seconds.detach().clone()
+                                ),
+                            )
+                        )
+                        moment_calibrated_diagnostics[mode] = {
+                            "initialized": True,
+                            "mode": mode,
+                            "support_count": 0,
+                            "fit_residual": None,
+                            "mean_effective_sample_size": float(
+                                self.settings.expected_exemplars_per_class
+                            ),
+                            "mean_weighted_mean_relative_error": 0.0,
+                            "mean_weighted_second_relative_error": 0.0,
+                        }
                 if self.settings.component_ablation_enabled:
                     class_translation_bank = transported.detach().clone()
                     combined_bank = transported.detach().clone()
@@ -2130,6 +3618,7 @@ class CMPTCheckpointEvaluator:
                 previous_model = _load_model(
                     trainer, previous_checkpoint, session_id - 1
                 )
+                quadrature_previous_model = previous_model
                 trainer.memory = ExemplarMemory.from_state_dict(
                     previous_checkpoint["memory"]
                 )
@@ -2142,6 +3631,397 @@ class CMPTCheckpointEvaluator:
                         self.settings.support_horizontal_flip
                     ),
                 )
+                if self.settings.moment_calibrated_affine_enabled:
+                    if (
+                        introduction_prototypes is None
+                        or introduction_moment_means is None
+                        or introduction_moment_seconds is None
+                    ):
+                        raise RuntimeError(
+                            "moment-calibrated affine transition lacks new "
+                            "full-population statistics"
+                        )
+                    (
+                        calibration_old_support,
+                        _,
+                        calibration_support_count,
+                    ) = _moment_support_from_paired(paired_support)
+                    updated_calibrated_states: dict[
+                        str, MomentCalibratedAffineState
+                    ] = {}
+                    for mode in CALIBRATION_MODES:
+                        state = moment_calibrated_states.get(mode)
+                        if state is None or state.prototypes.shape[0] != (
+                            old_class_count
+                        ):
+                            raise RuntimeError(
+                                f"moment-calibrated affine {mode} state is "
+                                "missing old classes"
+                            )
+                        exemplar_weights, weight_diagnostics = (
+                            fit_moment_calibration_weights(
+                                calibration_old_support,
+                                paired_support.targets,
+                                state.means,
+                                state.second_moments,
+                                mode=mode,
+                                uniform_ridge=(
+                                    self.settings.moment_calibrated_affine_uniform_ridge
+                                ),
+                                max_iterations=(
+                                    self.settings.moment_calibrated_affine_iterations
+                                ),
+                            )
+                        )
+                        fit_weights = expand_exemplar_weights(
+                            exemplar_weights,
+                            paired_support.fit_support_count,
+                        )
+                        (
+                            calibrated_old_prototypes,
+                            calibrated_mapping,
+                            calibrated_residual,
+                        ) = population_weighted_affine_transport(
+                            state.prototypes,
+                            paired_support.old_fit_features,
+                            paired_support.current_fit_features,
+                            fit_weights,
+                            ridge=(
+                                self.settings.moment_calibrated_affine_ridge
+                            ),
+                        )
+                        calibrated_old_means, calibrated_old_seconds = (
+                            transport_first_second_moments_affine(
+                                state.means,
+                                state.second_moments,
+                                calibrated_mapping,
+                            )
+                        )
+                        updated_calibrated_states[mode] = (
+                            MomentCalibratedAffineState(
+                                prototypes=torch.cat(
+                                    [
+                                        calibrated_old_prototypes.cpu(),
+                                        introduction_prototypes.cpu(),
+                                    ],
+                                    dim=0,
+                                ),
+                                means=torch.cat(
+                                    [
+                                        calibrated_old_means.cpu(),
+                                        introduction_moment_means.cpu(),
+                                    ],
+                                    dim=0,
+                                ),
+                                second_moments=torch.cat(
+                                    [
+                                        calibrated_old_seconds.cpu(),
+                                        introduction_moment_seconds.cpu(),
+                                    ],
+                                    dim=0,
+                                ),
+                            )
+                        )
+                        moment_calibrated_diagnostics[mode] = {
+                            "initialized": False,
+                            "fit_residual": calibrated_residual,
+                            "affine_ridge": (
+                                self.settings.moment_calibrated_affine_ridge
+                            ),
+                            "moment_support_count": (
+                                calibration_support_count
+                            ),
+                            **weight_diagnostics,
+                        }
+                    moment_calibrated_states = updated_calibrated_states
+                if self.settings.population_mass_transport_enabled:
+                    if population_mass_transport_bank is None:
+                        raise RuntimeError(
+                            "population-mass transport lacks prototype bank"
+                        )
+                    if len(persistent_quadrature_weights) != old_class_count:
+                        raise RuntimeError(
+                            "population-mass transport lacks old class weights"
+                        )
+                    old_weight_bank = torch.stack(
+                        persistent_quadrature_weights
+                    )
+                    support_masses = _quadrature_fit_support_weights(
+                        old_weight_bank,
+                        paired_support.fit_support_count,
+                    )
+                    (
+                        population_mass_old,
+                        population_mass_mapping,
+                        population_mass_residual,
+                    ) = population_weighted_affine_transport(
+                        population_mass_transport_bank,
+                        paired_support.old_fit_features,
+                        paired_support.current_fit_features,
+                        support_masses,
+                        ridge=(
+                            self.settings.population_mass_transport_ridge
+                        ),
+                    )
+                    normalized_masses = support_masses / support_masses.mean()
+                    mass_linear = population_mass_mapping[:-1]
+                    mass_bias = population_mass_mapping[-1]
+                    mass_identity = torch.eye(
+                        mass_linear.shape[0],
+                        dtype=mass_linear.dtype,
+                        device=mass_linear.device,
+                    )
+                    population_mass_transport_diagnostics = {
+                        "initialized": False,
+                        "support_count": paired_support.fit_support_count,
+                        "fit_residual": population_mass_residual,
+                        "affine_ridge": (
+                            self.settings.population_mass_transport_ridge
+                        ),
+                        "mean_support_mass": float(
+                            normalized_masses.mean().item()
+                        ),
+                        "support_mass_coefficient_of_variation": float(
+                            normalized_masses.std(unbiased=False).item()
+                        ),
+                        "linear_identity_deviation": float(
+                            (mass_linear - mass_identity).norm().item()
+                            / mass_linear.shape[0] ** 0.5
+                        ),
+                        "bias_norm": float(mass_bias.norm().item()),
+                    }
+                if self.settings.moment_transport_enabled:
+                    if (
+                        moment_transport_means is None
+                        or moment_transport_seconds is None
+                    ):
+                        raise RuntimeError(
+                            "moment transport lacks prior distribution state"
+                        )
+                    (
+                        moment_old_support,
+                        moment_current_support,
+                        moment_support_count,
+                    ) = _moment_support_from_paired(paired_support)
+                    if (
+                        self.settings.moment_transport_mode
+                        == "polynomial_kernel"
+                    ):
+                        fit_device = torch.device(self.settings.device)
+                        moment_mapping = (
+                            fit_polynomial_kernel_moment_transport(
+                                moment_old_support.to(fit_device),
+                                moment_current_support.to(fit_device),
+                                affine_ridge=(
+                                    self.settings.moment_transport_affine_ridge
+                                ),
+                                quadratic_ridge=(
+                                    self.settings.moment_transport_quadratic_ridge
+                                ),
+                            )
+                        )
+                        (
+                            moment_old_means,
+                            moment_old_seconds,
+                            moment_old_prototypes,
+                        ) = apply_polynomial_kernel_moment_transport(
+                            moment_transport_means,
+                            moment_transport_seconds,
+                            moment_mapping,
+                            residual_covariance_scale=(
+                                self.settings.moment_transport_residual_covariance_scale
+                            ),
+                        )
+                    else:
+                        moment_mapping = fit_low_rank_moment_transport(
+                            moment_old_support,
+                            moment_current_support,
+                            rank=self.settings.moment_transport_rank,
+                            affine_ridge=(
+                                self.settings.moment_transport_affine_ridge
+                            ),
+                            quadratic_ridge=(
+                                self.settings.moment_transport_quadratic_ridge
+                            ),
+                        )
+                        (
+                            moment_old_means,
+                            moment_old_seconds,
+                            moment_old_prototypes,
+                        ) = apply_low_rank_moment_transport(
+                            moment_transport_means,
+                            moment_transport_seconds,
+                            moment_mapping,
+                            residual_covariance_scale=(
+                                self.settings.moment_transport_residual_covariance_scale
+                            ),
+                        )
+                    (
+                        moment_new_means,
+                        moment_new_seconds,
+                    ) = (
+                        introduction_moment_means,
+                        introduction_moment_seconds,
+                    )
+                    if (
+                        moment_new_means is None
+                        or moment_new_seconds is None
+                        or introduction_population_count is None
+                    ):
+                        raise RuntimeError(
+                            "shared new-class moments are missing"
+                        )
+                    moment_population_count = introduction_population_count
+                    moment_transport_means = torch.cat(
+                        [moment_old_means.cpu(), moment_new_means.cpu()], dim=0
+                    )
+                    moment_transport_seconds = torch.cat(
+                        [moment_old_seconds.cpu(), moment_new_seconds.cpu()],
+                        dim=0,
+                    )
+                    moment_direct_bank = torch.cat(
+                        [
+                            moment_old_prototypes.cpu(),
+                            F.normalize(moment_new_means.float(), dim=1).cpu(),
+                        ],
+                        dim=0,
+                    )
+                    affine_fit = moment_mapping.affine_fit_residual
+                    quadratic_fit = moment_mapping.quadratic_fit_residual
+                    moment_transport_diagnostics = {
+                        "initialized": False,
+                        "mode": self.settings.moment_transport_mode,
+                        "rank": getattr(moment_mapping, "rank", None),
+                        "population_count": moment_population_count,
+                        "support_count": moment_support_count,
+                        "affine_fit_residual": affine_fit,
+                        "quadratic_fit_residual": quadratic_fit,
+                        "residual_reduction": (
+                            (affine_fit - quadratic_fit)
+                            / max(affine_fit, 1.0e-12)
+                        ),
+                        "affine_ridge": (
+                            self.settings.moment_transport_affine_ridge
+                        ),
+                        "quadratic_ridge": (
+                            self.settings.moment_transport_quadratic_ridge
+                        ),
+                    }
+                    if self.settings.moment_grid_enabled:
+                        if (
+                            introduction_moment_means is None
+                            or introduction_moment_seconds is None
+                        ):
+                            raise RuntimeError(
+                                "moment grid lacks new-class moments"
+                            )
+                        if len(moment_grid_states) != len(moment_grid_specs):
+                            raise RuntimeError(
+                                "moment grid lacks prior candidate states"
+                            )
+                        grid_mappings = fit_low_rank_moment_transport_grid(
+                            moment_old_support,
+                            moment_current_support,
+                            ranks=self.settings.moment_grid_ranks,
+                            quadratic_ridges=(
+                                self.settings.moment_grid_quadratic_ridges
+                            ),
+                            affine_ridge=(
+                                self.settings.moment_transport_affine_ridge
+                            ),
+                        )
+                        fit_indices, validation_indices = (
+                            _stratified_moment_grid_split(
+                                paired_support.targets,
+                                folds=(
+                                    self.settings.moment_grid_validation_folds
+                                ),
+                                validation_fold=(
+                                    self.settings.moment_grid_validation_fold
+                                ),
+                            )
+                        )
+                        validation_mappings = (
+                            fit_low_rank_moment_transport_grid(
+                                moment_old_support[fit_indices],
+                                moment_current_support[fit_indices],
+                                ranks=self.settings.moment_grid_ranks,
+                                quadratic_ridges=(
+                                    self.settings.moment_grid_quadratic_ridges
+                                ),
+                                affine_ridge=(
+                                    self.settings.moment_transport_affine_ridge
+                                ),
+                            )
+                        )
+                        validation_features = moment_current_support[
+                            validation_indices
+                        ]
+                        validation_targets = paired_support.targets[
+                            validation_indices
+                        ]
+                        updated_grid_states: dict[str, MomentGridState] = {}
+                        for key, rank, ridge, scale in moment_grid_specs:
+                            prior_state = moment_grid_states[key]
+                            mapping_key = (rank, ridge)
+                            (
+                                grid_old_means,
+                                grid_old_seconds,
+                                grid_old_prototypes,
+                            ) = apply_low_rank_moment_transport(
+                                prior_state.means,
+                                prior_state.second_moments,
+                                grid_mappings[mapping_key],
+                                residual_covariance_scale=0.0,
+                                correction_scale=scale,
+                            )
+                            grid_means = torch.cat(
+                                [
+                                    grid_old_means.cpu(),
+                                    introduction_moment_means.cpu(),
+                                ],
+                                dim=0,
+                            )
+                            grid_seconds = torch.cat(
+                                [
+                                    grid_old_seconds.cpu(),
+                                    introduction_moment_seconds.cpu(),
+                                ],
+                                dim=0,
+                            )
+                            grid_direct = torch.cat(
+                                [
+                                    grid_old_prototypes.cpu(),
+                                    F.normalize(
+                                        introduction_moment_means.float(),
+                                        dim=1,
+                                    ).cpu(),
+                                ],
+                                dim=0,
+                            )
+                            updated_grid_states[key] = MomentGridState(
+                                means=grid_means,
+                                second_moments=grid_seconds,
+                                direct_bank=grid_direct,
+                            )
+                            moment_grid_direct_banks[key] = grid_direct
+                            _, _, validation_prototypes = (
+                                apply_low_rank_moment_transport(
+                                    prior_state.means,
+                                    prior_state.second_moments,
+                                    validation_mappings[mapping_key],
+                                    residual_covariance_scale=0.0,
+                                    correction_scale=scale,
+                                )
+                            )
+                            moment_grid_validation[key] = (
+                                _moment_grid_validation_error(
+                                    validation_prototypes,
+                                    validation_features,
+                                    validation_targets,
+                                )
+                            )
+                        moment_grid_states = updated_grid_states
                 if self.settings.transport == "rigid_procrustes":
                     transported_old, rotation, translation, residual = (
                         rigid_procrustes_transport(
@@ -2269,17 +4149,25 @@ class CMPTCheckpointEvaluator:
                         ),
                     }
                 trainer.model = current_model
-                new_full = _full_introduction_prototypes(
-                    trainer,
-                    current_model,
-                    session_id,
-                    horizontal_flip=(
-                        self.settings.prototype_horizontal_flip
-                    ),
+                new_full = (
+                    introduction_prototypes
+                    if introduction_prototypes is not None
+                    else _full_introduction_prototypes(
+                        trainer,
+                        current_model,
+                        session_id,
+                        horizontal_flip=(
+                            self.settings.prototype_horizontal_flip
+                        ),
+                    )
                 )
                 transported = torch.cat(
                     [transported_old.cpu(), new_full.cpu()], dim=0
                 )
+                if self.settings.population_mass_transport_enabled:
+                    population_mass_transport_bank = torch.cat(
+                        [population_mass_old.cpu(), new_full.cpu()], dim=0
+                    )
                 if self.settings.component_ablation_enabled:
                     class_translation_bank = torch.cat(
                         [class_translation_old.cpu(), new_full.cpu()], dim=0
@@ -2291,7 +4179,96 @@ class CMPTCheckpointEvaluator:
                     neighbor_affine_bank = torch.cat(
                         [neighbor_affine_old.cpu(), new_full.cpu()], dim=0
                     )
-                del previous_model
+
+            canonical_direct_bank: Tensor | None = None
+            canonical_reference_diagnostics: dict[str, Any] | None = None
+            if self.settings.canonical_reference_enabled:
+                if canonical_reference_model is None:
+                    raise RuntimeError("canonical reference model is missing")
+                if session_id == 0:
+                    canonical_new = _full_introduction_prototypes(
+                        trainer,
+                        canonical_reference_model,
+                        session_id,
+                        horizontal_flip=(
+                            self.settings.prototype_horizontal_flip
+                        ),
+                    )
+                    canonical_reference_bank = canonical_new.cpu()
+                    canonical_direct_bank = canonical_reference_bank.clone()
+                    canonical_reference_diagnostics = {
+                        "initialized": True,
+                        "reference_session": 0,
+                        "support_count": 0,
+                        "fit_residual": None,
+                        "linear_identity_deviation": 0.0,
+                        "bias_norm": 0.0,
+                    }
+                else:
+                    if (
+                        previous_checkpoint is None
+                        or canonical_reference_bank is None
+                    ):
+                        raise RuntimeError(
+                            "canonical direct transport lacks prior state"
+                        )
+                    trainer.memory = ExemplarMemory.from_state_dict(
+                        previous_checkpoint["memory"]
+                    )
+                    canonical_support = _paired_support_features(
+                        trainer,
+                        canonical_reference_model,
+                        current_model,
+                        session_id - 1,
+                        horizontal_flip=(
+                            self.settings.support_horizontal_flip
+                        ),
+                    )
+                    canonical_old, canonical_mapping, canonical_residual = (
+                        affine_ridge_transport(
+                            canonical_reference_bank,
+                            canonical_support.old_fit_features,
+                            canonical_support.current_fit_features,
+                            ridge=self.settings.canonical_reference_ridge,
+                        )
+                    )
+                    canonical_new = _full_introduction_prototypes(
+                        trainer,
+                        canonical_reference_model,
+                        session_id,
+                        horizontal_flip=(
+                            self.settings.prototype_horizontal_flip
+                        ),
+                    )
+                    canonical_reference_bank = torch.cat(
+                        [canonical_reference_bank, canonical_new.cpu()], dim=0
+                    )
+                    canonical_direct_bank = torch.cat(
+                        [canonical_old.cpu(), canonical_new.cpu()], dim=0
+                    )
+                    canonical_linear = canonical_mapping[:-1]
+                    canonical_bias = canonical_mapping[-1]
+                    canonical_identity = torch.eye(
+                        canonical_linear.shape[0],
+                        dtype=canonical_linear.dtype,
+                        device=canonical_linear.device,
+                    )
+                    canonical_reference_diagnostics = {
+                        "initialized": False,
+                        "reference_session": 0,
+                        "support_count": (
+                            canonical_support.fit_support_count
+                        ),
+                        "fit_residual": canonical_residual,
+                        "affine_ridge": (
+                            self.settings.canonical_reference_ridge
+                        ),
+                        "linear_identity_deviation": float(
+                            (canonical_linear - canonical_identity).norm().item()
+                            / canonical_linear.shape[0] ** 0.5
+                        ),
+                        "bias_norm": float(canonical_bias.norm().item()),
+                    }
 
             if transported is None or transported.shape[0] != seen:
                 raise RuntimeError(
@@ -2309,6 +4286,202 @@ class CMPTCheckpointEvaluator:
                 transported,
                 old_class_count,
             )
+            population_mass_transport_means: Tensor | None = None
+            if self.settings.population_mass_transport_enabled:
+                if (
+                    population_mass_transport_bank is None
+                    or population_mass_transport_bank.shape
+                    != baseline_means.shape
+                ):
+                    raise RuntimeError(
+                        "population-mass prototype bank has invalid shape"
+                    )
+                population_mass_transport_means = (
+                    build_old_class_cmpt_means(
+                        baseline_means,
+                        population_mass_transport_bank,
+                        old_class_count,
+                    )
+                )
+            moment_calibrated_evaluation_means: dict[str, Tensor] = {}
+            if self.settings.moment_calibrated_affine_enabled:
+                if len(moment_calibrated_states) != len(CALIBRATION_MODES):
+                    raise RuntimeError(
+                        "moment-calibrated affine states are incomplete"
+                    )
+                for mode in CALIBRATION_MODES:
+                    state = moment_calibrated_states[mode]
+                    if state.prototypes.shape != baseline_means.shape:
+                        raise RuntimeError(
+                            f"moment-calibrated affine {mode} bank has an "
+                            "invalid shape"
+                        )
+                    moment_calibrated_evaluation_means[mode] = (
+                        build_old_class_cmpt_means(
+                            baseline_means,
+                            state.prototypes,
+                            old_class_count,
+                        )
+                    )
+            moment_transport_evaluation_means: Tensor | None = None
+            if self.settings.moment_transport_enabled:
+                if (
+                    moment_direct_bank is None
+                    or moment_direct_bank.shape != baseline_means.shape
+                ):
+                    raise RuntimeError(
+                        "moment-transport prototype bank has invalid shape"
+                    )
+                moment_transport_evaluation_means = (
+                    build_old_class_cmpt_means(
+                        baseline_means,
+                        moment_direct_bank,
+                        old_class_count,
+                    )
+                )
+            moment_grid_evaluation_means: dict[str, Tensor] = {}
+            if self.settings.moment_grid_enabled:
+                if len(moment_grid_direct_banks) != len(moment_grid_specs):
+                    raise RuntimeError(
+                        "moment-grid prototype banks are incomplete"
+                    )
+                for key, _, _, _ in moment_grid_specs:
+                    direct_bank = moment_grid_direct_banks[key]
+                    if direct_bank.shape != baseline_means.shape:
+                        raise RuntimeError(
+                            f"moment-grid bank {key} has invalid shape"
+                        )
+                    moment_grid_evaluation_means[key] = (
+                        build_old_class_cmpt_means(
+                            baseline_means,
+                            direct_bank,
+                            old_class_count,
+                        )
+                    )
+            canonical_reference_means: Tensor | None = None
+            if self.settings.canonical_reference_enabled:
+                if (
+                    canonical_direct_bank is None
+                    or canonical_direct_bank.shape != baseline_means.shape
+                ):
+                    raise RuntimeError(
+                        "canonical direct prototype bank has invalid shape"
+                    )
+                canonical_reference_means = build_old_class_cmpt_means(
+                    baseline_means,
+                    canonical_direct_bank,
+                    old_class_count,
+                )
+            persistent_quadrature_means: Tensor | None = None
+            persistent_quadrature_diagnostics: dict[str, Any] | None = None
+            if self.settings.persistent_quadrature_enabled:
+                # Transport fitting temporarily installs the previous memory.
+                # Quadrature fitting and application require the complete
+                # current memory and the stable identities selected when each
+                # class was introduced.
+                trainer.memory = ExemplarMemory.from_state_dict(
+                    checkpoint["memory"]
+                )
+                new_weights, introduced_diagnostics = (
+                    _fit_new_persistent_quadrature_weights(
+                        trainer,
+                        current_model,
+                        session_id,
+                        horizontal_flip=(
+                            self.settings.prototype_horizontal_flip
+                        ),
+                        uniform_ridge=(
+                            self.settings.persistent_quadrature_ridge
+                        ),
+                        max_iterations=(
+                            self.settings.persistent_quadrature_iterations
+                        ),
+                        multiview=(
+                            self.settings.persistent_quadrature_multiview
+                        ),
+                        previous_model=quadrature_previous_model,
+                        previous_model_view=(
+                            self.settings.persistent_quadrature_previous_model_view
+                        ),
+                    )
+                )
+                persistent_quadrature_weights.extend(
+                    row.detach().cpu().clone() for row in new_weights
+                )
+                if len(persistent_quadrature_weights) != seen:
+                    raise RuntimeError(
+                        "persistent quadrature weight bank has invalid size"
+                    )
+                weight_bank = torch.stack(persistent_quadrature_weights)
+                weighted_all, quadrature_support_count = (
+                    _persistent_quadrature_prototypes(
+                        trainer,
+                        current_model,
+                        session_id,
+                        weight_bank,
+                        horizontal_flip=(
+                            self.settings.prototype_horizontal_flip
+                        ),
+                    )
+                )
+                persistent_quadrature_means = build_old_class_cmpt_means(
+                    baseline_means,
+                    weighted_all,
+                    old_class_count,
+                )
+                persistent_quadrature_diagnostics = {
+                    "introduced_classes": introduced_diagnostics,
+                    "stored_weight_class_count": len(
+                        persistent_quadrature_weights
+                    ),
+                    "old_replaced_class_count": old_class_count,
+                    "current_memory_support_count": (
+                        quadrature_support_count
+                    ),
+                }
+            herding_extrapolated_means: Tensor | None = None
+            herding_extrapolation_diagnostics: dict[str, Any] | None = None
+            if self.settings.herding_extrapolation_enabled:
+                # CMPT transition fitting temporarily installs the previous
+                # memory.  HTE must use the current checkpoint's complete
+                # ordered memory, including the just-introduced classes.
+                trainer.memory = ExemplarMemory.from_state_dict(
+                    checkpoint["memory"]
+                )
+                recomputed_nme, herding_extrapolated_means, support_count = (
+                    _herding_extrapolated_prototypes(
+                        trainer,
+                        current_model,
+                        session_id,
+                        horizontal_flip=(
+                            self.settings.prototype_horizontal_flip
+                        ),
+                        full_prefix=self.settings.herding_full_prefix,
+                        reference_prefix=(
+                            self.settings.herding_reference_prefix
+                        ),
+                    )
+                )
+                nme_parity = float(
+                    (recomputed_nme - baseline_means).abs().max().item()
+                )
+                if (
+                    self.settings.strict_parity
+                    and nme_parity > self.settings.parity_tolerance
+                ):
+                    raise RuntimeError(
+                        f"{self.settings.learner} S{session_id} ordered-memory "
+                        f"prototype parity failed: max_abs={nme_parity:.3e}"
+                    )
+                herding_extrapolation_diagnostics = {
+                    "support_count": support_count,
+                    "classes": seen,
+                    "full_prefix": self.settings.herding_full_prefix,
+                    "reference_prefix": (
+                        self.settings.herding_reference_prefix
+                    ),
+                    "nme_parity_max_abs": nme_parity,
+                }
             class_translation_means: Tensor | None = None
             combined_means: Tensor | None = None
             neighbor_affine_means: Tensor | None = None
@@ -2501,6 +4674,13 @@ class CMPTCheckpointEvaluator:
             adaptive_metrics: dict[str, dict[str, Any]] | None = None
             component_metrics: dict[str, dict[str, Any]] | None = None
             neighbor_affine_metrics: dict[str, Any] | None = None
+            herding_extrapolation_metrics: dict[str, Any] | None = None
+            persistent_quadrature_metrics: dict[str, Any] | None = None
+            canonical_reference_metrics: dict[str, Any] | None = None
+            population_mass_transport_metrics: dict[str, Any] | None = None
+            moment_transport_metrics: dict[str, Any] | None = None
+            moment_grid_metrics: dict[str, dict[str, Any]] | None = None
+            moment_calibrated_metrics: dict[str, dict[str, Any]] | None = None
             if (
                 self.settings.prototype_interpolation_alphas
                 or self.settings.adaptive_alpha_enabled
@@ -2508,6 +4688,12 @@ class CMPTCheckpointEvaluator:
                 or self.settings.full_mean_oracle_enabled
                 or self.settings.component_ablation_enabled
                 or self.settings.neighbor_affine_enabled
+                or self.settings.herding_extrapolation_enabled
+                or self.settings.persistent_quadrature_enabled
+                or self.settings.canonical_reference_enabled
+                or self.settings.population_mass_transport_enabled
+                or self.settings.moment_calibrated_affine_enabled
+                or self.settings.moment_transport_enabled
             ):
                 evaluation_banks: dict[str, Tensor] = {
                     "__baseline": baseline_means,
@@ -2534,6 +4720,64 @@ class CMPTCheckpointEvaluator:
                         )
                     evaluation_banks["neighbor_affine"] = (
                         neighbor_affine_means
+                    )
+                if self.settings.herding_extrapolation_enabled:
+                    if herding_extrapolated_means is None:
+                        raise RuntimeError(
+                            "herding extrapolation prototype bank is missing"
+                        )
+                    evaluation_banks["herding_extrapolation"] = (
+                        herding_extrapolated_means
+                    )
+                if self.settings.persistent_quadrature_enabled:
+                    if persistent_quadrature_means is None:
+                        raise RuntimeError(
+                            "persistent quadrature prototype bank is missing"
+                        )
+                    evaluation_banks["persistent_quadrature"] = (
+                        persistent_quadrature_means
+                    )
+                if self.settings.canonical_reference_enabled:
+                    if canonical_reference_means is None:
+                        raise RuntimeError(
+                            "canonical reference evaluation bank is missing"
+                        )
+                    evaluation_banks["canonical_reference"] = (
+                        canonical_reference_means
+                    )
+                if self.settings.population_mass_transport_enabled:
+                    if population_mass_transport_means is None:
+                        raise RuntimeError(
+                            "population-mass evaluation bank is missing"
+                        )
+                    evaluation_banks["population_mass_transport"] = (
+                        population_mass_transport_means
+                    )
+                if self.settings.moment_calibrated_affine_enabled:
+                    evaluation_banks.update(
+                        {
+                            f"moment_calibrated:{mode}": means
+                            for mode, means in (
+                                moment_calibrated_evaluation_means.items()
+                            )
+                        }
+                    )
+                if self.settings.moment_transport_enabled:
+                    if moment_transport_evaluation_means is None:
+                        raise RuntimeError(
+                            "moment-transport evaluation bank is missing"
+                        )
+                    evaluation_banks["moment_transport"] = (
+                        moment_transport_evaluation_means
+                    )
+                if self.settings.moment_grid_enabled:
+                    evaluation_banks.update(
+                        {
+                            f"moment_grid:{key}": means
+                            for key, means in (
+                                moment_grid_evaluation_means.items()
+                            )
+                        }
                     )
                 evaluation_banks.update(adaptive_banks)
                 if geometric_bank is not None:
@@ -2616,6 +4860,40 @@ class CMPTCheckpointEvaluator:
                     neighbor_affine_metrics = copy.deepcopy(
                         evaluated_banks["neighbor_affine"]
                     )
+                if self.settings.herding_extrapolation_enabled:
+                    herding_extrapolation_metrics = copy.deepcopy(
+                        evaluated_banks["herding_extrapolation"]
+                    )
+                if self.settings.persistent_quadrature_enabled:
+                    persistent_quadrature_metrics = copy.deepcopy(
+                        evaluated_banks["persistent_quadrature"]
+                    )
+                if self.settings.canonical_reference_enabled:
+                    canonical_reference_metrics = copy.deepcopy(
+                        evaluated_banks["canonical_reference"]
+                    )
+                if self.settings.population_mass_transport_enabled:
+                    population_mass_transport_metrics = copy.deepcopy(
+                        evaluated_banks["population_mass_transport"]
+                    )
+                if self.settings.moment_calibrated_affine_enabled:
+                    moment_calibrated_metrics = {
+                        mode: copy.deepcopy(
+                            evaluated_banks[f"moment_calibrated:{mode}"]
+                        )
+                        for mode in CALIBRATION_MODES
+                    }
+                if self.settings.moment_transport_enabled:
+                    moment_transport_metrics = copy.deepcopy(
+                        evaluated_banks["moment_transport"]
+                    )
+                if self.settings.moment_grid_enabled:
+                    moment_grid_metrics = {
+                        key: copy.deepcopy(
+                            evaluated_banks[f"moment_grid:{key}"]
+                        )
+                        for key, _, _, _ in moment_grid_specs
+                    }
                 geometric_metrics = (
                     copy.deepcopy(
                         evaluated_banks["class_geometric_oracle"]
@@ -2638,6 +4916,13 @@ class CMPTCheckpointEvaluator:
             else:
                 geometric_metrics = None
                 full_mean_metrics = None
+                herding_extrapolation_metrics = None
+                persistent_quadrature_metrics = None
+                canonical_reference_metrics = None
+                population_mass_transport_metrics = None
+                moment_calibrated_metrics = None
+                moment_transport_metrics = None
+                moment_grid_metrics = None
                 baseline = evaluate_nme(
                     current_model,
                     test_loader,
@@ -2854,6 +5139,96 @@ class CMPTCheckpointEvaluator:
                 record["class_geometric_oracle"] = class_geometric_record
             if full_mean_record is not None:
                 record["full_mean_oracle"] = full_mean_record
+            if self.settings.herding_extrapolation_enabled:
+                if (
+                    herding_extrapolation_metrics is None
+                    or herding_extrapolation_diagnostics is None
+                ):
+                    raise RuntimeError(
+                        "herding extrapolation result is missing"
+                    )
+                record["herding_extrapolation"] = (
+                    herding_extrapolation_metrics
+                )
+                record["herding_extrapolation_diagnostics"] = (
+                    herding_extrapolation_diagnostics
+                )
+            if self.settings.persistent_quadrature_enabled:
+                if (
+                    persistent_quadrature_metrics is None
+                    or persistent_quadrature_diagnostics is None
+                ):
+                    raise RuntimeError(
+                        "persistent quadrature result is missing"
+                    )
+                record["persistent_quadrature"] = (
+                    persistent_quadrature_metrics
+                )
+                record["persistent_quadrature_diagnostics"] = (
+                    persistent_quadrature_diagnostics
+                )
+            if self.settings.canonical_reference_enabled:
+                if (
+                    canonical_reference_metrics is None
+                    or canonical_reference_diagnostics is None
+                ):
+                    raise RuntimeError(
+                        "canonical reference result is missing"
+                    )
+                record["canonical_reference"] = (
+                    canonical_reference_metrics
+                )
+                record["canonical_reference_diagnostics"] = (
+                    canonical_reference_diagnostics
+                )
+            if self.settings.population_mass_transport_enabled:
+                if population_mass_transport_metrics is None:
+                    raise RuntimeError(
+                        "population-mass transport result is missing"
+                    )
+                record["population_mass_transport"] = (
+                    population_mass_transport_metrics
+                )
+                record["population_mass_transport_diagnostics"] = (
+                    population_mass_transport_diagnostics
+                )
+            if self.settings.moment_calibrated_affine_enabled:
+                if moment_calibrated_metrics is None:
+                    raise RuntimeError(
+                        "moment-calibrated affine metrics are missing"
+                    )
+                if len(moment_calibrated_diagnostics) != len(
+                    CALIBRATION_MODES
+                ):
+                    raise RuntimeError(
+                        "moment-calibrated affine diagnostics are incomplete"
+                    )
+                record["moment_calibrated_affine"] = (
+                    moment_calibrated_metrics
+                )
+                record["moment_calibrated_affine_diagnostics"] = (
+                    moment_calibrated_diagnostics
+                )
+            if self.settings.moment_transport_enabled:
+                if moment_transport_metrics is None:
+                    raise RuntimeError(
+                        "moment-transport result is missing"
+                    )
+                record["moment_transport"] = moment_transport_metrics
+                record["moment_transport_diagnostics"] = (
+                    moment_transport_diagnostics
+                )
+            if self.settings.moment_grid_enabled:
+                if moment_grid_metrics is None:
+                    raise RuntimeError("moment-grid metrics are missing")
+                if len(moment_grid_validation) != len(moment_grid_specs):
+                    raise RuntimeError(
+                        "moment-grid validation metrics are incomplete"
+                    )
+                record["moment_transport_grid"] = moment_grid_metrics
+                record["moment_transport_grid_validation"] = (
+                    moment_grid_validation
+                )
             records.append(record)
             elapsed = time.perf_counter() - started
             dump_json(
@@ -2902,6 +5277,52 @@ class CMPTCheckpointEvaluator:
                     ", Local-Affine="
                     f"{100.0 * float(neighbor_affine_metrics['accuracy']):.3f}"
                 )
+            herding_progress = ""
+            if self.settings.herding_extrapolation_enabled:
+                assert herding_extrapolation_metrics is not None
+                herding_progress = (
+                    ", HTE="
+                    f"{100.0 * float(herding_extrapolation_metrics['accuracy']):.3f}"
+                )
+            quadrature_progress = ""
+            if self.settings.persistent_quadrature_enabled:
+                assert persistent_quadrature_metrics is not None
+                quadrature_progress = (
+                    ", PEQ="
+                    f"{100.0 * float(persistent_quadrature_metrics['accuracy']):.3f}"
+                )
+            canonical_progress = ""
+            if self.settings.canonical_reference_enabled:
+                assert canonical_reference_metrics is not None
+                canonical_progress = (
+                    ", CRPT="
+                    f"{100.0 * float(canonical_reference_metrics['accuracy']):.3f}"
+                )
+            population_mass_progress = ""
+            if self.settings.population_mass_transport_enabled:
+                assert population_mass_transport_metrics is not None
+                population_mass_progress = (
+                    ", PM-Affine="
+                    f"{100.0 * float(population_mass_transport_metrics['accuracy']):.3f}"
+                )
+            moment_progress = ""
+            if self.settings.moment_transport_enabled:
+                assert moment_transport_metrics is not None
+                moment_progress = (
+                    ", Moment-T="
+                    f"{100.0 * float(moment_transport_metrics['accuracy']):.3f}"
+                )
+            moment_calibrated_progress = ""
+            if self.settings.moment_calibrated_affine_enabled:
+                assert moment_calibrated_metrics is not None
+                moment_calibrated_progress = (
+                    ", MC-Mean="
+                    f"{100.0 * float(moment_calibrated_metrics['mean']['accuracy']):.3f}"
+                    ", MC-Second="
+                    f"{100.0 * float(moment_calibrated_metrics['second']['accuracy']):.3f}"
+                    ", MC-Both="
+                    f"{100.0 * float(moment_calibrated_metrics['combined']['accuracy']):.3f}"
+                )
             self.progress(
                 f"{self.settings.learner} S{session_id}: "
                 f"Native={100.0 * float(native['accuracy']):.3f}, "
@@ -2913,8 +5334,16 @@ class CMPTCheckpointEvaluator:
                 f"{full_mean_progress}"
                 f"{component_progress}"
                 f"{neighbor_progress}"
+                f"{herding_progress}"
+                f"{quadrature_progress}"
+                f"{canonical_progress}"
+                f"{population_mass_progress}"
+                f"{moment_calibrated_progress}"
+                f"{moment_progress}"
             )
             previous_checkpoint = checkpoint
+            if quadrature_previous_model is not None:
+                del quadrature_previous_model
             del current_model
 
         payload = self._partial_payload(
