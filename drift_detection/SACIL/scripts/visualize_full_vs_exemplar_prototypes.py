@@ -31,6 +31,14 @@ from sacil.features import collect_features  # noqa: E402
 from sacil.memory import ExemplarMemory  # noqa: E402
 
 
+# Presentation-oriented supporting text sizes.  The existing main and panel
+# title strings and title sizes are intentionally left unchanged.
+AXIS_LABEL_FONT_SIZE = 22
+TICK_FONT_SIZE = 19
+LEGEND_FONT_SIZE = 18
+ANNOTATION_FONT_SIZE = 18
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -259,7 +267,7 @@ def _draw(
             xy=exemplar_mean_xy.tolist(),
             xytext=(11, 10),
             textcoords="offset points",
-            fontsize=9,
+            fontsize=ANNOTATION_FONT_SIZE,
             color=color,
             weight="bold",
             zorder=12,
@@ -334,8 +342,13 @@ def _draw(
             fontsize=10,
         )
         axis.grid(alpha=0.18)
-        axis.set_xlabel("PC1")
-        axis.set_ylabel("PC2")
+        axis.set_xlabel("PC1", fontsize=AXIS_LABEL_FONT_SIZE)
+        axis.set_ylabel("PC2", fontsize=AXIS_LABEL_FONT_SIZE)
+        axis.tick_params(
+            axis="both",
+            which="major",
+            labelsize=TICK_FONT_SIZE,
+        )
 
     marker_handles = [
         Line2D(
@@ -373,14 +386,25 @@ def _draw(
         handles=[*class_handles, *marker_handles],
         loc="best",
         framealpha=0.94,
-        fontsize=9,
+        fontsize=LEGEND_FONT_SIZE,
     )
     overview.set_title(
         "Shared PCA overview: full training distribution vs retained exemplars",
         fontsize=13,
     )
-    overview.set_xlabel(f"PC1 ({100.0 * explained[0]:.1f}% variance)")
-    overview.set_ylabel(f"PC2 ({100.0 * explained[1]:.1f}% variance)")
+    overview.set_xlabel(
+        f"PC1 ({100.0 * explained[0]:.1f}% variance)",
+        fontsize=AXIS_LABEL_FONT_SIZE,
+    )
+    overview.set_ylabel(
+        f"PC2 ({100.0 * explained[1]:.1f}% variance)",
+        fontsize=AXIS_LABEL_FONT_SIZE,
+    )
+    overview.tick_params(
+        axis="both",
+        which="major",
+        labelsize=TICK_FONT_SIZE,
+    )
     overview.grid(alpha=0.18)
     figure.suptitle(
         f"Full-data vs 20-exemplar prototype estimation | "
